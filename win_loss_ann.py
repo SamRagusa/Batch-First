@@ -11,10 +11,8 @@ from tensorflow.contrib.learn.python.learn.estimators import model_fn as model_f
 
 tf.logging.set_verbosity(tf.logging.INFO)
 
-
 if __name__ == "__main__":
     tf.app.run()
-
 
 sess = tf.InteractiveSession()
 
@@ -28,6 +26,10 @@ def data_pipeline(filenames, batch_size, num_epochs=None, min_after_dequeue=1000
     which gets a random batch of the data, and the second element is
     a graph operation to get a batch of the labels corresponding
     to the data gotten by the first element of the tuple.
+    
+    NOTES:
+    1) This should be done on the CPU while the GPU handles the training
+    and evaluation.
     """
     filename_queue = tf.train.string_input_producer(filenames, num_epochs=num_epochs)
     
@@ -46,15 +48,6 @@ def data_pipeline(filenames, batch_size, num_epochs=None, min_after_dequeue=1000
         min_after_dequeue=min_after_dequeue)
     return example_batch, label_batch
 
-
-FILENAMES = ["small_dataset.csv"]
-BATCH_SIZE = 100
-MIN_AFTER_DEQUEUE = 500
-
-
-example_batch, label_batch = data_pipeline(FILENAMES,BATCH_SIZE, min_after_dequeue=MIN_AFTER_DEQUEUE)
-
-   
 
 def cnn_model_fn(features, labels, mode):
     """
@@ -112,7 +105,7 @@ def cnn_model_fn(features, labels, mode):
         
         NOTES:
         1) Make sure altering the_input doesn't have a pointer related problem
-        2) Add in the error messages where written in comment
+        2) Add in the error messages where written in comments
         """
         
         if dropout_rates == None:
@@ -138,45 +131,46 @@ def cnn_model_fn(features, labels, mode):
         return the_input
     
     
+    NUM_OUTPUT_NEURONS = 2
+    INCEPTION_1_SHAPE = [[[100,2]],[[150,3]],[[250,5]]]
+    INCEPTION_2_SHAPE = [[[250,1]],[[250,1],[150,3]],[[250,1],[250,5]]]
+    DENSE_LAYERS_SHAPE = [2048,4096,512]
+    DENSE_LAYERS_DROPOUT_RATES = .4
+    LEARNING_RATE = .001
+    
     input_layer = tf.reshape(features, [-1,8,8,1])
 
-    conv1 = tf.layers.conv2d(
-        inputs=input_layer,
-        filters=32,
-        kernel_size=[3, 3],
-        padding="same",
-        activation=tf.nn.relu)
+    inception_module1 = build_inception_module(input_layer, INCEPTION_1_SHAPE)
+    
+    inception_module2 = build_inception_module(inception_module1, INCEPTION_2_SHAPE)
 
-    conv2 = tf.layers.conv2d(
-        inputs=conv1,
-        filters=64,
-        kernel_size=[5, 5],
-        padding="same",
-            activation=tf.nn.relu)
+    #650 is product of every dimension after 0th in inception_module2
+    FIGURE_THIS_OUT_AS_FUNCTION_OF_CONSTANTS = 650*8*8  
     
-    conv2_flat = tf.reshape(conv2, [-1, 8 * 8 * 64])
+    flat_conv_output = tf.reshape(inception_module2, [-1, FIGURE_THIS_OUT_AS_FUNCTION_OF_CONSTANTS])
     
-    dense = tf.layers.dense(inputs=conv2_flat, units=1024, activation=tf.nn.relu)
+    dense_layers_outputs = build_fully_connected_layers(
+        flat_conv_output,
+        DENSE_LAYERS_SHAPE,
+        DENSE_LAYERS_DROPOUT_RATES)
     
-    dropout = tf.layers.dropout(inputs=dense, rate=0.4, training=mode == learn.ModeKeys.TRAIN)
     
-    logits = tf.layers.dense(inputs=dropout, units=2)
+    logits = tf.layers.dense(inputs=dense_layers_outputs, units=NUM_OUTPUT_NEURONS)
     
     loss = None
     train_op = None
     
     # Calculate loss (for both TRAIN and EVAL modes)
     if mode != learn.ModeKeys.INFER:
-        onehot_labels = tf.one_hot(indices=tf.cast(labels, tf.int32), depth=10)
         loss = tf.losses.softmax_cross_entropy(
-            onehot_labels=onehot_labels, logits=logits)
+            onehot_labels=labels, logits=logits)
         
     # Configure the Training Op (for TRAIN mode)
     if mode == learn.ModeKeys.TRAIN:
         train_op = tf.contrib.layers.optimize_loss(
             loss=loss,
             global_step=tf.contrib.framework.get_global_step(),
-            learning_rate=0.001,
+            learning_rate=LEARNING_RATE,
             optimizer="SGD")
         
     # Generate Predictions
@@ -190,3 +184,5 @@ def cnn_model_fn(features, labels, mode):
     return model_fn_lib.ModelFnOps(
         mode=mode, predictions=predictions, loss=loss, train_op=train_op)
     
+    
+
