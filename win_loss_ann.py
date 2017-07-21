@@ -11,8 +11,6 @@ from tensorflow.contrib.learn.python.learn.estimators import model_fn as model_f
 
 tf.logging.set_verbosity(tf.logging.INFO)
 
-if __name__ == "__main__":
-    tf.app.run()
 
 sess = tf.InteractiveSession()
 
@@ -44,8 +42,11 @@ def data_pipeline(filenames, batch_size, num_epochs=None, min_after_dequeue=1000
     capacity = min_after_dequeue + 3 * batch_size 
     
     example_batch, label_batch = tf.train.shuffle_batch(
-        [example_op, label_op], batch_size=batch_size, capacity=capacity,
+        [example_op, label_op],
+        batch_size=batch_size,
+        capacity=capacity,
         min_after_dequeue=min_after_dequeue)
+    
     return example_batch, label_batch
 
 
@@ -184,5 +185,65 @@ def cnn_model_fn(features, labels, mode):
     return model_fn_lib.ModelFnOps(
         mode=mode, predictions=predictions, loss=loss, train_op=train_op)
     
+def main(unused_param):
+    """
+    Sets up the data pipeline, creates the computational graph, and trains the model.
+    """
+    TRAINING_DATA_FILENAME = "small_dataset.csv"
+    SAVE_MODEL_DIR = "/tmp/win_loss_ann1"
+    BATCH_SIZE = 100  #NEED TO SET THIS
+    MIN_AFTER_DEQUEUE = 1000
+    NUM_EPOCHS = 10
+    LOG_ITERATION_INTERVAL = 2
+   
     
-
+    # Set up the data pipeline
+    training_data_pipe_ops = data_pipeline(    #MAKE SURE THAT THIS WILL WORK WHEN DONE ON MANY ITERATIONS
+        [TRAINING_DATA_FILENAME],
+        BATCH_SIZE, 
+        min_after_dequeue=MIN_AFTER_DEQUEUE)
+    
+    def input_data_fn(data_getter_ops):
+        """
+        The function which is called to get data for the fit function.
+        
+        NOTES:
+        1) Must make sure that this is not greatly slowing everything down
+        2) Should make this and all other data pipeline graph operations
+            run on CPU while the GPUs do the heavy math operations
+        3) Figure out if I can start the coordinator and the queue runners
+            and continue getting batches until the epoch is complete, then 
+            request_stop() and join the thread.  Need to reread the queue_runner
+            guides on TensorFlow's website.
+        """
+        coord = tf.train.Coordinator()
+        threads = tf.train.start_queue_runners(coord=coord)
+        batch, labels = sess.run(data_getter_ops)
+        coord.request_stop()
+        coord.join(threads)
+        
+        return tf.constant(batch, dtype=tf.float32), tf.constant(labels, tf.int32)
+        
+    
+    # Create the Estimator
+    classifier = learn.Estimator(
+        model_fn=cnn_model_fn,
+        model_dir=SAVE_MODEL_DIR)
+    
+    # Set up logging for testing
+    tensors_to_log = {"probabilities": "softmax_tensor"}   #Picked randomly for learning purposes
+    logging_hook = tf.train.LoggingTensorHook(
+        tensors=tensors_to_log,
+        every_n_iter=LOG_ITERATION_INTERVAL)
+    
+    # Train the model
+    classifier.fit(
+        input_fn=lambda: input_data_fn(training_data_pipe_ops),
+        steps=NUM_EPOCHS,
+        monitors=[logging_hook])
+    
+    
+    
+if __name__ == "__main__":
+    tf.app.run()
+    
