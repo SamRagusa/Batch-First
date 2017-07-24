@@ -65,7 +65,6 @@ def cnn_model_fn(features, labels, mode):
         
         NOTES:
         1) Add naming for use with TensorBoard
-        2)test to see if this works
         """
         
         path_outputs = [None for _ in range(len(module))]  ##See if I can do [None]*len(module) instead
@@ -89,8 +88,7 @@ def cnn_model_fn(features, labels, mode):
         path_outputs[-1] = cur_input
         return tf.nn.relu(tf.concat([temp_input for temp_input in path_outputs],3))
     
-    
-    def build_fully_connected_layers(the_input, shape, dropout_rates=None):
+    def build_fully_connected_layers(the_input, shape, dropout_rates=None, num_previous_fully_connected_layers=0):
         """
         a function to build the fully connected layers onto the computational graph from
         given specifications.
@@ -106,7 +104,7 @@ def cnn_model_fn(features, labels, mode):
         
         NOTES:
         1) Make sure altering the_input doesn't have a pointer related problem
-        2) Add in the error messages where written in comments
+        2) Add in the error messages where written in comment
         """
         
         if dropout_rates == None:
@@ -120,22 +118,24 @@ def cnn_model_fn(features, labels, mode):
         else:
             if len(dropout_rates) != len(shape):
                 #PRINT THE ERROR
-                pass       
+                pass
+                
         
-        for size, dropout in zip(shape, dropout_rates):
-            temp_layer_dense = tf.layers.dense(inputs=the_input, units=size, activation=tf.nn.relu)
+        for index, size, dropout in zip(range(len(shape)),shape, dropout_rates):
+            #Figure out if instead I should use tf.layers.fully_connected instead of tf.layers.dense
+            temp_layer_dense = tf.layers.dense(inputs=the_input, units=size, activation=tf.nn.relu, name="FC_" + str(index + num_previous_fully_connected_layers))
             if dropout != 0:
                 the_input =  tf.layers.dropout(inputs=temp_layer_dense, rate=dropout, training=mode == learn.ModeKeys.TRAIN)
             else:
                 the_input = temp_layer_dense
         
         return the_input
-    
+        
     
     NUM_OUTPUT_NEURONS = 2
     INCEPTION_1_SHAPE = [[[100,2]],[[150,3]],[[250,5]]]
     INCEPTION_2_SHAPE = [[[250,1]],[[250,1],[150,3]],[[250,1],[250,5]]]
-    DENSE_LAYERS_SHAPE = [2048,4096,512]
+    DENSE_LAYERS_SHAPE = [500]#[2048,4096,512]
     DENSE_LAYERS_DROPOUT_RATES = .4
     LEARNING_RATE = .001
     
@@ -145,11 +145,12 @@ def cnn_model_fn(features, labels, mode):
     
     inception_module2 = build_inception_module(inception_module1, INCEPTION_2_SHAPE)
 
-    #650 is product of every dimension after 0th in inception_module2
+    #650 is the sum of the number of features in the last
+    #section of each "path" in the inception layer.
+    #The 8s are the dimensions of each feature map
     FIGURE_THIS_OUT_AS_FUNCTION_OF_CONSTANTS = 650*8*8  
     
     flat_conv_output = tf.reshape(inception_module2, [-1, FIGURE_THIS_OUT_AS_FUNCTION_OF_CONSTANTS])
-    
     dense_layers_outputs = build_fully_connected_layers(
         flat_conv_output,
         DENSE_LAYERS_SHAPE,
@@ -181,23 +182,28 @@ def cnn_model_fn(features, labels, mode):
         logits, name="softmax_tensor")
     }
         
+    summaries = tf.contrib.layers.summarize_tensors(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES))
+    summary_hook = tf.train.SummarySaverHook(save_steps = 2, output_dir ="/tmp/win_loss_ann", summary_op=summaries)
+
     # Return a ModelFnOps object
     return model_fn_lib.ModelFnOps(
-        mode=mode, predictions=predictions, loss=loss, train_op=train_op)
+        mode=mode, predictions=predictions, loss=loss, train_op=train_op, training_hooks=[summary_hook])
     
+
 def main(unused_param):
     """
     Sets up the data pipeline, creates the computational graph, and trains the model.
     """
     TRAINING_DATA_FILENAME = "small_dataset.csv"
     SAVE_MODEL_DIR = "/tmp/win_loss_ann1"
-    BATCH_SIZE = 100  #NEED TO SET THIS
+    BATCH_SIZE = 200
     MIN_AFTER_DEQUEUE = 1000
     NUM_EPOCHS = 10
+    PRINT_ITERATION_INTERVAL = 2
     LOG_ITERATION_INTERVAL = 2
    
     
-    # Set up the data pipeline
+    # Set up the training data pipeline
     training_data_pipe_ops = data_pipeline(    #MAKE SURE THAT THIS WILL WORK WHEN DONE ON MANY ITERATIONS
         [TRAINING_DATA_FILENAME],
         BATCH_SIZE, 
@@ -230,20 +236,24 @@ def main(unused_param):
         model_fn=cnn_model_fn,
         model_dir=SAVE_MODEL_DIR)
     
-    # Set up logging for testing
-    tensors_to_log = {"probabilities": "softmax_tensor"}   #Picked randomly for learning purposes
-    logging_hook = tf.train.LoggingTensorHook(
-        tensors=tensors_to_log,
-        every_n_iter=LOG_ITERATION_INTERVAL)
+    # Set up logging for predictions
+    tensors_to_print = {"probabilities": "softmax_tensor"} #Picked randomly for learning purposes
+    print_logging_hook = tf.train.LoggingTensorHook(
+        tensors=tensors_to_print,
+        every_n_iter=PRINT_ITERATION_INTERVAL)
     
+#     save_logging_hook = tf.train.SummarySaverHook(
+#         save_steps = LOG_ITERATION_INTERVAL,
+#         output_dir=SAVE_MODEL_DIR,
+#         summary_op = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope="temp"))
+
     # Train the model
     classifier.fit(
         input_fn=lambda: input_data_fn(training_data_pipe_ops),
-        steps=NUM_EPOCHS,
-        monitors=[logging_hook])
+        steps=NUM_EPOCHS)
     
-    
-    
+
 if __name__ == "__main__":
     tf.app.run()
+    
     
