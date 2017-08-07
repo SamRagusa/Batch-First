@@ -30,25 +30,26 @@ def data_pipeline(filenames, batch_size, num_epochs=None, min_after_dequeue=1000
     1) This should be done on the CPU while the GPU handles the training
     and evaluation.
     """
-    filename_queue = tf.train.string_input_producer(filenames, num_epochs=num_epochs)
-    
-    reader = tf.TextLineReader()
-    _, value = reader.read(filename_queue)
-    
-    row = tf.decode_csv(value, record_defaults=[[0.0] for _ in range(66)])
-    
-    #change the row[:len(row)-2] type stuff to be more pythonic
-    example_op, label_op  = tf.stack(row[:len(row)-2]), tf.stack(row[len(row)-2:])
-    
-    capacity = min_after_dequeue + 3 * batch_size 
-    
-    example_batch, label_batch = tf.train.shuffle_batch(
-        [example_op, label_op],
-        batch_size=batch_size,
-        capacity=capacity,
-        min_after_dequeue=min_after_dequeue)
-    
-    return example_batch, label_batch
+    with tf.name_scope("data_pipeline"):
+        filename_queue = tf.train.string_input_producer(filenames, num_epochs=num_epochs)
+        
+        reader = tf.TextLineReader()
+        _, value = reader.read(filename_queue)
+        
+        row = tf.decode_csv(value, record_defaults=[[0.0] for _ in range(66)])
+        
+        #change the row[:len(row)-2] type stuff to be more pythonic
+        example_op, label_op  = tf.stack(row[:len(row)-2]), tf.stack(row[len(row)-2:])
+        
+        capacity = min_after_dequeue + 3 * batch_size 
+        
+        example_batch, label_batch = tf.train.shuffle_batch(
+            [example_op, label_op],
+            batch_size=batch_size,
+            capacity=capacity,
+            min_after_dequeue=min_after_dequeue)
+        
+        return example_batch, label_batch
 
 
 def cnn_model_fn(features, labels, mode):
@@ -99,6 +100,7 @@ def cnn_model_fn(features, labels, mode):
             activation_summaries.append(layers.summarize_activation(final_layer))
             
         return final_layer, activation_summaries
+    
     
     def build_fully_connected_layers(the_input, shape, dropout_rates=None, num_previous_fully_connected_layers=0):
         """
@@ -154,23 +156,26 @@ def cnn_model_fn(features, labels, mode):
     TRAIN_OP_SUMMARIES = ["learning_rate", "gradients", "gradient_norm"]
     THE_OPTIMIZER = "SGD"
     NUM_OUTPUT_NEURONS = 2
-    INCEPTION_1_SHAPE = [[[100,2]],[[150,3]],[[250,5]]]
-    INCEPTION_2_SHAPE = [[[250,1]],[[250,1],[150,3]],[[250,1],[250,5]]]
-    DENSE_LAYERS_SHAPE = [1024]#[2048,4096,512]
+    INCEPTION_1_SHAPE = [[[200,2]],[[300,3]],[[500,5]]]
+    INCEPTION_2_SHAPE = [[[500,1]],[[500,1],[300,3]],[[500,1],[500,5]]]
+    DENSE_LAYERS_SHAPE = [2048,4096,512]
     DENSE_LAYERS_DROPOUT_RATES = .4
     LEARNING_RATE = .001
     SAVE_SUMMARY_INTERVAL = 5
+
+    
+    #activation_summaries = []
     
     input_layer = tf.reshape(features, [-1,8,8,1])
-    
+
     inception_module1, activation_summaries = build_inception_module(input_layer, INCEPTION_1_SHAPE)
     
     inception_module2, activation_summaries = build_inception_module(inception_module1, INCEPTION_2_SHAPE, activation_summaries,1)
 
-    #650 is the sum of the number of features in the last
+    #1300 is the sum of the number of features in the last
     #section of each "path" in the inception layer.
     #The 8s are the dimensions of each feature map
-    FIGURE_THIS_OUT_AS_FUNCTION_OF_CONSTANTS = 650*8*8  
+    FIGURE_THIS_OUT_AS_FUNCTION_OF_CONSTANTS = 1300*8*8  
     
     flat_conv_output = tf.reshape(inception_module2, [-1, FIGURE_THIS_OUT_AS_FUNCTION_OF_CONSTANTS])
     dense_layers_outputs = build_fully_connected_layers(
@@ -205,15 +210,19 @@ def cnn_model_fn(features, labels, mode):
         "probabilities": tf.nn.softmax(
         logits, name="softmax_tensor")
     }
-        
+    
     #Create the trainable variable summaries and merge them together to give to a hook
     trainable_var_summaries = layers.summarize_tensors(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES))  #Not sure if needs to be set as a variable, should check
     merged_summaries = tf.summary.merge_all()
     summary_hook = tf.train.SummarySaverHook(save_steps = SAVE_SUMMARY_INTERVAL, output_dir ="/tmp/win_loss_ann", summary_op=merged_summaries)
-
+    
     # Return a ModelFnOps object
     return model_fn_lib.ModelFnOps(
-        mode=mode, predictions=predictions, loss=loss, train_op=train_op, training_hooks=[summary_hook])
+        mode=mode, 
+        predictions=predictions,
+        loss=loss,
+        train_op=train_op,
+        training_hooks=[summary_hook])
     
 
 def main(unused_param):
@@ -223,17 +232,22 @@ def main(unused_param):
     
     #set these constants up with something like flags to better be able
     #to run modified versions of the model in the future (when tuning the model)
-    TRAINING_DATA_FILENAME = "small_dataset.csv"
-    SAVE_MODEL_DIR = "/tmp/win_loss_ann1"
-    BATCH_SIZE = 100  #NEED TO SET THIS
+    TRAINING_DATA_FILENAME = "tensor_flow_input_database.csv"
+    SAVE_MODEL_DIR = "/tmp/win_loss_ann123"
+    VALIDATION_DATA = None              #Need to load these up, likely should keep them in RAM because it'd be quick
+    VALIDATION_LABELS = None            #Need to load these up, likely should keep them in RAM because it'd be quick
+    TEST_DATA = None                    #Need to load these up, likely should keep them in RAM because it'd be quick
+    TEST_LABELS = None                  #Need to load these up, likely should keep them in RAM because it'd be quick
+    BATCH_SIZE = 500  #NEED TO SET THIS
     MIN_AFTER_DEQUEUE = 1000
     NUM_EPOCHS = 200
     PRINT_ITERATION_INTERVAL = 2
-    SNAPSHOT_INTERVAL = 50
+    SNAPSHOT_INTERVAL = 25
+    VALIDATION_INTERVAL = 50
     #LOG_ITERATION_INTERVAL = 2
    
     
-    # Set up the training data pipeline
+    # Load training and eval data
     training_data_pipe_ops = data_pipeline(    #MAKE SURE THAT THIS WILL WORK WHEN DONE ON MANY ITERATIONS
         [TRAINING_DATA_FILENAME],
         BATCH_SIZE, 
@@ -266,21 +280,42 @@ def main(unused_param):
         model_fn=cnn_model_fn,
         model_dir=SAVE_MODEL_DIR)
     
+    checkpoint_saver = tf.train.CheckpointSaverHook(
+        SAVE_MODEL_DIR,
+        save_steps=SNAPSHOT_INTERVAL)
+    
     # Set up logging for predictions
     tensors_to_print = {"loss": "softmax_cross_entropy_loss/value:0"}
     print_logging_hook = tf.train.LoggingTensorHook(
         tensors=tensors_to_print,
         every_n_iter=PRINT_ITERATION_INTERVAL)
-
-    # Train the model
+    
+    #Set up testing of validation data at a given interval
+    validation_monitor = tf.contrib.learn.monitors.ValidationMonitor(
+        VALIDATION_DATA,
+        VALIDATION_LABELS,
+        every_n_steps=VALIDATION_INTERVAL)
+    
     classifier.fit(
         input_fn=lambda: input_data_fn(training_data_pipe_ops),
         steps=NUM_EPOCHS,
-        monitors=[print_logging_hook],
-        snapshot_step=SNAPSHOT_INTERVAL)
+        monitors=[validation_monitor, print_logging_hook, checkpoint_saver])
     
+    
+    # Configure the accuracy metric for evaluation
+    metrics = {
+        "accuracy": learn.MetricSpec(
+            metric_fn=tf.metrics.accuracy, prediction_key="classes"),
+    }
+    
+    # Evaluate the model and print results
+    eval_results = classifier.evaluate(
+        x=TEST_DATA,
+        y=TEST_LABELS,
+        metrics=metrics)
+    
+    print(eval_results)
+
 
 if __name__ == "__main__":
     tf.app.run()
-    
-    
