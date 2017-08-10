@@ -226,11 +226,14 @@ def cnn_model_fn(features, labels, mode, params):
         train_op=train_op,
         training_hooks=[summary_hook])
     
-
+    
 
 def main(unused_param):
     """
     Set up the data pipelines, create the computational graph, train the model, and evaluate the results.
+    
+    SUPER IMPORTANT NOTES:!!!!!!!!!!!!!
+    1)######FIGURE OUT IF I NEED TO INITIALIZE ALL THE VARIABLES SOMEWHERE.  THIS COULD BE WHY RELOADING FAILS########
     """
     
     def accuracy_metric(predictions, labels,weights=None):
@@ -246,40 +249,48 @@ def main(unused_param):
     def input_data_fn(data_getter_ops):
         """
         The function which is called to get data for the fit functSion.
-        
-        NOTES:
-        1) Need to build a better method for keeping track of threads.  This is
-        very important for running over multiple epochs.
         """
-#         coord = tf.train.Coordinator()
-#         threads = tf.train.start_queue_runners(coord=coord)
         batch, labels = sess.run(data_getter_ops)
-#         coord.request_stop()
-#         coord.join(threads)
         
         #See if these tf.constant() calls are needed or if I should have them be computed elsewhere
         return tf.constant(batch, dtype=tf.float32), tf.constant(labels, dtype=tf.float32)
     
+    def line_counter(file_name):
+        def blocks(files, size=65536):
+            while True:
+                b = files.read(size)
+                if not b:
+                    break
+                yield b
+
+        with open(file_name, "r") as f:
+            return sum(bl.count("\n") for bl in blocks(f))
+    
     #Hopefully set these constants up with something like flags to better be able
     #to run modified versions of the model in the future (when tuning the model)
-    SAVE_MODEL_DIR = "/tmp/win_loss_ann"
+    SAVE_MODEL_DIR = "/tmp/win_loss_ann123456789"
     TRAINING_DATA_FILENAME = "train_data.csv"
     VALIDATION_FILENAME = "validation_data.csv"
     TESTING_FILENAME = "test_data.csv"
     NUM_OUTPUTS = 2
-    DENSE_SHAPE = [500]#[2048,4096,512]
+    DENSE_SHAPE = [512]#[2048,4096,512]
     DENSE_DROPOUT = .4   #NEED TO PICK THIS PROPERLY
     OPTIMIZER = "SGD"    #NEED TO PICK THIS PROPERLY
     TRAINING_MIN_AFTER_DEQUEUE = 1500      
-    TESTING_MIN_AFTER_DEQUEUE = 2000
+    TESTING_MIN_AFTER_DEQUEUE = 1000
     TRAINING_BATCH_SIZE = 500  #NEED TO PICK THIS PROPERLY
+    VALIDATION_BATCH_SIZE = 1000
     TESTING_BATCH_SIZE = 1000
-    NUM_TESTING_STEPS = 200       #Should be set to number_of_testing_examples//TESTING_BATCH_SIZE
-    NUM_EPOCHS =  2000     #I think where I'm passing this parameter to isn't actually epochs, it's batches
-    LOG_ITERATION_INTERVAL = 100
+    NUM_EPOCHS =  3     
+    LOG_ITERATION_INTERVAL = 200
     INCEPTION_MODULE_1_SHAPE = [[[200,2]],[[300,3]],[[500,5]]]
     INCEPTION_MODULE_2_SHAPE = [[[500,1]],[[500,1],[300,3]],[[500,1],[500,5]]]
     LEARNING_RATE = .001   #NEED TO PICK THIS PROPERLY
+    BATCHES_IN_TRAINING_EPOCH = 200 #line_counter(TRAINING_DATA_FILENAME)//TRAINING_BATCH_SIZE
+    BATCHES_IN_VALIDATION_EPOCH = 500#line_counter(VALIDATION_FILENAME)//VALIDATION_BATCH_SIZE
+    BATCHES_IN_TESTING_EPOCH = 500#line_counter(TESTING_FILENAME)//TESTING_BATCH_SIZE
+    
+    
     
     #Create training data pipeline
     training_data_pipe_ops = data_pipeline(    #MAKE SURE THAT THIS WILL WORK WHEN DONE ON MANY ITERATIONS (because I'm pretty sure it won't)
@@ -287,16 +298,21 @@ def main(unused_param):
         TRAINING_BATCH_SIZE, 
         min_after_dequeue=TRAINING_MIN_AFTER_DEQUEUE)
     
+    validation_data_pipe_ops = data_pipeline(
+        [TESTING_FILENAME],
+        TESTING_BATCH_SIZE,
+        min_after_dequeue=TESTING_MIN_AFTER_DEQUEUE)
+    
     #Create testing data pipeline
     testing_data_pipe_ops = data_pipeline(
         [TESTING_FILENAME],
         TESTING_BATCH_SIZE,
-        min_after_dequeue=TRAINING_MIN_AFTER_DEQUEUE)
+        min_after_dequeue=TESTING_MIN_AFTER_DEQUEUE)
 
     
     coord = tf.train.Coordinator()
     threads = tf.train.start_queue_runners(coord=coord)
-    
+        
     
 
     #Create a Config object such that during training the saves and logs will be done at the intervals I want
@@ -320,30 +336,42 @@ def main(unused_param):
             "learning_rate": LEARNING_RATE})
     
     
-    #Set up testing of validation data at a given interval
-#     validation_monitor = tf.contrib.learn.monitors.ValidationMonitor(
-#         VALIDATION_DATA,
-#         VALIDATION_LABELS,
-# #         metrics = validation_metrics,
-#         every_n_steps=LOG_ITERATION_INTERVAL)
+    validation_metrics = {
+        "prediction accuracy": learn.MetricSpec(
+            metric_fn= accuracy_metric,
+            prediction_key="classes")}
+#         "precision": tf.contrib.learn.MetricSpec(
+#             metric_fn=tf.contrib.metrics.streaming_precision,
+#             prediction_key=tf.contrib.learn.PredictionKey.CLASSES),
+#         "recall": tf.contrib.learn.MetricSpec(
+#             metric_fn=tf.contrib.metrics.streaming_recall,
+#             prediction_key=tf.contrib.learn.PredictionKey.CLASSES)}
     
-
-    #fit the model to the training data given 
-    classifier.fit(
-        input_fn=lambda: input_data_fn(training_data_pipe_ops),
-        steps=NUM_EPOCHS)
-
+    
+    for j in range(NUM_EPOCHS):
+        classifier.fit(
+            input_fn=lambda: input_data_fn(training_data_pipe_ops),
+            steps = BATCHES_IN_TRAINING_EPOCH)
+        print("Epoch", str(j+1), "training completed.")
+        
+        validation_results = classifier.evaluate(
+            input_fn=lambda: input_data_fn(validation_data_pipe_ops),
+            metrics=validation_metrics,
+            steps=BATCHES_IN_VALIDATION_EPOCH)
+         
+        print(validation_results)
+ 
     #Configure the accuracy metric for evaluation 
     testing_metrics = {
         "prediction accuracy": learn.MetricSpec(
             metric_fn= accuracy_metric,
             prediction_key="classes")}
-
+ 
     #Evaluate the model and print results
     eval_results = classifier.evaluate(
         input_fn=lambda: input_data_fn(testing_data_pipe_ops),
         metrics=testing_metrics,
-        steps=NUM_TESTING_STEPS)  #steps is here so that the data pipeline doesn't make it hang
+        steps=BATCHES_IN_TESTING_EPOCH)  #steps is here so that the data pipeline doesn't go on forever
     
     coord.request_stop()
     coord.join(threads)
