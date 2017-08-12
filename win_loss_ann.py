@@ -3,53 +3,17 @@ Created on Jul 2, 2017
 
 @author: Samuel Ragusa
 '''
+from functools import reduce
 import tensorflow as tf
 from tensorflow.contrib import learn
 from tensorflow.contrib import layers
 from tensorflow.contrib.learn.python.learn.estimators import model_fn as model_fn_lib
-
-
 
 tf.logging.set_verbosity(tf.logging.INFO)
 
 
 sess = tf.InteractiveSession()
 
-
-def data_pipeline(filenames, batch_size, num_epochs=None, min_after_dequeue=10000):
-    """
-    Creates a pipeline for the data contained within the given files.  
-    It does this using TensorFlow queues.
-    
-    @return: A tuple in which the first element is a graph operation
-    which gets a random batch of the data, and the second element is
-    a graph operation to get a batch of the labels corresponding
-    to the data gotten by the first element of the tuple.
-    
-    NOTES:
-    1) This should be done on the CPU while the GPU handles the training
-    and evaluation.
-    """
-    with tf.name_scope("data_pipeline"):
-        filename_queue = tf.train.string_input_producer(filenames, num_epochs=num_epochs)
-        
-        reader = tf.TextLineReader()
-        _, value = reader.read(filename_queue)
-        
-        row = tf.decode_csv(value, record_defaults=[[0.0] for _ in range(66)])
-        
-        #change the row[:len(row)-2] type stuff to be more pythonic
-        example_op, label_op  = tf.stack(row[:len(row)-2]), tf.stack(row[len(row)-2:])
-        
-        capacity = min_after_dequeue + 3 * batch_size 
-        
-        example_batch, label_batch = tf.train.shuffle_batch(
-            [example_op, label_op],
-            batch_size=batch_size,
-            capacity=capacity,
-            min_after_dequeue=min_after_dequeue)
-        
-        return example_batch, label_batch
 
 
 def cnn_model_fn(features, labels, mode, params):
@@ -97,11 +61,10 @@ def cnn_model_fn(features, labels, mode, params):
         
         with tf.name_scope("inception_module_" + str(num_previously_built_inception_modules + 1) + "_concat"):
             final_layer = tf.nn.relu(tf.concat([temp_input for temp_input in path_outputs],3), name="inception_module_" + str(num_previously_built_inception_modules + 1) + "_concat")
-            #Currently not doing this activaton summary because as of now it is not very helpful.
+            #Currently not doing this activaton summary because as of now (and maybe forever) it is not very helpful.
             #activation_summaries.append(layers.summarize_activation(final_layer))
             
         return final_layer, activation_summaries
-    
     
     def build_fully_connected_layers(the_input, shape, dropout_rates=None, num_previous_fully_connected_layers=0):
         """
@@ -134,7 +97,6 @@ def cnn_model_fn(features, labels, mode, params):
                     #PRINT THE ERROR BETTER
                     print("THIS ERROR NEEDS TO BE HANDLED BETTER!   2")
                     
-            
             for index, size, dropout in zip(range(len(shape)),shape, dropout_rates):
                 #Figure out if instead I should use tf.layers.fully_connected
                 temp_layer_dense = tf.layers.dense(inputs=the_input, units=size, activation=tf.nn.relu, name="FC_" + str(index + num_previous_fully_connected_layers + 1))
@@ -146,45 +108,28 @@ def cnn_model_fn(features, labels, mode, params):
             return the_input
         
     
-    #for TRAIN_OP_SUMMARIES loss is an option but as of now it is being
-    #logged independently so that it can be easily added to another hook.
-    TRAIN_OP_SUMMARIES = ["learning_rate", "gradients", "gradient_norm"]
-    THE_OPTIMIZER = params['optimizer']
-    NUM_OUTPUT_NEURONS = params['num_outputs']
-    INCEPTION_1_SHAPE = params['inception_module1']
-    INCEPTION_2_SHAPE = params['inception_module2']
-    DENSE_LAYERS_SHAPE = params['dense_shape']
-    DENSE_LAYERS_DROPOUT_RATES = params['dense_dropout']
-    LEARNING_RATE = params['learning_rate']
-    SAVE_SUMMARY_INTERVAL = params['log_interval']
-    SAVE_MODEL_DIR = params['model_dir']
 
     #Reshaped the input data to be like a chess board (8x8) 
     input_layer = tf.reshape(features, [-1,8,8,1])
 
     #Build the first inception module
-    inception_module1, activation_summaries = build_inception_module(input_layer, INCEPTION_1_SHAPE)
+    inception_module1, activation_summaries = build_inception_module(input_layer, params['inception_module1'])
     
     #Build the second inception module
-    inception_module2, activation_summaries = build_inception_module(inception_module1, INCEPTION_2_SHAPE, activation_summaries,1)
-
-    #1300 is the sum of the number of features in the last
-    #section of each "path" in the inception layer.
-    #The 8s are the dimensions of each feature map
-    FIGURE_THIS_OUT_AS_FUNCTION_OF_CONSTANTS = 1300*8*8  
+    inception_module2, activation_summaries = build_inception_module(inception_module1, params['inception_module2'], activation_summaries,1)
     
     #Reshape the output from the convolutional layers for the densely connected layers
-    flat_conv_output = tf.reshape(inception_module2, [-1, FIGURE_THIS_OUT_AS_FUNCTION_OF_CONSTANTS])
+    flat_conv_output = tf.reshape(inception_module2, [-1, reduce(lambda a,b:a*b, inception_module2.get_shape().as_list()[1:]) ])
     
     #Build the fully connected layers 
     dense_layers_outputs = build_fully_connected_layers(
         flat_conv_output,
-        DENSE_LAYERS_SHAPE,
-        DENSE_LAYERS_DROPOUT_RATES)
+        params['dense_shape'],
+        params['dense_dropout'])
     
     
     #Create the final layer of the ANN
-    logits = tf.layers.dense(inputs=dense_layers_outputs, units=NUM_OUTPUT_NEURONS, name="FC_" + str(len(DENSE_LAYERS_SHAPE)+1))
+    logits = tf.layers.dense(inputs=dense_layers_outputs, units=params['num_outputs'], name="FC_" + str(len(params['dense_shape'])+1))
     
     
     #Figure out if these are needed.  Don't think so, but don't have time to think about it right now
@@ -195,16 +140,15 @@ def cnn_model_fn(features, labels, mode, params):
     if mode != learn.ModeKeys.INFER:
         loss = tf.losses.softmax_cross_entropy(
             onehot_labels=labels, logits=logits)
-        tf.summary.scalar('loss_summary', loss)
         
     # Configure the Training Op (for TRAIN mode)
     if mode == learn.ModeKeys.TRAIN:
         train_op = layers.optimize_loss(
             loss=loss,
             global_step=tf.contrib.framework.get_global_step(),
-            learning_rate=LEARNING_RATE,
-            optimizer=THE_OPTIMIZER,
-            summaries = TRAIN_OP_SUMMARIES)
+            learning_rate=params['learning_rate'],
+            optimizer=params['optimizer'],
+            summaries = params['train_summaries'])
         
     # Generate Predictions
     predictions = {
@@ -216,7 +160,7 @@ def cnn_model_fn(features, labels, mode, params):
     #Create the trainable variable summaries and merge them together to give to a hook
     trainable_var_summaries = layers.summarize_tensors(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES))  #Not sure if needs to be set as a variable, should check
     merged_summaries = tf.summary.merge_all()
-    summary_hook = tf.train.SummarySaverHook(save_steps = SAVE_SUMMARY_INTERVAL, output_dir =SAVE_MODEL_DIR, summary_op=merged_summaries)
+    summary_hook = tf.train.SummarySaverHook(save_steps = params['log_interval'], output_dir =params['model_dir'], summary_op=merged_summaries)
     
     # Return a ModelFnOps object
     return model_fn_lib.ModelFnOps(
@@ -228,13 +172,47 @@ def cnn_model_fn(features, labels, mode, params):
     
     
 
+#Figure out how to use this parameter, and write this method to generate a run
+#based on the information given in the parameter
 def main(unused_param):
     """
     Set up the data pipelines, create the computational graph, train the model, and evaluate the results.
     
-    SUPER IMPORTANT NOTES:!!!!!!!!!!!!!
-    1)######FIGURE OUT IF I NEED TO INITIALIZE ALL THE VARIABLES SOMEWHERE.  THIS COULD BE WHY RELOADING FAILS########
+    SUPER IMPORTANT NOTES:
+    1)FIGURE OUT IF I NEED TO INITIALIZE ALL THE VARIABLES SOMEWHERE.  THIS COULD BE WHY RELOADING FAILS
     """
+    
+    def data_pipeline(filenames, batch_size, num_epochs=None, min_after_dequeue=10000):
+        """
+        Creates a pipeline for the data contained within the given files.  
+        It does this using TensorFlow queues.
+        
+        @return: A tuple in which the first element is a graph operation
+        which gets a random batch of the data, and the second element is
+        a graph operation to get a batch of the labels corresponding
+        to the data gotten by the first element of the tuple.
+        """
+        with tf.name_scope("data_pipeline"):
+            filename_queue = tf.train.string_input_producer(filenames, num_epochs=num_epochs)
+            
+            reader = tf.TextLineReader()
+            key, value = reader.read(filename_queue)
+            
+            row = tf.decode_csv(value, record_defaults=[[0.0] for _ in range(66)])
+            
+            #change the row[:len(row)-2] type stuff to be more pythonic
+            example_op, label_op  = tf.stack(row[:len(row)-2]), tf.stack(row[len(row)-2:])  #I think if I switch this to tf.constant() I won't need it in the input_fb
+            
+            capacity = min_after_dequeue + 3 * batch_size 
+            
+            example_batch, label_batch = tf.train.shuffle_batch(
+                [example_op, label_op],
+                batch_size=batch_size,
+                capacity=capacity,
+                min_after_dequeue=min_after_dequeue)
+            
+            return example_batch, label_batch
+    
     
     def accuracy_metric(predictions, labels,weights=None):
         """
@@ -246,16 +224,34 @@ def main(unused_param):
         return tf.reduce_mean(tf.cast(tf.equal(predictions,tf.argmax(labels, 1)),tf.float32))
     
     
+    def precision_metric(predictions, labels,weights=None):
+        """
+        precision = true_positives/(true_positives+false_positives)
+        """
+        pass
+    
+    
+    def recall_metric(predictions, labels, weights=None):
+        """
+        recall = true_positives/(true_positives+false_negatives)
+        """
+        pass
+    
+    
     def input_data_fn(data_getter_ops):
         """
         The function which is called to get data for the fit functSion.
         """
         batch, labels = sess.run(data_getter_ops)
+        #MAYBE USE SPARSE TENSORS FOR THIS 
         
-        #See if these tf.constant() calls are needed or if I should have them be computed elsewhere
+        #See if these tf.constant() calls are needed or if I should have them be computed elsewhere (like in the data pipeline itself)
         return tf.constant(batch, dtype=tf.float32), tf.constant(labels, dtype=tf.float32)
     
     def line_counter(file_name):
+        """
+        A function to count the number of lines in a file efficiently.
+        """
         def blocks(files, size=65536):
             while True:
                 b = files.read(size)
@@ -268,10 +264,11 @@ def main(unused_param):
     
     #Hopefully set these constants up with something like flags to better be able
     #to run modified versions of the model in the future (when tuning the model)
-    SAVE_MODEL_DIR = "/tmp/win_loss_ann123456789"
+    SAVE_MODEL_DIR = "/tmp/win_loss_ann_poop"
     TRAINING_DATA_FILENAME = "train_data.csv"
     VALIDATION_FILENAME = "validation_data.csv"
     TESTING_FILENAME = "test_data.csv"
+    TRAIN_OP_SUMMARIES = ["learning_rate", "loss", "gradients", "gradient_norm"]
     NUM_OUTPUTS = 2
     DENSE_SHAPE = [512]#[2048,4096,512]
     DENSE_DROPOUT = .4   #NEED TO PICK THIS PROPERLY
@@ -282,22 +279,23 @@ def main(unused_param):
     VALIDATION_BATCH_SIZE = 1000
     TESTING_BATCH_SIZE = 1000
     NUM_EPOCHS =  3     
-    LOG_ITERATION_INTERVAL = 200
+    LOG_ITERATION_INTERVAL = 300
     INCEPTION_MODULE_1_SHAPE = [[[200,2]],[[300,3]],[[500,5]]]
     INCEPTION_MODULE_2_SHAPE = [[[500,1]],[[500,1],[300,3]],[[500,1],[500,5]]]
     LEARNING_RATE = .001   #NEED TO PICK THIS PROPERLY
-    BATCHES_IN_TRAINING_EPOCH = 200 #line_counter(TRAINING_DATA_FILENAME)//TRAINING_BATCH_SIZE
-    BATCHES_IN_VALIDATION_EPOCH = 500#line_counter(VALIDATION_FILENAME)//VALIDATION_BATCH_SIZE
+    BATCHES_IN_TRAINING_EPOCH = 1000#line_counter(TRAINING_DATA_FILENAME)//TRAINING_BATCH_SIZE
+    BATCHES_IN_VALIDATION_EPOCH = 400#line_counter(VALIDATION_FILENAME)//VALIDATION_BATCH_SIZE
     BATCHES_IN_TESTING_EPOCH = 500#line_counter(TESTING_FILENAME)//TESTING_BATCH_SIZE
     
     
     
     #Create training data pipeline
-    training_data_pipe_ops = data_pipeline(    #MAKE SURE THAT THIS WILL WORK WHEN DONE ON MANY ITERATIONS (because I'm pretty sure it won't)
+    training_data_pipe_ops = data_pipeline(
         [TRAINING_DATA_FILENAME],
         TRAINING_BATCH_SIZE, 
         min_after_dequeue=TRAINING_MIN_AFTER_DEQUEUE)
     
+    #Create validation data pipeline
     validation_data_pipe_ops = data_pipeline(
         [TESTING_FILENAME],
         TESTING_BATCH_SIZE,
@@ -309,11 +307,9 @@ def main(unused_param):
         TESTING_BATCH_SIZE,
         min_after_dequeue=TESTING_MIN_AFTER_DEQUEUE)
 
-    
+    #Create a coordinator and start the queue_runners using that coordinator
     coord = tf.train.Coordinator()
     threads = tf.train.start_queue_runners(coord=coord)
-        
-    
 
     #Create a Config object such that during training the saves and logs will be done at the intervals I want
     the_config = tf.estimator.RunConfig().replace(save_checkpoints_steps=LOG_ITERATION_INTERVAL, save_summary_steps=LOG_ITERATION_INTERVAL)
@@ -333,9 +329,10 @@ def main(unused_param):
             'model_dir' : SAVE_MODEL_DIR,
             'inception_module1' : INCEPTION_MODULE_1_SHAPE,
             'inception_module2' : INCEPTION_MODULE_2_SHAPE,
-            "learning_rate": LEARNING_RATE})
+            "learning_rate": LEARNING_RATE,
+            "train_summaries" : TRAIN_OP_SUMMARIES})
     
-    
+    #Create the validation metrics to be passed to the classifiers evaluate function
     validation_metrics = {
         "prediction accuracy": learn.MetricSpec(
             metric_fn= accuracy_metric,
@@ -348,12 +345,17 @@ def main(unused_param):
 #             prediction_key=tf.contrib.learn.PredictionKey.CLASSES)}
     
     
+    
     for j in range(NUM_EPOCHS):
-        classifier.fit(
+        classifier.fit(  #MAYBE USE PARTIAL FIT
             input_fn=lambda: input_data_fn(training_data_pipe_ops),
             steps = BATCHES_IN_TRAINING_EPOCH)
+        
         print("Epoch", str(j+1), "training completed.")
         
+        
+        #In the long term this should be done by a SessionRunHook to speed up
+        #computations by deleting this for loop completely
         validation_results = classifier.evaluate(
             input_fn=lambda: input_data_fn(validation_data_pipe_ops),
             metrics=validation_metrics,
@@ -373,6 +375,7 @@ def main(unused_param):
         metrics=testing_metrics,
         steps=BATCHES_IN_TESTING_EPOCH)  #steps is here so that the data pipeline doesn't go on forever
     
+    #Request that the threads being controlled by the coordinator stop, then join them.
     coord.request_stop()
     coord.join(threads)
     
