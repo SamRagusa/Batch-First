@@ -1,7 +1,7 @@
 '''
 Created on Jul 2, 2017
 
-@author: Samuel Ragusa
+@author: SamRagusa
 '''
 from functools import reduce
 import tensorflow as tf
@@ -11,9 +11,7 @@ from tensorflow.contrib.learn.python.learn.estimators import model_fn as model_f
 
 tf.logging.set_verbosity(tf.logging.INFO)
 
-
 sess = tf.InteractiveSession()
-
 
 
 def cnn_model_fn(features, labels, mode, params):
@@ -29,7 +27,7 @@ def cnn_model_fn(features, labels, mode, params):
         The layers will be named "module_N_path_M/layer_P", where N is the inception module number, M is what path number it is on,
         and P is what number layer it is in that path.      
         
-        Module of the format:
+        Module of the format:    
         [[[filters1_1,kernal_size1_1],... , [filters1_M,kernal_size1_M]],... ,
             [filtersN_1,kernal_sizeN_1],... , [filtersN_P,kernal_sizeN_P]]
             
@@ -66,7 +64,7 @@ def cnn_model_fn(features, labels, mode, params):
             
         return final_layer, activation_summaries
     
-    def build_fully_connected_layers(the_input, shape, dropout_rates=None, num_previous_fully_connected_layers=0):
+    def build_fully_connected_layers(the_input, shape, dropout_rates=None, num_previous_fully_connected_layers=0, activation_summaries=[]):
         """
         a function to build the fully connected layers onto the computational graph from
         given specifications.
@@ -100,20 +98,35 @@ def cnn_model_fn(features, labels, mode, params):
             for index, size, dropout in zip(range(len(shape)),shape, dropout_rates):
                 #Figure out if instead I should use tf.layers.fully_connected
                 temp_layer_dense = tf.layers.dense(inputs=the_input, units=size, activation=tf.nn.relu, name="FC_" + str(index + num_previous_fully_connected_layers + 1))
+                activation_summaries.append(layers.summarize_activation(temp_layer_dense))
                 if dropout != 0:
                     the_input =  tf.layers.dropout(inputs=temp_layer_dense, rate=dropout, training=mode == learn.ModeKeys.TRAIN)
                 else:
                     the_input = temp_layer_dense
             
-            return the_input
+            return the_input, activation_summaries
         
     
 
-    #Reshaped the input data to be like a chess board (8x8) 
-    input_layer = tf.reshape(features, [-1,8,8,1])
+    #Reshaped the input data as a 5d tensor for input to the 3d convolution
+    input_layer = tf.reshape(features, [-1,8,8,2,1])  #MAKE SURE THIS WORKS RIGHT
+
+  
+    #Create a layer that convolves in 3 dimensions over the input
+    #NOTE: I should add TensorBoard integration to this 
+    #NOTE: I should make these constants be given by the params dictionary
+    conv3d_input_layer = tf.layers.conv3d(
+        inputs=input_layer,
+        filters=300,
+        kernel_size=[2,2,2],  #[depth, height,width]
+        activation=tf.nn.relu,
+        name="conv3d")  
+    
+    #Reshape the output of the 3 dimensional convolutional layer to a 4d tensor for input to the 2d inception modules
+    reshaped_3d_output = tf.reshape(conv3d_input_layer,[-1,7,7,300])#MAKE SURE THIS WORKS RIGHT
 
     #Build the first inception module
-    inception_module1, activation_summaries = build_inception_module(input_layer, params['inception_module1'])
+    inception_module1, activation_summaries = build_inception_module(reshaped_3d_output, params['inception_module1'])
     
     #Build the second inception module
     inception_module2, activation_summaries = build_inception_module(inception_module1, params['inception_module2'], activation_summaries,1)
@@ -122,14 +135,15 @@ def cnn_model_fn(features, labels, mode, params):
     flat_conv_output = tf.reshape(inception_module2, [-1, reduce(lambda a,b:a*b, inception_module2.get_shape().as_list()[1:]) ])
     
     #Build the fully connected layers 
-    dense_layers_outputs = build_fully_connected_layers(
+    dense_layers_outputs, activation_summaries = build_fully_connected_layers(
         flat_conv_output,
         params['dense_shape'],
-        params['dense_dropout'])
+        params['dense_dropout'],
+        activation_summaries=activation_summaries)
     
     
     #Create the final layer of the ANN
-    logits = tf.layers.dense(inputs=dense_layers_outputs, units=params['num_outputs'], name="FC_" + str(len(params['dense_shape'])+1))
+    logits = tf.layers.dense(inputs=dense_layers_outputs, units=params['num_outputs'], name="logit_layer")
     
     
     #Figure out if these are needed.  Don't think so, but don't have time to think about it right now
@@ -182,6 +196,68 @@ def main(unused_param):
     1)FIGURE OUT IF I NEED TO INITIALIZE ALL THE VARIABLES SOMEWHERE.  THIS COULD BE WHY RELOADING FAILS
     """
     
+    #A tensor referenced when getting indices of characters for the the_values array  
+    mapping_strings = tf.constant(["1","K","Q","R","B","N","P","k","q","r","b","n","p"])
+    
+    #An array where each array of 2 values within it represents the value of the 
+    #board piece at the same index in mapping_strings
+    the_values =  tf.constant(
+        [[0,0],
+        [1,0],
+        [.8,0],
+        [.6,0],
+        [.45,0],
+        [.3,0],
+        [.1,0],
+        [0,1],
+        [0,.8],
+        [0,.6],
+        [0,.45],
+        [0,.3],
+        [0,.1]])
+    
+    #Create the table for getting indices (for the_values) from the information about the board 
+    the_table = tf.contrib.lookup.index_table_from_tensor(mapping=mapping_strings)
+    
+    #Initialize the table of possibilities for what is in each square
+    tf.tables_initializer().run()
+
+
+    def process_line_as_2d_input(row):
+        """
+        Processes a line of the input text file.  It gets a 64x2 representation
+        of the board, and returns it along with the label as a tuple.
+        """
+        #Using the reshape operation to declare the size of the tensor so it's known
+        #(to the computer not to whoever is reading this)
+        data = tf.reshape(
+            #Get the values at the given indices
+            tf.gather(
+                the_values,
+                #Get an array of indices corresponding to the array of characters
+                the_table.lookup(
+                    #Split the string into an array of characters
+                    tf.string_split(
+                        [row[0]],
+                        delimiter="").values)),
+            [64,2])
+        
+        return data, row[1]
+    
+    
+    def aquire_data_ops(filename_queue, processing_method):   
+        """
+        Get the line/lines from the files in the given filename queue,
+        read/decode them, and give them to the given method for processing
+        the information.
+        """
+        reader = tf.TextLineReader()
+        key, value = reader.read(filename_queue)
+        record_defaults = [[""], [tf.constant(0, dtype=tf.int32)]]
+        row = tf.decode_csv(value, record_defaults=record_defaults)
+        return processing_method(row)
+        
+        
     def data_pipeline(filenames, batch_size, num_epochs=None, min_after_dequeue=10000):
         """
         Creates a pipeline for the data contained within the given files.  
@@ -191,17 +267,14 @@ def main(unused_param):
         which gets a random batch of the data, and the second element is
         a graph operation to get a batch of the labels corresponding
         to the data gotten by the first element of the tuple.
+        
+        Notes:
+        1) Should likely take in a parameter of the functions for data formatting and processing
         """
         with tf.name_scope("data_pipeline"):
             filename_queue = tf.train.string_input_producer(filenames, num_epochs=num_epochs)
             
-            reader = tf.TextLineReader()
-            key, value = reader.read(filename_queue)
-            
-            row = tf.decode_csv(value, record_defaults=[[0.0] for _ in range(66)])
-            
-            #change the row[:len(row)-2] type stuff to be more pythonic
-            example_op, label_op  = tf.stack(row[:len(row)-2]), tf.stack(row[len(row)-2:])  #I think if I switch this to tf.constant() I won't need it in the input_fb
+            example_op, label_op = aquire_data_ops(filename_queue, process_line_as_2d_input)
             
             capacity = min_after_dequeue + 3 * batch_size 
             
@@ -224,31 +297,23 @@ def main(unused_param):
         return tf.reduce_mean(tf.cast(tf.equal(predictions,tf.argmax(labels, 1)),tf.float32))
     
     
-    def precision_metric(predictions, labels,weights=None):
-        """
-        precision = true_positives/(true_positives+false_positives)
-        """
-        pass
-    
-    
-    def recall_metric(predictions, labels, weights=None):
-        """
-        recall = true_positives/(true_positives+false_negatives)
-        """
-        pass
-    
-    
     def input_data_fn(data_getter_ops):
         """
-        The function which is called to get data for the fit functSion.
+        The function which is called to get data from a data pipeline.  It runs the operations
+        given as the parameter, then converts the batch and labels gotten to constant tensors,
+        and finally converts the labels to one_hot tensors before returning the batch and labels
+        as a tuple.
+        
+        NOTES:
+        1) Maybe should be using sparse tensors
+        2) See if the tf.constant and tf.one_hot operations are all necessary, and if I 
+        can/should omit them or compute them elsewhere (e.g. in the data pipeline itself)
         """
         batch, labels = sess.run(data_getter_ops)
-        #MAYBE USE SPARSE TENSORS FOR THIS 
-        
-        #See if these tf.constant() calls are needed or if I should have them be computed elsewhere (like in the data pipeline itself)
-        return tf.constant(batch, dtype=tf.float32), tf.constant(labels, dtype=tf.float32)
+        return tf.constant(batch, dtype=tf.float32), tf.one_hot(tf.constant(labels, dtype=tf.int32), depth=2)
     
-    def line_counter(file_name):
+    
+    def line_counter(filename):
         """
         A function to count the number of lines in a file efficiently.
         """
@@ -259,33 +324,34 @@ def main(unused_param):
                     break
                 yield b
 
-        with open(file_name, "r") as f:
+        with open(filename, "r") as f:
             return sum(bl.count("\n") for bl in blocks(f))
     
     #Hopefully set these constants up with something like flags to better be able
     #to run modified versions of the model in the future (when tuning the model)
-    SAVE_MODEL_DIR = "/tmp/win_loss_ann_poop"
+    SAVE_MODEL_DIR = "/tmp/win_loss_ann"
     TRAINING_DATA_FILENAME = "train_data.csv"
     VALIDATION_FILENAME = "validation_data.csv"
     TESTING_FILENAME = "test_data.csv"
     TRAIN_OP_SUMMARIES = ["learning_rate", "loss", "gradients", "gradient_norm"]
     NUM_OUTPUTS = 2
-    DENSE_SHAPE = [512]#[2048,4096,512]
-    DENSE_DROPOUT = .4   #NEED TO PICK THIS PROPERLY
+    DENSE_SHAPE = [1024,512]#[2048,4096,512]
+    DENSE_DROPOUT = .3   #NEED TO PICK THIS PROPERLY
     OPTIMIZER = "SGD"    #NEED TO PICK THIS PROPERLY
-    TRAINING_MIN_AFTER_DEQUEUE = 1500      
-    TESTING_MIN_AFTER_DEQUEUE = 1000
+    TRAINING_MIN_AFTER_DEQUEUE = 3000      
+    VALIDATION_MIN_AFTER_DEQUEUE = 3000
+    TESTING_MIN_AFTER_DEQUEUE = 3000
     TRAINING_BATCH_SIZE = 500  #NEED TO PICK THIS PROPERLY
     VALIDATION_BATCH_SIZE = 1000
     TESTING_BATCH_SIZE = 1000
-    NUM_EPOCHS =  3     
+    NUM_EPOCHS =  2
     LOG_ITERATION_INTERVAL = 300
     INCEPTION_MODULE_1_SHAPE = [[[200,2]],[[300,3]],[[500,5]]]
     INCEPTION_MODULE_2_SHAPE = [[[500,1]],[[500,1],[300,3]],[[500,1],[500,5]]]
-    LEARNING_RATE = .001   #NEED TO PICK THIS PROPERLY
-    BATCHES_IN_TRAINING_EPOCH = 1000#line_counter(TRAINING_DATA_FILENAME)//TRAINING_BATCH_SIZE
-    BATCHES_IN_VALIDATION_EPOCH = 400#line_counter(VALIDATION_FILENAME)//VALIDATION_BATCH_SIZE
-    BATCHES_IN_TESTING_EPOCH = 500#line_counter(TESTING_FILENAME)//TESTING_BATCH_SIZE
+    LEARNING_RATE = .01   #NEED TO PICK THIS PROPERLY
+    BATCHES_IN_TRAINING_EPOCH = line_counter(TRAINING_DATA_FILENAME)//TRAINING_BATCH_SIZE
+    BATCHES_IN_VALIDATION_EPOCH = line_counter(VALIDATION_FILENAME)//VALIDATION_BATCH_SIZE
+    BATCHES_IN_TESTING_EPOCH = line_counter(TESTING_FILENAME)//TESTING_BATCH_SIZE
     
     
     
@@ -297,9 +363,9 @@ def main(unused_param):
     
     #Create validation data pipeline
     validation_data_pipe_ops = data_pipeline(
-        [TESTING_FILENAME],
-        TESTING_BATCH_SIZE,
-        min_after_dequeue=TESTING_MIN_AFTER_DEQUEUE)
+        [VALIDATION_FILENAME],
+        VALIDATION_BATCH_SIZE,
+        min_after_dequeue=VALIDATION_MIN_AFTER_DEQUEUE)
     
     #Create testing data pipeline
     testing_data_pipe_ops = data_pipeline(
@@ -311,6 +377,8 @@ def main(unused_param):
     coord = tf.train.Coordinator()
     threads = tf.train.start_queue_runners(coord=coord)
 
+
+    
     #Create a Config object such that during training the saves and logs will be done at the intervals I want
     the_config = tf.estimator.RunConfig().replace(save_checkpoints_steps=LOG_ITERATION_INTERVAL, save_summary_steps=LOG_ITERATION_INTERVAL)
     
@@ -337,12 +405,6 @@ def main(unused_param):
         "prediction accuracy": learn.MetricSpec(
             metric_fn= accuracy_metric,
             prediction_key="classes")}
-#         "precision": tf.contrib.learn.MetricSpec(
-#             metric_fn=tf.contrib.metrics.streaming_precision,
-#             prediction_key=tf.contrib.learn.PredictionKey.CLASSES),
-#         "recall": tf.contrib.learn.MetricSpec(
-#             metric_fn=tf.contrib.metrics.streaming_recall,
-#             prediction_key=tf.contrib.learn.PredictionKey.CLASSES)}
     
     
     
