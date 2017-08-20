@@ -9,9 +9,8 @@ from tensorflow.contrib import learn
 from tensorflow.contrib import layers
 from tensorflow.contrib.learn.python.learn.estimators import model_fn as model_fn_lib
 
-tf.logging.set_verbosity(tf.logging.INFO)
 
-sess = tf.InteractiveSession()
+tf.logging.set_verbosity(tf.logging.INFO)
 
 
 def cnn_model_fn(features, labels, mode, params):
@@ -153,7 +152,8 @@ def cnn_model_fn(features, labels, mode, params):
     # Calculate loss (for both TRAIN and EVAL modes)
     if mode != learn.ModeKeys.INFER:
         loss = tf.losses.softmax_cross_entropy(
-            onehot_labels=labels, logits=logits)
+            #Would rather conversion to one_hot vectors be done within data pipeline
+            onehot_labels=tf.one_hot(labels, depth=2), logits=logits)
         
     # Configure the Training Op (for TRAIN mode)
     if mode == learn.ModeKeys.TRAIN:
@@ -196,31 +196,7 @@ def main(unused_param):
     1)FIGURE OUT IF I NEED TO INITIALIZE ALL THE VARIABLES SOMEWHERE.  THIS COULD BE WHY RELOADING FAILS
     """
     
-    #A tensor referenced when getting indices of characters for the the_values array  
-    mapping_strings = tf.constant(["1","K","Q","R","B","N","P","k","q","r","b","n","p"])
-    
-    #An array where each array of 2 values within it represents the value of the 
-    #board piece at the same index in mapping_strings
-    the_values =  tf.constant(
-        [[0,0],
-        [1,0],
-        [.8,0],
-        [.6,0],
-        [.45,0],
-        [.3,0],
-        [.1,0],
-        [0,1],
-        [0,.8],
-        [0,.6],
-        [0,.45],
-        [0,.3],
-        [0,.1]])
-    
-    #Create the table for getting indices (for the_values) from the information about the board 
-    the_table = tf.contrib.lookup.index_table_from_tensor(mapping=mapping_strings)
-    
-    #Initialize the table of possibilities for what is in each square
-    tf.tables_initializer().run()
+
 
 
     def process_line_as_2d_input(row):
@@ -228,6 +204,36 @@ def main(unused_param):
         Processes a line of the input text file.  It gets a 64x2 representation
         of the board, and returns it along with the label as a tuple.
         """
+        
+        #A tensor referenced when getting indices of characters for the the_values array  
+        #NOTE: should make sure this is only being created once per creation of data pipeline
+        mapping_strings = tf.constant(["1","K","Q","R","B","N","P","k","q","r","b","n","p"])
+        
+        #An array where each array of 2 values within it represents the value of the 
+        #board piece at the same index in mapping_strings
+        #NOTE: should make sure this is only being created once per creation of data pipeline
+        the_values =  tf.constant(
+            [[0,0],
+            [1,0],
+            [.8,0],
+            [.6,0],
+            [.45,0],
+            [.3,0],
+            [.1,0],
+            [0,1],
+            [0,.8],
+            [0,.6],
+            [0,.45],
+            [0,.3],
+            [0,.1]])
+        
+        #Create the table for getting indices (for the_values) from the information about the board 
+        the_table = tf.contrib.lookup.index_table_from_tensor(mapping=mapping_strings)
+        
+        #Initialize the table of possibilities for what is in each square
+        #NOTE: should make sure this is only being run once per creation of data pipeline
+        tf.tables_initializer()
+        
         #Using the reshape operation to declare the size of the tensor so it's known
         #(to the computer not to whoever is reading this)
         data = tf.reshape(
@@ -241,7 +247,7 @@ def main(unused_param):
                         [row[0]],
                         delimiter="").values)),
             [64,2])
-        
+
         return data, row[1]
     
     
@@ -270,6 +276,7 @@ def main(unused_param):
         
         Notes:
         1) Should likely take in a parameter of the functions for data formatting and processing
+        2) Maybe should be using sparse tensors
         """
         with tf.name_scope("data_pipeline"):
             filename_queue = tf.train.string_input_producer(filenames, num_epochs=num_epochs)
@@ -294,23 +301,22 @@ def main(unused_param):
         
         This is only used because the TensorFlow built in metrics haven't been working.
         """
-        return tf.reduce_mean(tf.cast(tf.equal(predictions,tf.argmax(labels, 1)),tf.float32))
+        return tf.reduce_mean(tf.cast(tf.equal(predictions,tf.cast(labels,tf.int64)),tf.float32))
     
     
-    def input_data_fn(data_getter_ops):
+    def input_data_fn(filename, batch_size, min_after_dequeue):
         """
-        The function which is called to get data from a data pipeline.  It runs the operations
-        given as the parameter, then converts the batch and labels gotten to constant tensors,
-        and finally converts the labels to one_hot tensors before returning the batch and labels
-        as a tuple.
+        A function which is called to create the data pipeline ops made by the function 
+        data_pipeline.  It does this in a way such that they belong to the session managed 
+        by the Estimator object that will be given this function. 
+        """
+        batch, labels =  data_pipeline(
+            filenames=[filename],
+            batch_size=batch_size,
+            num_epochs=None,
+            min_after_dequeue=min_after_dequeue)
         
-        NOTES:
-        1) Maybe should be using sparse tensors
-        2) See if the tf.constant and tf.one_hot operations are all necessary, and if I 
-        can/should omit them or compute them elsewhere (e.g. in the data pipeline itself)
-        """
-        batch, labels = sess.run(data_getter_ops)
-        return tf.constant(batch, dtype=tf.float32), tf.one_hot(tf.constant(labels, dtype=tf.int32), depth=2)
+        return batch, labels
     
     
     def line_counter(filename):
@@ -335,52 +341,27 @@ def main(unused_param):
     TESTING_FILENAME = "test_data.csv"
     TRAIN_OP_SUMMARIES = ["learning_rate", "loss", "gradients", "gradient_norm"]
     NUM_OUTPUTS = 2
-    DENSE_SHAPE = [1024,512]#[2048,4096,512]
-    DENSE_DROPOUT = .3   #NEED TO PICK THIS PROPERLY
+    DENSE_SHAPE = [4096,512]
+    DENSE_DROPOUT = .4   #NEED TO PICK THIS PROPERLY
     OPTIMIZER = "SGD"    #NEED TO PICK THIS PROPERLY
-    TRAINING_MIN_AFTER_DEQUEUE = 3000      
-    VALIDATION_MIN_AFTER_DEQUEUE = 3000
+    TRAINING_MIN_AFTER_DEQUEUE = 100000      
+    VALIDATION_MIN_AFTER_DEQUEUE = 15000
     TESTING_MIN_AFTER_DEQUEUE = 3000
     TRAINING_BATCH_SIZE = 500  #NEED TO PICK THIS PROPERLY
     VALIDATION_BATCH_SIZE = 1000
     TESTING_BATCH_SIZE = 1000
     NUM_EPOCHS =  2
-    LOG_ITERATION_INTERVAL = 300
-    INCEPTION_MODULE_1_SHAPE = [[[200,2]],[[300,3]],[[500,5]]]
-    INCEPTION_MODULE_2_SHAPE = [[[500,1]],[[500,1],[300,3]],[[500,1],[500,5]]]
+    LOG_ITERATION_INTERVAL = 250
+    INCEPTION_MODULE_1_SHAPE = [[[150,2]],[[225,3]],[[300,5]]]
+    INCEPTION_MODULE_2_SHAPE = [[[250,1]],[[200,1],[250,3]],[[200,1],[300,5]]]
     LEARNING_RATE = .01   #NEED TO PICK THIS PROPERLY
     BATCHES_IN_TRAINING_EPOCH = line_counter(TRAINING_DATA_FILENAME)//TRAINING_BATCH_SIZE
     BATCHES_IN_VALIDATION_EPOCH = line_counter(VALIDATION_FILENAME)//VALIDATION_BATCH_SIZE
     BATCHES_IN_TESTING_EPOCH = line_counter(TESTING_FILENAME)//TESTING_BATCH_SIZE
-    
-    
-    
-    #Create training data pipeline
-    training_data_pipe_ops = data_pipeline(
-        [TRAINING_DATA_FILENAME],
-        TRAINING_BATCH_SIZE, 
-        min_after_dequeue=TRAINING_MIN_AFTER_DEQUEUE)
-    
-    #Create validation data pipeline
-    validation_data_pipe_ops = data_pipeline(
-        [VALIDATION_FILENAME],
-        VALIDATION_BATCH_SIZE,
-        min_after_dequeue=VALIDATION_MIN_AFTER_DEQUEUE)
-    
-    #Create testing data pipeline
-    testing_data_pipe_ops = data_pipeline(
-        [TESTING_FILENAME],
-        TESTING_BATCH_SIZE,
-        min_after_dequeue=TESTING_MIN_AFTER_DEQUEUE)
-
-    #Create a coordinator and start the queue_runners using that coordinator
-    coord = tf.train.Coordinator()
-    threads = tf.train.start_queue_runners(coord=coord)
-
 
     
     #Create a Config object such that during training the saves and logs will be done at the intervals I want
-    the_config = tf.estimator.RunConfig().replace(save_checkpoints_steps=LOG_ITERATION_INTERVAL, save_summary_steps=LOG_ITERATION_INTERVAL)
+    the_config = tf.estimator.RunConfig().replace(save_checkpoints_steps=LOG_ITERATION_INTERVAL, save_summary_steps=LOG_ITERATION_INTERVAL)#,session_config=tf.ConfigProto()),
     
     
     #Create the Estimator
@@ -410,37 +391,37 @@ def main(unused_param):
     
     for j in range(NUM_EPOCHS):
         classifier.fit(  #MAYBE USE PARTIAL FIT
-            input_fn=lambda: input_data_fn(training_data_pipe_ops),
+            input_fn=lambda: input_data_fn(TRAINING_DATA_FILENAME,TRAINING_BATCH_SIZE,TRAINING_MIN_AFTER_DEQUEUE),
+            #lambda: data_pipeline([TRAINING_DATA_FILENAME], TRAINING_BATCH_SIZE, num_epochs, min_after_dequeue),
             steps = BATCHES_IN_TRAINING_EPOCH)
         
         print("Epoch", str(j+1), "training completed.")
         
         
         #In the long term this should be done by a SessionRunHook to speed up
-        #computations by deleting this for loop completely
+        #computations by deleting this for loop completely and changing the
+        #number of steps to run by NUM_EPOCHS
         validation_results = classifier.evaluate(
-            input_fn=lambda: input_data_fn(validation_data_pipe_ops),
+            input_fn=lambda: input_data_fn(VALIDATION_FILENAME,VALIDATION_BATCH_SIZE,VALIDATION_MIN_AFTER_DEQUEUE),
             metrics=validation_metrics,
             steps=BATCHES_IN_VALIDATION_EPOCH)
          
         print(validation_results)
+ 
  
     #Configure the accuracy metric for evaluation 
     testing_metrics = {
         "prediction accuracy": learn.MetricSpec(
             metric_fn= accuracy_metric,
             prediction_key="classes")}
- 
+  
+  
     #Evaluate the model and print results
     eval_results = classifier.evaluate(
-        input_fn=lambda: input_data_fn(testing_data_pipe_ops),
+        input_fn=lambda: input_data_fn(TESTING_FILENAME,TESTING_BATCH_SIZE,TESTING_MIN_AFTER_DEQUEUE),
         metrics=testing_metrics,
-        steps=BATCHES_IN_TESTING_EPOCH)  #steps is here so that the data pipeline doesn't go on forever
-    
-    #Request that the threads being controlled by the coordinator stop, then join them.
-    coord.request_stop()
-    coord.join(threads)
-    
+        steps=BATCHES_IN_TESTING_EPOCH)
+     
     print(eval_results)
 
 
