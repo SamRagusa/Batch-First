@@ -50,6 +50,7 @@ def cnn_model_fn(features, labels, mode, params):
                         kernel_size=[section[1], section[1]],
                         padding="same",
                         activation=tf.nn.relu,
+                        kernel_initializer=tf.contrib.layers.xavier_initializer(),
                         name="inception_module_" + str(num_previously_built_inception_modules+1) + "_path_" + str(j+1) + "/layer_" + str(i+1))
                     
                     activation_summaries.append(layers.summarize_activation(cur_input))
@@ -62,6 +63,7 @@ def cnn_model_fn(features, labels, mode, params):
             #activation_summaries.append(layers.summarize_activation(final_layer))
             
         return final_layer, activation_summaries
+    
     
     def build_fully_connected_layers(the_input, shape, dropout_rates=None, num_previous_fully_connected_layers=0, activation_summaries=[]):
         """
@@ -87,19 +89,26 @@ def cnn_model_fn(features, labels, mode, params):
                 if dropout_rates >= 0 and dropout_rates < 1:
                     dropout_rates = [dropout_rates]*len(shape)
                 else:
-                    #PRINT THE ERROR BETTER
                     print("THIS ERROR NEEDS TO BE HANDLED BETTER!   1")
             else:
                 if len(dropout_rates) != len(shape):
-                    #PRINT THE ERROR BETTER
                     print("THIS ERROR NEEDS TO BE HANDLED BETTER!   2")
                     
             for index, size, dropout in zip(range(len(shape)),shape, dropout_rates):
                 #Figure out if instead I should use tf.layers.fully_connected
-                temp_layer_dense = tf.layers.dense(inputs=the_input, units=size, activation=tf.nn.relu, name="FC_" + str(index + num_previous_fully_connected_layers + 1))
+                temp_layer_dense = tf.layers.dense(
+                    inputs=the_input,
+                    units=size,
+                    activation=tf.nn.relu,
+                    kernel_initializer=tf.contrib.layers.xavier_initializer(),
+                    name="FC_" + str(index + num_previous_fully_connected_layers + 1))
+                
                 activation_summaries.append(layers.summarize_activation(temp_layer_dense))
                 if dropout != 0:
-                    the_input =  tf.layers.dropout(inputs=temp_layer_dense, rate=dropout, training=mode == learn.ModeKeys.TRAIN)
+                    the_input =  tf.layers.dropout(
+                        inputs=temp_layer_dense,
+                        rate=dropout,
+                        training=mode == learn.ModeKeys.TRAIN)
                 else:
                     the_input = temp_layer_dense
             
@@ -119,6 +128,7 @@ def cnn_model_fn(features, labels, mode, params):
         filters=300,
         kernel_size=[2,2,2],  #[depth, height,width]
         activation=tf.nn.relu,
+        kernel_initializer=tf.contrib.layers.xavier_initializer(),
         name="conv3d")  
     
     #Reshape the output of the 3 dimensional convolutional layer to a 4d tensor for input to the 2d inception modules
@@ -142,7 +152,10 @@ def cnn_model_fn(features, labels, mode, params):
     
     
     #Create the final layer of the ANN
-    logits = tf.layers.dense(inputs=dense_layers_outputs, units=params['num_outputs'], name="logit_layer")
+    logits = tf.layers.dense(inputs=dense_layers_outputs,
+                             units=params['num_outputs'],
+                             kernel_initializer=tf.contrib.layers.xavier_initializer(),
+                             name="logit_layer")
     
     
     #Figure out if these are needed.  Don't think so, but don't have time to think about it right now
@@ -151,8 +164,8 @@ def cnn_model_fn(features, labels, mode, params):
     
     # Calculate loss (for both TRAIN and EVAL modes)
     if mode != learn.ModeKeys.INFER:
-        loss = tf.losses.softmax_cross_entropy(
-            #Would rather conversion to one_hot vectors be done within data pipeline
+        loss = params['loss_fn'](
+            #Would rather conversion to one_hcot vectors be done within data pipeline
             onehot_labels=tf.one_hot(labels, depth=2), logits=logits)
         
     # Configure the Training Op (for TRAIN mode)
@@ -191,64 +204,59 @@ def cnn_model_fn(features, labels, mode, params):
 def main(unused_param):
     """
     Set up the data pipelines, create the computational graph, train the model, and evaluate the results.
-    
-    SUPER IMPORTANT NOTES:
-    1)FIGURE OUT IF I NEED TO INITIALIZE ALL THE VARIABLES SOMEWHERE.  THIS COULD BE WHY RELOADING FAILS
     """
-    
-
-
 
     def process_line_as_2d_input(row):
         """
         Processes a line of the input text file.  It gets a 64x2 representation
         of the board, and returns it along with the label as a tuple.
         """
+        with tf.name_scope("process_data_2d"):
+            with tf.device("/cpu:0"):
+                #A tensor referenced when getting indices of characters for the the_values array
+                #NOTE: should make sure this is only being created once per creation of data pipeline  
+                mapping_strings = tf.constant(["1","K","Q","R","B","N","P","k","q","r","b","n","p"])
+                
+                #An array where each array of 2 values within it represents the value of the 
+                #board piece at the same index in mapping_strings
+                #NOTE: should make sure this is only being created once per creation of data pipeline
+                the_values =  tf.constant(
+                    [[0,0],
+                    [1,0],
+                    [.8,0],
+                    [.6,0],
+                    [.45,0],
+                    [.3,0],
+                    [.1,0],
+                    [0,1],
+                    [0,.8],
+                    [0,.6],
+                    [0,.45],
+                    [0,.3],
+                    [0,.1]])
+                
+                #Create the table for getting indices (for the_values) from the information about the board 
+                the_table = tf.contrib.lookup.index_table_from_tensor(mapping=mapping_strings)
+                
+                #Initialize the table of possibilities for what is in each square
+                #NOTE: should make sure this is only being run once per creation of data pipeline
+                tf.tables_initializer()
+                
+                #Using the reshape operation to declare the size of the tensor so it's known
+                #(to the computer not to whoever is reading this)
+                data = tf.reshape(
+                    #Get the values at the given indices
+                    tf.gather(
+                        the_values,
+                        #Get an array of indices corresponding to the array of characters
+                        the_table.lookup(
+                            #Split the string into an array of characters
+                            tf.string_split(
+                                [row[0]],
+                                delimiter="").values)),
+                    [64,2])
         
-        #A tensor referenced when getting indices of characters for the the_values array  
-        #NOTE: should make sure this is only being created once per creation of data pipeline
-        mapping_strings = tf.constant(["1","K","Q","R","B","N","P","k","q","r","b","n","p"])
-        
-        #An array where each array of 2 values within it represents the value of the 
-        #board piece at the same index in mapping_strings
-        #NOTE: should make sure this is only being created once per creation of data pipeline
-        the_values =  tf.constant(
-            [[0,0],
-            [1,0],
-            [.8,0],
-            [.6,0],
-            [.45,0],
-            [.3,0],
-            [.1,0],
-            [0,1],
-            [0,.8],
-            [0,.6],
-            [0,.45],
-            [0,.3],
-            [0,.1]])
-        
-        #Create the table for getting indices (for the_values) from the information about the board 
-        the_table = tf.contrib.lookup.index_table_from_tensor(mapping=mapping_strings)
-        
-        #Initialize the table of possibilities for what is in each square
-        #NOTE: should make sure this is only being run once per creation of data pipeline
-        tf.tables_initializer()
-        
-        #Using the reshape operation to declare the size of the tensor so it's known
-        #(to the computer not to whoever is reading this)
-        data = tf.reshape(
-            #Get the values at the given indices
-            tf.gather(
-                the_values,
-                #Get an array of indices corresponding to the array of characters
-                the_table.lookup(
-                    #Split the string into an array of characters
-                    tf.string_split(
-                        [row[0]],
-                        delimiter="").values)),
-            [64,2])
-
-        return data, row[1]
+                return data, row[1]
     
     
     def aquire_data_ops(filename_queue, processing_method):   
@@ -257,14 +265,16 @@ def main(unused_param):
         read/decode them, and give them to the given method for processing
         the information.
         """
-        reader = tf.TextLineReader()
-        key, value = reader.read(filename_queue)
-        record_defaults = [[""], [tf.constant(0, dtype=tf.int32)]]
-        row = tf.decode_csv(value, record_defaults=record_defaults)
-        return processing_method(row)
+        with tf.name_scope("aquire_data"):
+            with tf.device("/cpu:0"):
+                reader = tf.TextLineReader()
+                key, value = reader.read(filename_queue)
+                record_defaults = [[""], [tf.constant(0, dtype=tf.int32)]]
+                row = tf.decode_csv(value, record_defaults=record_defaults)
+                return processing_method(row)
         
         
-    def data_pipeline(filenames, batch_size, num_epochs=None, min_after_dequeue=10000):
+    def data_pipeline(filenames, batch_size, num_epochs=None, min_after_dequeue=10000, allow_smaller_final_batch=False):
         """
         Creates a pipeline for the data contained within the given files.  
         It does this using TensorFlow queues.
@@ -277,6 +287,7 @@ def main(unused_param):
         Notes:
         1) Should likely take in a parameter of the functions for data formatting and processing
         2) Maybe should be using sparse tensors
+        3) Should really confirm if min_after_dequeue parameter is refering to examples or batches
         """
         with tf.name_scope("data_pipeline"):
             filename_queue = tf.train.string_input_producer(filenames, num_epochs=num_epochs)
@@ -289,10 +300,26 @@ def main(unused_param):
                 [example_op, label_op],
                 batch_size=batch_size,
                 capacity=capacity,
-                min_after_dequeue=min_after_dequeue)
+                min_after_dequeue=min_after_dequeue,
+                allow_smaller_final_batch=allow_smaller_final_batch)
             
             return example_batch, label_batch
     
+    
+    def input_data_fn(filename, batch_size, epochs, min_after_dequeue, allow_smaller_final_batch=False):
+        """
+        A function which is called to create the data pipeline ops made by the function 
+        data_pipeline.  It does this in a way such that they belong to the session managed 
+        by the Estimator object that will be given this function. 
+        """
+        with tf.name_scope("input_fn"):
+            batch, labels =  data_pipeline(
+                filenames=[filename],
+                batch_size=batch_size,
+                num_epochs=epochs,
+                allow_smaller_final_batch=allow_smaller_final_batch)
+            return batch, labels
+      
     
     def accuracy_metric(predictions, labels,weights=None):
         """
@@ -302,21 +329,6 @@ def main(unused_param):
         This is only used because the TensorFlow built in metrics haven't been working.
         """
         return tf.reduce_mean(tf.cast(tf.equal(predictions,tf.cast(labels,tf.int64)),tf.float32))
-    
-    
-    def input_data_fn(filename, batch_size, min_after_dequeue):
-        """
-        A function which is called to create the data pipeline ops made by the function 
-        data_pipeline.  It does this in a way such that they belong to the session managed 
-        by the Estimator object that will be given this function. 
-        """
-        batch, labels =  data_pipeline(
-            filenames=[filename],
-            batch_size=batch_size,
-            num_epochs=None,
-            min_after_dequeue=min_after_dequeue)
-        
-        return batch, labels
     
     
     def line_counter(filename):
@@ -329,46 +341,46 @@ def main(unused_param):
                 if not b:
                     break
                 yield b
-
+ 
         with open(filename, "r") as f:
             return sum(bl.count("\n") for bl in blocks(f))
     
     #Hopefully set these constants up with something like flags to better be able
     #to run modified versions of the model in the future (when tuning the model)
-    SAVE_MODEL_DIR = "/tmp/win_loss_ann"
-    TRAINING_DATA_FILENAME = "train_data.csv"
-    VALIDATION_FILENAME = "validation_data.csv"
-    TESTING_FILENAME = "test_data.csv"
+    SAVE_MODEL_DIR = "/tmp/win_loss_ann_second_fixes1"
+    TRAINING_FILENAME = "train_pipeline_eval.csv"#"train_data.csv"
+    VALIDATION_FILENAME = "val_pipeline_eval.csv"#"validation_data.csv"
+    TESTING_FILENAME = "test_pipeline_eval.csv"#"test_data.csv"
     TRAIN_OP_SUMMARIES = ["learning_rate", "loss", "gradients", "gradient_norm"]
     NUM_OUTPUTS = 2
-    DENSE_SHAPE = [4096,512]
-    DENSE_DROPOUT = .4   #NEED TO PICK THIS PROPERLY
-    OPTIMIZER = "SGD"    #NEED TO PICK THIS PROPERLY
-    TRAINING_MIN_AFTER_DEQUEUE = 100000      
-    VALIDATION_MIN_AFTER_DEQUEUE = 15000
-    TESTING_MIN_AFTER_DEQUEUE = 3000
-    TRAINING_BATCH_SIZE = 500  #NEED TO PICK THIS PROPERLY
+    DENSE_SHAPE = [4096,512]                                       #NEED TO PICK THIS PROPERLY
+    DENSE_DROPOUT = .4                                             #NEED TO PICK THIS PROPERLY
+    OPTIMIZER = "SGD"      
+    LOSS_FN = tf.losses.softmax_cross_entropy                      #NEED TO PICK THIS PROPERLY
+    TRAINING_MIN_AFTER_DEQUEUE = 10000      
+    VALIDATION_MIN_AFTER_DEQUEUE = 10000
+    TESTING_MIN_AFTER_DEQUEUE = 200
+    TRAINING_BATCH_SIZE = 300                                      #NEED TO PICK THIS PROPERLY
     VALIDATION_BATCH_SIZE = 1000
-    TESTING_BATCH_SIZE = 1000
-    NUM_EPOCHS =  2
-    LOG_ITERATION_INTERVAL = 250
-    INCEPTION_MODULE_1_SHAPE = [[[150,2]],[[225,3]],[[300,5]]]
-    INCEPTION_MODULE_2_SHAPE = [[[250,1]],[[200,1],[250,3]],[[200,1],[300,5]]]
-    LEARNING_RATE = .01   #NEED TO PICK THIS PROPERLY
-    BATCHES_IN_TRAINING_EPOCH = line_counter(TRAINING_DATA_FILENAME)//TRAINING_BATCH_SIZE
+    TESTING_BATCH_SIZE = 100
+    NUM_EPOCHS =  10
+    LOG_ITERATION_INTERVAL = 300
+    LEARNING_RATE = .01                                            #NEED TO PICK THIS PROPERLY
+    INCEPTION_MODULE_1_SHAPE = [[[200,2]],[[250,3]],[[350,5]]]
+    INCEPTION_MODULE_2_SHAPE = [[[250,1]],[[250,1],[250,3]],[[250,1],[325,5]]]
     BATCHES_IN_VALIDATION_EPOCH = line_counter(VALIDATION_FILENAME)//VALIDATION_BATCH_SIZE
     BATCHES_IN_TESTING_EPOCH = line_counter(TESTING_FILENAME)//TESTING_BATCH_SIZE
-
+    
+#     print(line_counter(TRAINING_FILENAME)//TRAINING_BATCH_SIZE)
     
     #Create a Config object such that during training the saves and logs will be done at the intervals I want
-    the_config = tf.estimator.RunConfig().replace(save_checkpoints_steps=LOG_ITERATION_INTERVAL, save_summary_steps=LOG_ITERATION_INTERVAL)#,session_config=tf.ConfigProto()),
-    
+    the_config = tf.estimator.RunConfig().replace(save_checkpoints_steps=LOG_ITERATION_INTERVAL, save_summary_steps=LOG_ITERATION_INTERVAL)#,session_config=tf.ConfigProto(log_device_placement=True))
     
     #Create the Estimator
     classifier = learn.Estimator(
         model_fn=cnn_model_fn,
         model_dir=SAVE_MODEL_DIR,
-        config = the_config,
+        config = the_config, 
         params = {
             'dense_shape': DENSE_SHAPE,
             'dense_dropout' : DENSE_DROPOUT,
@@ -379,11 +391,12 @@ def main(unused_param):
             'inception_module1' : INCEPTION_MODULE_1_SHAPE,
             'inception_module2' : INCEPTION_MODULE_2_SHAPE,
             "learning_rate": LEARNING_RATE,
-            "train_summaries" : TRAIN_OP_SUMMARIES})
+            "train_summaries" : TRAIN_OP_SUMMARIES,
+            'loss_fn' : LOSS_FN})
     
     #Create the validation metrics to be passed to the classifiers evaluate function
     validation_metrics = {
-        "prediction accuracy": learn.MetricSpec(
+        "prediction_accuracy/validation": learn.MetricSpec(
             metric_fn= accuracy_metric,
             prediction_key="classes")}
     
@@ -391,9 +404,9 @@ def main(unused_param):
     
     for j in range(NUM_EPOCHS):
         classifier.fit(  #MAYBE USE PARTIAL FIT
-            input_fn=lambda: input_data_fn(TRAINING_DATA_FILENAME,TRAINING_BATCH_SIZE,TRAINING_MIN_AFTER_DEQUEUE),
-            #lambda: data_pipeline([TRAINING_DATA_FILENAME], TRAINING_BATCH_SIZE, num_epochs, min_after_dequeue),
-            steps = BATCHES_IN_TRAINING_EPOCH)
+            input_fn=lambda: input_data_fn(TRAINING_FILENAME,TRAINING_BATCH_SIZE,1,TRAINING_MIN_AFTER_DEQUEUE,True))#,
+            #lambda: data_pipeline([TRAINING_FILENAME], TRAINING_BATCH_SIZE, num_epochs, min_after_dequeue))
+#             max_steps=200)
         
         print("Epoch", str(j+1), "training completed.")
         
@@ -402,25 +415,26 @@ def main(unused_param):
         #computations by deleting this for loop completely and changing the
         #number of steps to run by NUM_EPOCHS
         validation_results = classifier.evaluate(
-            input_fn=lambda: input_data_fn(VALIDATION_FILENAME,VALIDATION_BATCH_SIZE,VALIDATION_MIN_AFTER_DEQUEUE),
+            input_fn=lambda: input_data_fn(VALIDATION_FILENAME,VALIDATION_BATCH_SIZE,1,VALIDATION_MIN_AFTER_DEQUEUE),
             metrics=validation_metrics,
-            steps=BATCHES_IN_VALIDATION_EPOCH)
+            steps=BATCHES_IN_VALIDATION_EPOCH-1,
+            log_progress=False)
          
         print(validation_results)
  
- 
     #Configure the accuracy metric for evaluation 
     testing_metrics = {
-        "prediction accuracy": learn.MetricSpec(
+        "prediction_accuracy/testing": learn.MetricSpec(
             metric_fn= accuracy_metric,
             prediction_key="classes")}
   
   
     #Evaluate the model and print results
     eval_results = classifier.evaluate(
-        input_fn=lambda: input_data_fn(TESTING_FILENAME,TESTING_BATCH_SIZE,TESTING_MIN_AFTER_DEQUEUE),
+        input_fn=lambda: input_data_fn(TESTING_FILENAME,TESTING_BATCH_SIZE,1,TESTING_MIN_AFTER_DEQUEUE),
         metrics=testing_metrics,
-        steps=BATCHES_IN_TESTING_EPOCH)
+        log_progress=False,
+        steps=BATCHES_IN_TESTING_EPOCH-1)
      
     print(eval_results)
 
