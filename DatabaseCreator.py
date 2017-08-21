@@ -3,14 +3,15 @@ Created on Aug 12, 2017
 
 @author: SamRagusa
 '''
-
+import numpy as np
 import chess
 import chess.pgn
+import random
 from functools import reduce
 
 
 
-def create_database_from_pgn(filename, filters=[], data_writer=None, switch_black_move_to_white=True, fen_elements_stored=[0,2],filenames=["board_config_database.csv"],error_output_filename="board_config_errors.csv",update_times=100):
+def create_database_from_pgn(filename, filters=[], data_writer=None, switch_black_move_to_white=True, fen_elements_stored=[0,2],output_filenames=["board_config_database.csv"],error_output_filename="board_config_errors.csv",update_times=100):
     """
     @param filename The filename for the png file of chess games to read from.
     @param filters An array of functions which each require two parameters, one
@@ -18,11 +19,11 @@ def create_database_from_pgn(filename, filters=[], data_writer=None, switch_blac
     The other is the WinLossDrawData associated with that string.
     @param data_writer A function that takes in two parameters, the first of which is a dictionary mapping strings representations
     of the board (as determined by the other parameters) to objects of the WinLossDrawData class (internal).  The second parameter is the 
-    filenames array.
+    output_filenames array.
     @param switch_black_move_to_white True if moves where it's blacks turn should be switched to a representation where it's whites turn.
     @param fen_elements_stored The elements to be stored (and used for duplicate detection) from the output of chess.Board().fen().spit(), which is of the format:
     r1bqkb1r/1p1n1pp1/p2ppn1p/8/3NP1P1/2N4Q/PPP1BP1P/R1B1K2R b KQkq - 1 9 2
-    @param filenames An array of filenames (strings) to be passed to the data_writer parameter.
+    @param output_filenames An array of filenames (strings) to be passed to the data_writer parameter.
     @param update_times The number of times to print an updated percentage of games processed.
     @param error_output_filename The filename (string) of the file to write games that raised errors 
     
@@ -31,9 +32,7 @@ def create_database_from_pgn(filename, filters=[], data_writer=None, switch_blac
     2) Consider adding other methods (aside from switching from blacks move to whites) to convert boards to other known boards which are logically equivalent
     3) Confirm that the try statement actually catches and handles the errors, because it seems
     they're being handled internally within the chess package and the logs are being dumped to the Game objects .error array
-    
-    CURRENT THINGS THAT FAIL:
-    1) (FIXED BUT HAVENT TESTED) If int(num_games_in_percent_of_file)==0 it will give a ZeroDivisionError
+    4) Round percentage of games processed to have two decimal places
     
     TESTS TO CREATE:
     1) Is switching blacks move to white working test
@@ -84,7 +83,7 @@ def create_database_from_pgn(filename, filters=[], data_writer=None, switch_blac
     the_board = chess.Board()
     
     
-    def black_fen_to_white(board):
+    def black_fen_to_white():
         """
         Reformats and returns a the output from a given boards .fen() method from one where it's blacks turn,
         to one where it's whites turn.  This involves rotating the board along the x axis and switching 
@@ -106,10 +105,11 @@ def create_database_from_pgn(filename, filters=[], data_writer=None, switch_blac
     configs={}
     error_file = open(error_output_filename,'w')
     
+    #set constants 
     counter = 0
     num_games_in_file = line_counter(filename)/16
     if num_games_in_file < update_times:
-        update_times==num_games_in_file
+        update_times=num_games_in_file
         print("The frequency of updates chosen will produce an error,")
         print("so it has been changed to the number of games in the given file,")
     num_games_in_n_percent_of_file = num_games_in_file//update_times
@@ -123,7 +123,7 @@ def create_database_from_pgn(filename, filters=[], data_writer=None, switch_blac
             for move in cur_game.main_line():
                 the_board.push(move)
                 if switch_black_move_to_white and not the_board.turn:
-                    white_move_string = black_fen_to_white(the_board)
+                    white_move_string = black_fen_to_white()
                 else:
                     white_move_string = ",".join(the_board.fen().split())
     #                 if white_move_string.split(",")[1]=="b":
@@ -147,7 +147,7 @@ def create_database_from_pgn(filename, filters=[], data_writer=None, switch_blac
         
         
         counter = counter + 1
-        if counter % int(num_games_in_n_percent_of_file) == 0:
+        if counter % num_games_in_n_percent_of_file == 0:
             print(str(percent_increment*counter/num_games_in_n_percent_of_file) + "% of games processed.")
             
         #This is because it interprets the repeated result as it's own game
@@ -160,24 +160,27 @@ def create_database_from_pgn(filename, filters=[], data_writer=None, switch_blac
 
     print("Applying filters to data.")
     
+    #Figure out a way of doing this with less of a space requirement
+    to_delete = []
     if filters != []:
         for cur_str, data in configs.items():
             for filter in filters:
                 if filter(cur_str, data):
-                    del configs[cur_str]
+                    to_delete.append(cur_str)
                     break
-    
-#     if not reduce(lambda x,y:True if (x or y) else False, map(lambda z:z(cur_str, data), filters)):
+                
+        for cur_str in to_delete:
+            del configs[cur_str]
 
     
     print("Writing data to new file.")
     if data_writer is None:
-        writer = open(filenames[0],'w')
+        writer = open(output_filenames[0],'w')
         for cur_str, data in configs.items():
             writer.write(cur_str + "," + data.__str__() + "\n")  #data.__str__() should be done without the function call
         writer.close()
     else:
-        data_writer(configs,filenames)
+        data_writer(configs,output_filenames)
         
     
     pgn_file.close()
@@ -185,9 +188,11 @@ def create_database_from_pgn(filename, filters=[], data_writer=None, switch_blac
 
 
 
+
+
 def indecisive_outcome_filter(str, data):
     """
-    If there is a tie between wins and losses.
+    Filter out configurations where there is a tie between wins and losses.
     
     NOTES:
     1) Should think about adding more measures of indecisiveness
@@ -196,17 +201,30 @@ def indecisive_outcome_filter(str, data):
         return True
     return False
 
+
 def opening_game_filter(str, data):
     """
     Returns True if the given string represents a game position which the AI will consider an "opening game position".
     """
     pass
 
-def end_game_filter(str, data):
+
+def n_man_filter_creator(n):
     """
-    Returns True if the given string represents a game position which the AI will consider a "end game position".
+    Creates and returns a filter function for use in the create_database_from_pgn function.
+    Returns True if the number of pieces in the given board configuration is greater than n,
+    and False if there are less than or equal to n.
     """
-    pass
+    def filter(str, data):
+        counter = 0
+        for chr in str:
+            if chr in "KQRBNPkqrbnp":
+                counter = counter + 1
+                if counter > n:
+                    return False
+        return True 
+    return filter
+
 
 def draw_game_filter(str, data):
     """
@@ -216,4 +234,66 @@ def draw_game_filter(str, data):
     if data.draws >= data.losses and data.draws >= data.wins:
         return True
     return False
+
+
+def writer_creator(win_loss_data_to_str, map_entries_to_file_index, entry_str_manipulations=[]):
+    """
+    Creates a writer function for use in the create_database_from_pgn function. 
+    """
+    def the_writer(dict, filenames):
+        writers = [open(filename,'w') for filename in filenames]
+        entries = ["" for _ in range(len(dict))]
+        for index, (str, data) in enumerate(dict.items()):
+            for manipulation in entry_str_manipulations:
+                str = manipulation(str)
+            entries[index] = str + "," + win_loss_data_to_str(data)
+            
+        entry_dict = map_entries_to_file_index(entries)
+        for str, index in entry_dict.items():
+            if index != -1:
+                writers[index].write(str + "\n")
+            
+        for writer in writers:
+            writer.close()
+            
+    return the_writer
+
+
+def str_ary_to_index_dict_function_creator(training_ratio=.65, validation_ratio=.25, testing_ratio=.1):
+    """
+    Creates and returns a function which takes in an array, and returns a dictionary 
+    where the keys are the elements of the given array, and the values are the indices
+    corresponding to which file to write the key to.
+    """
+    def str_ary_to_index_dict(ary):
+        def decider(num):
+            if num < testing_ratio:
+                return 2
+            elif num < testing_ratio + validation_ratio:
+                return 1
+            elif num < testing_ratio + validation_ratio + training_ratio:
+                return 0
+            else:
+                return -1
+        return {str : decider(rand) for str, rand in zip(ary,np.random.rand(len(ary)))}
+    return str_ary_to_index_dict
+
+
+
+
+
+
+
+
+manipulations = [(lambda y:(lambda x : x.replace(str(y), "1"*y)))(j) for j in range(2,9)]
+manipulations.append(lambda x : x.replace("/", ""))
+
+create_database_from_pgn("GMallboth.pgn",
+    filters=[indecisive_outcome_filter, draw_game_filter, n_man_filter_creator(5)],
+    fen_elements_stored=[0],
+    data_writer=writer_creator(
+        lambda x: "0" if x.wins > x.losses else "1",
+        str_ary_to_index_dict_function_creator(),
+        manipulations),
+    output_filenames=["train_pipeline_eval.csv", "val_pipeline_eval.csv", "test_pipeline_eval.csv"])
 
