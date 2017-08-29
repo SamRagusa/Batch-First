@@ -34,10 +34,10 @@ def cnn_model_fn(features, labels, mode, params):
         (MAYBE IMPLEMENT) A set of [filtersJ_I, kernal_sizeJ_I] can be replaced by None for passing of input to concatination
         """
         path_outputs = [None for _ in range(len(module))]  #See if I can do [None]*len(module) instead
-        
+        to_summarize = []
         cur_input = None
         for j, path in enumerate(module):
-            with tf.name_scope("inception_module_" + str(num_previously_built_inception_modules + 1) + "_path_" + str(j+1)):
+            with tf.variable_scope("inception_module_" + str(num_previously_built_inception_modules + 1) + "_path_" + str(j+1)):
                 for i, section in enumerate(path):
                     if i==0:
                         if j != 0:
@@ -52,18 +52,22 @@ def cnn_model_fn(features, labels, mode, params):
                         padding="same",
                         activation=tf.nn.relu,
                         kernel_initializer=layers.xavier_initializer(),
-                        name="inception_module_" + str(num_previously_built_inception_modules+1) + "_path_" + str(j+1) + "/layer_" + str(i+1))
+                        bias_initializer=tf.constant_initializer(.01, dtype=tf.float32),
+                        name="layer_" + str(i+1))#"inception_module_" + str(num_previously_built_inception_modules+1) + "_path_" + str(j+1) + "/layer_" + str(i+1))
                     
-                    activation_summaries.append(layers.summarize_activation(cur_input))
+                    to_summarize.append(cur_input)
+#                     activation_summaries.append(layers.summarize_activation(cur_input))
                     
         path_outputs[-1] = cur_input
         
-        with tf.name_scope("inception_module_" + str(num_previously_built_inception_modules + 1) + "_concat"):
-            final_layer = tf.nn.relu(
-                tf.concat([temp_input for temp_input in path_outputs],3),
-                name="inception_module_" + str(num_previously_built_inception_modules + 1) + "_concat")
-            #Currently not doing this activaton summary because as of now (and maybe forever) it is not very helpful.
-            #activation_summaries.append(layers.summarize_activation(final_layer))
+        activation_summaries = activation_summaries + [layers.summarize_activation(layer) for layer in to_summarize]
+        
+        with tf.variable_scope("inception_module_" + str(num_previously_built_inception_modules + 1)):
+            final_layer = tf.nn.relu(    # FIGURE OUT REASON I PUT THIS HERE
+                tf.concat([temp_input for temp_input in path_outputs], 3),
+                name="concat")#"inception_module_" + str(num_previously_built_inception_modules + 1) + "concat")
+        #Currently not doing this activaton summary because as of now (and maybe forever) it is not very helpful.
+        #activation_summaries.append(layers.summarize_activation(final_layer))
             
         return final_layer, activation_summaries
     
@@ -97,53 +101,73 @@ def cnn_model_fn(features, labels, mode, params):
             if len(dropout_rates) != len(shape):
                 print("THIS ERROR NEEDS TO BE HANDLED BETTER!   2")
         
-        with tf.name_scope("Fully_Connected"):
-            for index, size, dropout in zip(range(len(shape)),shape, dropout_rates):
-                #Figure out if instead I should use tf.layers.fully_connected
+        
+#         to_summarize = []
+#         with tf.name_scope("Fully_Connected"):
+        for index, size, dropout in zip(range(len(shape)),shape, dropout_rates):
+            #Figure out if instead I should use tf.layers.fully_connected
+            with tf.variable_scope("FC_" + str(num_previous_fully_connected_layers + index + 1)):
                 temp_layer_dense = tf.layers.dense(
                     inputs=the_input,
                     units=size,
                     activation=tf.nn.relu,
                     kernel_initializer=layers.xavier_initializer(),
-                    name="layer_" + str(index + num_previous_fully_connected_layers + 1))
-                
-                activation_summaries.append(layers.summarize_activation(temp_layer_dense))
+                    bias_initializer=tf.constant_initializer(.01, dtype=tf.float32),
+                    name="layer")
+#                 to_summarize.append(temp_layer_dense)
+#                 activation_summaries.append(layers.summarize_activation(temp_layer_dense))
                 if dropout != 0:
                     the_input =  tf.layers.dropout(
                         inputs=temp_layer_dense,
                         rate=dropout,
                         training=mode == learn.ModeKeys.TRAIN,
-                        name="layer_" + str(num_previous_fully_connected_layers + index + 1) + "_dropout")
+                        name="dropout")
                 else:
                     the_input = temp_layer_dense
+            activation_summaries.append(layers.summarize_activation(temp_layer_dense))
+#            activation_summaries = activation_summaries + [layers.summarize_activation(op) for op in to_summarize]
             
-            return the_input, activation_summaries
+        
+        return the_input, activation_summaries
         
     
 
     #Reshaped the input data as a 5d tensor for input to the 3d convolution
-    input_layer = tf.reshape(features, [-1,8,8,2,1])  #MAKE SURE THIS WORKS RIGHT
+#     input_layer = tf.reshape(features, [-1,8,8,2,1])  #MAKE SURE THIS WORKS RIGHT
 
+
+    input_layer = tf.reshape(features,[-1,8,8,12])
   
     #Create a layer that convolves in 3 dimensions over the input
     #NOTE: I should add TensorBoard integration to this 
     #NOTE: I should make these constants be given by the params dictionary
-    conv3d_input_layer = tf.layers.conv3d(
+#     conv3d_input_layer = tf.layers.conv3d(
+#         inputs=input_layer,
+#         filters=params["conv3d_filters"],
+#         kernel_size=params['conv3d_kernal'],
+#         activation=tf.nn.relu,
+#         kernel_initializer=layers.xavier_initializer(),
+#         name="conv3d")  
+    
+    
+    conv_input_layer = tf.layers.conv2d(
         inputs=input_layer,
-        filters=params["conv3d_filters"],
-        kernel_size=params['conv3d_kernal'],
+        filters=params['input_conv_filters'],
+        kernel_size=params["input_conv_kernal"],
         activation=tf.nn.relu,
         kernel_initializer=layers.xavier_initializer(),
-        name="conv3d")  
+        bias_initializer=tf.constant_initializer(.01, dtype=tf.float32),
+        name="input_conv_layer")
     
     
-    activation_summaries = [layers.summarize_activation(conv3d_input_layer)]
+    
+    activation_summaries = [layers.summarize_activation(conv_input_layer)]
     
     #Reshape the output of the 3 dimensional convolutional layer to a 4d tensor for input to the 2d inception modules
-    reshaped_3d_output = tf.reshape(conv3d_input_layer,[-1,7,7,300])#MAKE SURE THIS WORKS RIGHT
+    #reshaped_3d_output = tf.reshape(conv3d_input_layer,[-1,7,7,params["input_conv_filters"]])    #Should switch the 7s to a function of the 3d convolutional kernal size
 
     #Build the first inception module
-    inception_module1, activation_summaries = build_inception_module(reshaped_3d_output, params['inception_module1'], activation_summaries)
+    inception_module1, activation_summaries = build_inception_module(conv_input_layer, params['inception_module1'], activation_summaries)
     
     #Build the second inception module
     inception_module2, activation_summaries = build_inception_module(inception_module1, params['inception_module2'], activation_summaries,1)
@@ -163,6 +187,7 @@ def cnn_model_fn(features, labels, mode, params):
     logits = tf.layers.dense(inputs=dense_layers_outputs,
                              units=params['num_outputs'],
                              kernel_initializer=layers.xavier_initializer(),
+                             bias_initializer=tf.constant_initializer(.01, dtype=tf.float32),
                              name="logit_layer")
     
     
@@ -229,26 +254,27 @@ def main(unused_param):
                 #board piece at the same index in mapping_strings
                 #NOTE: should make sure this is only being created once per creation of data pipeline
                 the_values =  tf.constant(
-                    [[0,0],
-                    [1,0],
-                    [.8,0],
-                    [.6,0],
-                    [.45,0],
-                    [.3,0],
-                    [.1,0],
-                    [0,1],
-                    [0,.8],
-                    [0,.6],
-                    [0,.45],
-                    [0,.3],
-                    [0,.1]])
+                    [[0,0,0,0,0,0,0,0,0,0,0,0],
+                    [1,0,0,0,0,0,0,0,0,0,0,0],
+                    [0,1,0,0,0,0,0,0,0,0,0,0],
+                    [0,0,1,0,0,0,0,0,0,0,0,0],
+                    [0,0,0,1,0,0,0,0,0,0,0,0],
+                    [0,0,0,0,1,0,0,0,0,0,0,0],
+                    [0,0,0,0,0,1,0,0,0,0,0,0],
+                    [0,0,0,0,0,0,1,0,0,0,0,0],
+                    [0,0,0,0,0,0,0,1,0,0,0,0],
+                    [0,0,0,0,0,0,0,0,1,0,0,0],
+                    [0,0,0,0,0,0,0,0,0,1,0,0],
+                    [0,0,0,0,0,0,0,0,0,0,1,0],
+                    [0,0,0,0,0,0,0,0,0,0,0,1]], dtype=tf.float32)
                 
                 #Create the table for getting indices (for the_values) from the information about the board 
                 the_table = tf.contrib.lookup.index_table_from_tensor(mapping=mapping_strings, name="index_lookup_table")
                 
                 #Initialize the table of possibilities for what is in each square
                 #NOTE: should make sure this is only being run once per creation of data pipeline
-                tf.tables_initializer()
+                #MORE RECENT AND IMPORTANT NOTE: Don't think this is needed at all and will be handled by the Estimator
+                #tf.tables_initializer()
                 
                 #Using the reshape operation to declare the size of the tensor so it's known
                 #(to the computer not to whoever is reading this)
@@ -262,7 +288,7 @@ def main(unused_param):
                             tf.string_split(
                                 [row[0]],
                                 delimiter="").values)),
-                    [64,2])
+                    [64,12])
         
                 return data, row[1]
     
@@ -367,6 +393,7 @@ def main(unused_param):
         3) Have this not call the evaluate function because it has to restore from a
         checkpoint, it will likely be faster if I evaluate it on the current training graph 
         4) Implement an epoch counter to be printed along with the validation results
+        5) Implement some kind of timer so that I can can see how long each epoch takes (printed with results of evaluation)
         """
         def __init__(self, step_increment, estimator, filenames, batch_size=1000, min_after_dequeue=20000, metrics=None, temp_num_steps_in_epoch=None):  
             self._step_increment = step_increment
@@ -402,10 +429,6 @@ def main(unused_param):
          
          
         def after_run(self, run_context, run_values):
-            """
-            TO DO:
-            1) Figure out how to handle steps to do one complete epoch
-            """
             global_step = run_values.results
             if (global_step - self._step_started) % self._step_increment == 0:
                 print(self._estimator.evaluate(
@@ -417,29 +440,31 @@ def main(unused_param):
     
     #Hopefully set these constants up with something like flags to better be able
     #to run modified versions of the model in the future (when tuning the model)
-    SAVE_MODEL_DIR = "/tmp/win_loss_ann_second_fixes3"
+    SAVE_MODEL_DIR = "/tmp/win_loss_ann_pre_commit_test"
     TRAINING_FILENAME = "train_pipeline_eval.csv"#"train_data.csv"
     VALIDATION_FILENAME = "val_pipeline_eval.csv"#"validation_data.csv"
     TESTING_FILENAME = "test_pipeline_eval.csv"#"test_data.csv"
-    TRAIN_OP_SUMMARIES = ["learning_rate", "loss", "gradients", "gradient_norm"]
+    TRAIN_OP_SUMMARIES = ["learning_rate", "loss", "gradient_norm"]#["learning_rate", "loss", "gradients", "gradient_norm"]
     NUM_OUTPUTS = 2
-    DENSE_SHAPE = [2048,512]                                       #NEED TO PICK THIS PROPERLY
+    DENSE_SHAPE = [3000,500]                                       #NEED TO PICK THIS PROPERLY
     DENSE_DROPOUT = .4                                             #NEED TO PICK THIS PROPERLY
     OPTIMIZER = "SGD"      
     LOSS_FN = tf.losses.softmax_cross_entropy                      #NEED TO PICK THIS PROPERLY
-    TRAINING_MIN_AFTER_DEQUEUE = 10000      
-    VALIDATION_MIN_AFTER_DEQUEUE = 1000
-    TESTING_MIN_AFTER_DEQUEUE = 200
-    TRAINING_BATCH_SIZE = 300                                      #NEED TO PICK THIS PROPERLY
+    TRAINING_MIN_AFTER_DEQUEUE = 25000                             #NEED TO PICK THIS PROPERLY
+    VALIDATION_MIN_AFTER_DEQUEUE = 30000                           #NEED TO PICK THIS PROPERLY
+    TESTING_MIN_AFTER_DEQUEUE = 5000                               #NEED TO PICK THIS PROPERLY
+    TRAINING_BATCH_SIZE = 500
     VALIDATION_BATCH_SIZE = 1000
-    TESTING_BATCH_SIZE = 100
-    NUM_TRAINING_EPOCHS =  10
+    TESTING_BATCH_SIZE = 1000
+    NUM_TRAINING_EPOCHS =  500
     LOG_ITERATION_INTERVAL = 300
-    LEARNING_RATE = .01                                            #NEED TO PICK THIS PROPERLY
-    NUM_CONV_3D_FILTERS = 300
-    CONV_3D_KERNAL = [2,2,2]   #[depth, height, width]
+    LEARNING_RATE = .001                                            #NEED TO PICK THIS PROPERLY
+    NUM_CONV_3D_FILTERS = 400                                       #NO LONGER IN USE
+    INPUT_CONV_FILTERS = 400
+    INPUT_CONV_KERNAL = [2,2]
+    CONV_3D_KERNAL = [2,2,2]   #[depth, height, width]              #NO LONGER IN USE
     INCEPTION_MODULE_1_SHAPE = [[[200,2]],[[250,3]],[[350,5]]]
-    INCEPTION_MODULE_2_SHAPE = [[[250,1]],[[250,1],[250,3]],[[250,1],[325,5]]]
+    INCEPTION_MODULE_2_SHAPE = [[[250,1]],[[250,1],[150,3]],[[250,1],[200,5]]]
     BATCHES_IN_TRAINING_EPOCH = line_counter(TRAINING_FILENAME)//TRAINING_BATCH_SIZE
     BATCHES_IN_VALIDATION_EPOCH = line_counter(VALIDATION_FILENAME)//VALIDATION_BATCH_SIZE
     BATCHES_IN_TESTING_EPOCH = line_counter(TESTING_FILENAME)//TESTING_BATCH_SIZE
@@ -480,7 +505,9 @@ def main(unused_param):
             "train_summaries" : TRAIN_OP_SUMMARIES,
             'loss_fn' : LOSS_FN,
             "conv3d_filters" : NUM_CONV_3D_FILTERS,
-            "conv3d_kernal" : CONV_3D_KERNAL})
+            "conv3d_kernal" : CONV_3D_KERNAL,
+            'input_conv_filters' : INPUT_CONV_FILTERS,
+            'input_conv_kernal' : INPUT_CONV_KERNAL})
     
     
     validation_hook = ValidationRunHook(
