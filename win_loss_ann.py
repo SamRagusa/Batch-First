@@ -51,7 +51,7 @@ def cnn_model_fn(features, labels, mode, params):
                         padding="same",
                         activation=tf.nn.relu,
                         kernel_initializer=layers.xavier_initializer(),
-                        bias_initializer=tf.constant_initializer(.01, dtype=tf.float32),
+                        bias_initializer=tf.constant_initializer(params['init_bias_value'], dtype=tf.float32),
                         name="layer_" + str(i+1))
                     
                     to_summarize.append(cur_input)
@@ -107,7 +107,7 @@ def cnn_model_fn(features, labels, mode, params):
                     units=size,
                     activation=tf.nn.relu,
                     kernel_initializer=layers.xavier_initializer(),
-                    bias_initializer=tf.constant_initializer(.01, dtype=tf.float32),
+                    bias_initializer=tf.constant_initializer(params['init_bias_value'], dtype=tf.float32),
                     name="layer")
                 if dropout != 0:
                     the_input =  tf.layers.dropout(
@@ -137,7 +137,7 @@ def cnn_model_fn(features, labels, mode, params):
     if mode == tf.estimator.ModeKeys.PREDICT:
         features = features['feature']
 
-    input_layer = tf.reshape(features,[-1,8,8,12])
+    input_layer = tf.reshape(features,[-1,8,8,6])
     
     conv_input_layer = tf.layers.conv2d(
         inputs=input_layer,
@@ -145,7 +145,7 @@ def cnn_model_fn(features, labels, mode, params):
         kernel_size=params["input_conv_kernal"],
         activation=tf.nn.relu,
         kernel_initializer=layers.xavier_initializer(),
-        bias_initializer=tf.constant_initializer(.01, dtype=tf.float32),
+        bias_initializer=tf.constant_initializer(params['init_bias_value'], dtype=tf.float32),
         name="input_conv_layer")
     
     
@@ -172,7 +172,7 @@ def cnn_model_fn(features, labels, mode, params):
     logits = tf.layers.dense(inputs=dense_layers_outputs,
                              units=params['num_outputs'],
                              kernel_initializer=layers.xavier_initializer(),
-                             bias_initializer=tf.constant_initializer(.01, dtype=tf.float32),
+                             bias_initializer=tf.constant_initializer(params['init_bias_value'], dtype=tf.float32),
                              name="logit_layer")
     
     
@@ -241,6 +241,10 @@ def main(unused_param):
         Processes a line of the input text file.  It gets a 64x2 representation
         of the board, and returns it along with the label as a tuple.
         
+        IDEAS FOR BATCHING:
+        1) reshape from [?, 64] to [?*64] then do the lookup and gather then reshape again
+        
+        
         IMPORTANT NOTES:
         1) Need to figure out if lookup table is being created each time this function is being called
         """
@@ -253,20 +257,36 @@ def main(unused_param):
                 #An array where each array of 2 values within it represents the value of the 
                 #board piece at the same index in mapping_strings
                 #NOTE: should make sure this is only being created once per creation of data pipeline
-                the_values =  tf.constant(
-                    [[0,0,0,0,0,0,0,0,0,0,0,0],
-                    [1,0,0,0,0,0,0,0,0,0,0,0],
-                    [0,1,0,0,0,0,0,0,0,0,0,0],
-                    [0,0,1,0,0,0,0,0,0,0,0,0],
-                    [0,0,0,1,0,0,0,0,0,0,0,0],
-                    [0,0,0,0,1,0,0,0,0,0,0,0],
-                    [0,0,0,0,0,1,0,0,0,0,0,0],
-                    [0,0,0,0,0,0,1,0,0,0,0,0],
-                    [0,0,0,0,0,0,0,1,0,0,0,0],
-                    [0,0,0,0,0,0,0,0,1,0,0,0],
-                    [0,0,0,0,0,0,0,0,0,1,0,0],
-                    [0,0,0,0,0,0,0,0,0,0,1,0],
-                    [0,0,0,0,0,0,0,0,0,0,0,1]], dtype=tf.float32)
+#                 the_values =  tf.constant(
+#                     [[0,0,0,0,0,0,0,0,0,0,0,0],
+#                     [1,0,0,0,0,0,0,0,0,0,0,0],
+#                     [0,1,0,0,0,0,0,0,0,0,0,0],
+#                     [0,0,1,0,0,0,0,0,0,0,0,0],
+#                     [0,0,0,1,0,0,0,0,0,0,0,0],
+#                     [0,0,0,0,1,0,0,0,0,0,0,0],
+#                     [0,0,0,0,0,1,0,0,0,0,0,0],
+#                     [0,0,0,0,0,0,1,0,0,0,0,0],
+#                     [0,0,0,0,0,0,0,1,0,0,0,0],
+#                     [0,0,0,0,0,0,0,0,1,0,0,0],
+#                     [0,0,0,0,0,0,0,0,0,1,0,0],
+#                     [0,0,0,0,0,0,0,0,0,0,1,0],
+#                     [0,0,0,0,0,0,0,0,0,0,0,1]], dtype=tf.float32)
+                
+                the_values = tf.constant(
+                    [[0,0,0,0,0,0],
+                     [1,0,0,0,0,0],
+                     [0,1,0,0,0,0],
+                     [0,0,1,0,0,0],
+                     [0,0,0,1,0,0],
+                     [0,0,0,0,1,0],
+                     [0,0,0,0,0,1],
+                     [-1,0,0,0,0,0],
+                     [0,-1,0,0,0,0],
+                     [0,0,-1,0,0,0],
+                     [0,0,0,-1,0,0],
+                     [0,0,0,0,-1,0],
+                     [0,0,0,0,0,-1],
+                     ], dtype=tf.float32)
                 
                 #Create the table for getting indices (for the_values) from the information about the board 
                 the_table = tf.contrib.lookup.index_table_from_tensor(mapping=mapping_strings, name="index_lookup_table")
@@ -283,7 +303,7 @@ def main(unused_param):
                             tf.string_split(
                                 [board_config],
                                 delimiter="").values)),
-                    [64,12])
+                    [64,6])
                 
                 return data
     
@@ -320,23 +340,27 @@ def main(unused_param):
         3) Should really confirm if min_after_dequeue parameter is referring to examples or batches
         """
         with tf.name_scope("data_pipeline"):
-            filename_queue = tf.train.string_input_producer(filenames, num_epochs=num_epochs)
-            
-            example_op, label_op = aquire_data_ops(filename_queue, process_line_as_2d_input)
-            
-            capacity = min_after_dequeue + 3 * batch_size 
-            
-            example_batch, label_batch = tf.train.shuffle_batch(
-                [example_op, label_op],
-                batch_size=batch_size,
-                capacity=capacity,
-                min_after_dequeue=min_after_dequeue,
-                allow_smaller_final_batch=allow_smaller_final_batch)
-            
-            return example_batch, label_batch
+            with tf.device("/cpu:0"):
+                ##########################################FOR NOT SHUFFLE#############################################
+                filename_queue = tf.train.string_input_producer(filenames, capacity=5000, num_epochs=num_epochs)
+                
+                example_op, label_op = aquire_data_ops(filename_queue, process_line_as_2d_input)
+                
+                capacity = min_after_dequeue + 3 * batch_size 
+                
+                ##########################################FOR NOT SHUFFLE#############################################
+                example_batch, label_batch = tf.train.shuffle_batch(
+                    [example_op, label_op],
+                    batch_size=batch_size,
+                    capacity=capacity,
+                    min_after_dequeue=min_after_dequeue,
+                    num_threads=64,
+                    allow_smaller_final_batch=allow_smaller_final_batch)
+                
+                return example_batch, label_batch
     
     
-    def input_data_fn(filename, batch_size, epochs, min_after_dequeue, allow_smaller_final_batch=False):
+    def input_data_fn(filenames, batch_size, epochs, min_after_dequeue, allow_smaller_final_batch=False):
         """
         A function which is called to create the data pipeline ops made by the function 
         data_pipeline.  It does this in a way such that they belong to the session managed 
@@ -344,7 +368,7 @@ def main(unused_param):
         """
         with tf.name_scope("input_fn"):
             batch, labels =  data_pipeline(
-                filenames=[filename],
+                filenames=filenames,
                 batch_size=batch_size,
                 num_epochs=epochs,
                 allow_smaller_final_batch=allow_smaller_final_batch)
@@ -441,34 +465,37 @@ def main(unused_param):
     
     #Hopefully set these constants up with something like flags to better be able
     #to run modified versions of the model in the future (when tuning the model)
-    SAVE_MODEL_DIR = "/tmp/export_model_test"
-    TRAINING_FILENAME = "train_pipeline_eval.csv"#"train_data.csv"
-    VALIDATION_FILENAME = "val_pipeline_eval.csv"#"validation_data.csv"
-    TESTING_FILENAME = "test_pipeline_eval.csv"#"test_data.csv"
+    SAVE_MODEL_DIR = "/home/sam/Desktop/tmp/smaller_inception_test_6_inputs_no_dropout"
+    TRAINING_FILENAMES = ["new_train_data_split_" + str(j) + ".csv" for j in range(10)]#["new_train_data.csv"]
+    VALIDATION_FILENAMES = ["new_validation_data.csv"]
+    TESTING_FILENAMES = ["new_test_data.csv"]
     TRAIN_OP_SUMMARIES = ["learning_rate", "loss", "gradient_norm"] #Not using "gradients"
     NUM_OUTPUTS = 2
-    DENSE_SHAPE = [300,50]                                         #NEED TO PICK THIS PROPERLY
-    DENSE_DROPOUT = .4                                             #NEED TO PICK THIS PROPERLY
+    DENSE_SHAPE = [2048,1024]                                         #NEED TO PICK THIS PROPERLY
+    DENSE_DROPOUT = 0                                             #NEED TO PICK THIS PROPERLY
+    INITIAL_BIAS_VALUE = .01
     OPTIMIZER = "SGD"      
     LOSS_FN = tf.losses.softmax_cross_entropy                      #NEED TO PICK THIS PROPERLY
-    TRAINING_MIN_AFTER_DEQUEUE = 1000                              #NEED TO PICK THIS PROPERLY
-    VALIDATION_MIN_AFTER_DEQUEUE = 1000                            #NEED TO PICK THIS PROPERLY
+    TRAINING_MIN_AFTER_DEQUEUE = 10000                              #NEED TO PICK THIS PROPERLY
+    VALIDATION_MIN_AFTER_DEQUEUE = 10000                            #NEED TO PICK THIS PROPERLY
     TESTING_MIN_AFTER_DEQUEUE = 1000                               #NEED TO PICK THIS PROPERLY
     TRAINING_BATCH_SIZE = 500
-    VALIDATION_BATCH_SIZE = 1000
+    VALIDATION_BATCH_SIZE = 2000
     TESTING_BATCH_SIZE = 1000
-    NUM_TRAINING_EPOCHS =  50
-    LOG_ITERATION_INTERVAL = 1000
+    NUM_TRAINING_EPOCHS =  500
+    LOG_ITERATION_INTERVAL = 10000
     LEARNING_RATE = .0005                                           #NEED TO PICK THIS PROPERLY
     INPUT_CONV_FILTERS = 400
     INPUT_CONV_KERNAL = [2,2]
-    INCEPTION_MODULE_1_SHAPE = [[[75,2]],[[100,3]],[[100,5]]]#[[[200,2]],[[250,3]],[[350,5]]]
-    INCEPTION_MODULE_2_SHAPE = [[[75,1]],[[100,1],[50,3]],[[100,1],[75,5]]]#[[[250,1]],[[250,1],[150,3]],[[250,1],[200,5]]]
-    BATCHES_IN_TRAINING_EPOCH = line_counter(TRAINING_FILENAME)//TRAINING_BATCH_SIZE
-    BATCHES_IN_VALIDATION_EPOCH = line_counter(VALIDATION_FILENAME)//VALIDATION_BATCH_SIZE
-    #BATCHES_IN_TESTING_EPOCH = line_counter(TESTING_FILENAME)//TESTING_BATCH_SIZE
+    INCEPTION_MODULE_1_SHAPE = [[[75,1]],[[100,1],[50,3]],[[100,1],[60,5]]]#[[[200,2]],[[250,3]],[[350,5]]]
+    INCEPTION_MODULE_2_SHAPE = [[[75,1]],[[100,1],[50,3]],[[100,1],[60,5]]]#[[[250,1]],[[250,1],[150,3]],[[250,1],[200,5]]]
+    BATCHES_IN_TRAINING_EPOCH = reduce(
+        lambda x,y : x+y,
+        [line_counter(filename) for filename in TRAINING_FILENAMES])//TRAINING_BATCH_SIZE
+    BATCHES_IN_VALIDATION_EPOCH = line_counter(VALIDATION_FILENAMES[0])//VALIDATION_BATCH_SIZE
+    #BATCHES_IN_TESTING_EPOCH = line_counter(TESTING_FILENAMES)//TESTING_BATCH_SIZE
     
-    
+
     #Create the Estimator
     classifier = tf.estimator.Estimator(
         model_fn=cnn_model_fn,
@@ -490,13 +517,14 @@ def main(unused_param):
             "train_summaries" : TRAIN_OP_SUMMARIES,
             'loss_fn' : LOSS_FN,
             'input_conv_filters' : INPUT_CONV_FILTERS,
-            'input_conv_kernal' : INPUT_CONV_KERNAL})
+            'input_conv_kernal' : INPUT_CONV_KERNAL,
+            'init_bias_value' : INITIAL_BIAS_VALUE})
     
     
     validation_hook = ValidationRunHook(
         step_increment=BATCHES_IN_TRAINING_EPOCH,
         estimator=classifier,
-        filenames=[VALIDATION_FILENAME],
+        filenames=VALIDATION_FILENAMES,
         batch_size=VALIDATION_BATCH_SIZE,
         min_after_dequeue=VALIDATION_MIN_AFTER_DEQUEUE,
         temp_num_steps_in_epoch=BATCHES_IN_VALIDATION_EPOCH)
@@ -505,7 +533,7 @@ def main(unused_param):
     
     
     classifier.train(  
-        input_fn=lambda: input_data_fn(TRAINING_FILENAME,TRAINING_BATCH_SIZE,NUM_TRAINING_EPOCHS,TRAINING_MIN_AFTER_DEQUEUE,True),
+        input_fn=lambda: input_data_fn(TRAINING_FILENAMES,TRAINING_BATCH_SIZE,NUM_TRAINING_EPOCHS,TRAINING_MIN_AFTER_DEQUEUE,True),
         #lambda: data_pipeline([TRAINING_FILENAME], TRAINING_BATCH_SIZE, num_epochs, min_after_dequeue))
         hooks=[validation_hook])
   
@@ -524,7 +552,7 @@ def main(unused_param):
 #
 #     #Evaluate the model and print results
 #     eval_results = classifier.evaluate(
-#         input_fn=lambda: input_data_fn(TESTING_FILENAME,TESTING_BATCH_SIZE,1,TESTING_MIN_AFTER_DEQUEUE),
+#         input_fn=lambda: input_data_fn(TESTING_FILENAMES,TESTING_BATCH_SIZE,1,TESTING_MIN_AFTER_DEQUEUE),
 #         metrics=testing_metrics,
 # #         log_progress=False,
 #         steps=BATCHES_IN_TESTING_EPOCH-1)
