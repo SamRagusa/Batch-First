@@ -55,6 +55,7 @@ class TranspositionTableEntry:
         self.value = value
 
 
+
 class BNS(Player):
     """
     A class representing a Chess playing AI implementing Negamax tree search with Alpha-Beta pruning.
@@ -91,13 +92,13 @@ class BNS(Player):
         else:
             self._next_guess = next_guess_heuristic
 
+    def game_completed(self):
+        self._tt = {}
+
     def negamax(self, depth, alpha, beta, color):
         """
         A method implementing negamax tree search with alpha-beta pruning and
         transposition tables.
-
-        NOTES:
-        1) Maybe should be returning inf and -inf if not within the bounds
         """
 
         old_alpha = alpha
@@ -107,16 +108,29 @@ class BNS(Player):
         # Checks the transposition table for information on the current node
         tt_entry = self._tt.get(board_hash)
         if not tt_entry is None and tt_entry.depth >= depth:
-            # self.TEMP_TT_TABLE_USE_COUNTER = self.TEMP_TT_TABLE_USE_COUNTER + 1
-            if tt_entry.flag is None:
-                return tt_entry.value
-            elif tt_entry.flag:
-                alpha = max(alpha, tt_entry.value)
-            else:
-                beta = min(beta, tt_entry.value)
+            if tt_entry.flag:
+                if tt_entry.value <= alpha:
+                    return tt_entry.value
 
-            if alpha >= beta:
-                return tt_entry.value
+                # if tt_entry.value < beta:
+                #     print("This happens: 1")
+                # beta = min(beta, tt_entry.value)
+            elif not tt_entry.flag: #SHOULD BE ABLE TO BE JUST ELSE
+                if tt_entry.value >= beta:
+                    return tt_entry.value
+
+                # if tt_entry.value > alpha:
+                #     print("This happens: 2")
+                # alpha = max(alpha, tt_entry.value)
+            # if alpha >= beta:
+            #     print("THIS HAPPENS: 3")
+                    #alpha = max(alpha, tt_entry.value)
+            # else:
+            #     beta = min(beta, tt_entry.value)
+
+            # if alpha >= beta:
+            #     return tt_entry.value
+
 
         if self._board.is_game_over():
             return color * self._outcome_map[self._board.result()]
@@ -134,13 +148,23 @@ class BNS(Player):
             if alpha >= beta:
                 break
 
+
+
         # Update the transposition table
         if best_value <= old_alpha:
             self._tt[board_hash] = TranspositionTableEntry(True, best_value, depth)
-        elif best_value >= beta:
+        elif best_value > old_alpha and best_value < beta:
+            print("THIS SHOULD NEVER HAPPEN")
+            self._tt[board_hash] = TranspositionTableEntry(True, best_value, depth)
             self._tt[board_hash] = TranspositionTableEntry(False, best_value, depth)
-        else:
-            self._tt[board_hash] = TranspositionTableEntry(None, best_value, depth)
+        elif best_value >= beta:  #PRETTY SURE I CAN JUST USE ELSE
+            self._tt[board_hash] = TranspositionTableEntry(False, best_value, depth)
+
+
+        # elif best_value >= beta:
+        #     self._tt[board_hash] = TranspositionTableEntry(False, best_value, depth)
+        # else:
+        #     self._tt[board_hash] = TranspositionTableEntry(None, best_value, depth)
 
         return best_value
 
@@ -174,7 +198,7 @@ class BNS(Player):
             moves_above = []
             for move in possible_moves:
                 self._board.push(move)
-                cur_search_value = -self.negamax(self._depth-1, -separator_value, .01-separator_value, -1)
+                cur_search_value = -self.negamax(self._depth-1, .000001-separator_value, .000002-separator_value, -1)
 
                 # print(separator_value, best_value, alpha, beta)
 
@@ -228,8 +252,8 @@ class BNS(Player):
 
 board = chess.Board()
 
-better_ai = BNS(True, 3, None, board)
-other_better_ai = Negamax(True, 3, None, board, random_decrease=0)
+better_ai = BNS(True, 2, None, board)
+# other_better_ai = Negamax(True, 3, None, board, random_decrease=0)
 worse_ai = Negamax(False, 2, None, board)
 # human = Human_Player.Human_Player()
 # human.set_board(board)
@@ -240,7 +264,7 @@ move_counter = 0
 last_time = None
 
 
-NUM_GAMES = 10
+NUM_GAMES = 1
 PRINT_EVERY_MOVE = False
 PRINT_AT_START_OF_GAME = True
 PRINT_AT_MOVE_INCREMENT = False
@@ -265,22 +289,23 @@ for game_num in range(NUM_GAMES):
         move_counter = move_counter + 1
         cur_game_move_counter = cur_game_move_counter + 1
         # print(board)
-        better_ai_move, possible_moves = better_ai.make_move()
+        #better_ai_move, possible_moves = better_ai.make_move()
+        better_ai_move, _ = better_ai.make_move()
         # print(board)
-        other_better_ai_move = other_better_ai.make_move()
+        # other_better_ai_move = other_better_ai.make_move()
         # print(board)
 
-        if not other_better_ai_move in possible_moves:
-            print("BNS does not contain alpha-beta's move.")
-            print(possible_moves)
-            print(other_better_ai_move)
-            print(board)
-            print()
-            board.push(other_better_ai_move)
-            print(board)
-            print()
-        else:
-            board.push(other_better_ai_move)
+        # if not other_better_ai_move in possible_moves:
+        #     print("BNS does not contain alpha-beta's move.")
+        #     print(possible_moves)
+        #     print(other_better_ai_move)
+        #     print(board)
+        #     print()
+        #     board.push(better_ai_move)
+        #     print(board)
+        #     print()
+        # else:
+        board.push(better_ai_move)
 
         if PRINT_EVERY_MOVE:
             print(board, "\n")
@@ -302,7 +327,7 @@ for game_num in range(NUM_GAMES):
         better_ai_wins = better_ai_wins + 1
     elif board.result() == "0-1":
         worse_ai_wins = worse_ai_wins + 1
-
+    better_ai.game_completed()
     board.reset()
 
 print("Better player number of wins: ", better_ai_wins)
@@ -310,7 +335,8 @@ print("Worse player number of wins: ", worse_ai_wins)
 print("Number of tie games ", NUM_GAMES - better_ai_wins - worse_ai_wins)
 print()
 print("Average moves per game:", move_counter / NUM_GAMES)
+# print("Better AI has", len(better_ai._tt), "TT entries")
+# print("Other better AI has", len(other_better_ai._tt), "TT entries")
 # print("Better AI used ", better_ai.TEMP_TT_TABLE_USE_COUNTER ,"TT lookups used")
 # print("Worse AI used ", worse_ai.TEMP_TT_TABLE_USE_COUNTER,"TT lookups used")
-
 
