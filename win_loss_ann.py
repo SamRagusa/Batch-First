@@ -18,7 +18,7 @@ def cnn_model_fn(features, labels, mode, params):
     Model function for the CNN.
     """
     
-    def build_inception_module(the_input, module, activation_summaries=[], num_previously_built_inception_modules=0):
+    def build_inception_module(the_input, module, activation_summaries=[], num_previously_built_inception_modules=0, padding='same'):
         """
         Builds an inception module based on the design given to the function.  It returns the final layer in the module,
         and the activation summaries generated for the layers within the inception module.
@@ -48,7 +48,7 @@ def cnn_model_fn(features, labels, mode, params):
                         inputs=cur_input,
                         filters=section[0],
                         kernel_size=[section[1], section[1]],
-                        padding="same",
+                        padding=padding,
                         activation=tf.nn.relu,
                         kernel_initializer=layers.xavier_initializer(),
                         bias_initializer=tf.constant_initializer(params['init_bias_value'], dtype=tf.float32),
@@ -61,12 +61,13 @@ def cnn_model_fn(features, labels, mode, params):
         activation_summaries = activation_summaries + [layers.summarize_activation(layer) for layer in to_summarize]
         
         with tf.variable_scope("inception_module_" + str(num_previously_built_inception_modules + 1)):
+            if padding == 'same':
+                final_layer =  tf.concat([temp_input for temp_input in path_outputs], 3)
 
-            final_layer =  tf.concat([temp_input for temp_input in path_outputs], 3)
-        #Currently not doing this activaton summary because as of now (and maybe forever) it is not very helpful.
-        #activation_summaries.append(layers.summarize_activation(final_layer))
+                return final_layer, activation_summaries
+            else:
+                return [temp_input for temp_input in path_outputs], activation_summaries
             
-        return final_layer, activation_summaries
     
     
     def build_fully_connected_layers(the_input, shape, dropout_rates=None, num_previous_fully_connected_layers=0, activation_summaries=[]):
@@ -133,7 +134,7 @@ def cnn_model_fn(features, labels, mode, params):
         with tf.name_scope("accuracy_metric"):
             accuracy = tf.reduce_mean(tf.cast(tf.equal(predictions,tf.cast(the_labels,tf.int64)),tf.float32))
             return accuracy, tf.summary.scalar("accuracy", accuracy)
-        
+
     if mode == tf.estimator.ModeKeys.PREDICT:
         features = features['feature']
 
@@ -155,14 +156,19 @@ def cnn_model_fn(features, labels, mode, params):
     inception_module1, activation_summaries = build_inception_module(conv_input_layer, params['inception_module1'], activation_summaries)
     
     #Build the second inception module
-    inception_module2, activation_summaries = build_inception_module(inception_module1, params['inception_module2'], activation_summaries,1)
-    
+    inception_module2, activation_summaries = build_inception_module(inception_module1, params['inception_module2'], activation_summaries,1,'valid')
+
+    inception_module2_paths_flattened = [
+        tf.reshape(path, [-1, reduce(lambda a, b: a * b, path.get_shape().as_list()[1:])]) for path in inception_module2]
+
+    inception_module2_outputs = tf.concat(inception_module2_paths_flattened, 1)
+
     #Reshape the output from the convolutional layers for the densely connected layers
-    flat_conv_output = tf.reshape(inception_module2, [-1, reduce(lambda a,b:a*b, inception_module2.get_shape().as_list()[1:]) ])
+    # flat_conv_output = tf.reshape(inception_module2_outputs, [-1, reduce(lambda a,b:a*b, inception_module2_outputs.get_shape().as_list()[1:]) ])
     
     #Build the fully connected layers 
     dense_layers_outputs, activation_summaries = build_fully_connected_layers(
-        flat_conv_output,
+        inception_module2_outputs,
         params['dense_shape'],
         params['dense_dropout'],
         activation_summaries=activation_summaries)
@@ -174,6 +180,10 @@ def cnn_model_fn(features, labels, mode, params):
                              kernel_initializer=layers.xavier_initializer(),
                              bias_initializer=tf.constant_initializer(params['init_bias_value'], dtype=tf.float32),
                              name="logit_layer")
+
+    probabilities = tf.nn.softmax(
+        logits = logits,
+        name ="softmax_tensor")
     
     
     loss = None
@@ -197,14 +207,12 @@ def cnn_model_fn(features, labels, mode, params):
     #Generate Predictions
     predictions = {
         "classes": tf.argmax(input=logits, axis=1),
-        "probabilities": tf.nn.softmax(
-            logits = logits,
-            name ="softmax_tensor")
-    }
+        "probabilities": probabilities}
     
     #A dictionary for scoring used when exporting model for serving.   
     the_export_outputs = {
-        "scores" : tf.estimator.export.ClassificationOutput(scores=logits)}
+        "scores" : tf.estimator.export.ClassificationOutput(scores=logits),
+        "serving_default" : tf.estimator.export.ClassificationOutput(scores= probabilities)}
     
     #Create the validation metric
     validation_metric = None
@@ -226,8 +234,8 @@ def cnn_model_fn(features, labels, mode, params):
         training_hooks=[summary_hook],
         export_outputs=the_export_outputs,
         eval_metric_ops=validation_metric)
-    
-    
+
+
 
 #Figure out how to use this parameter, and write this method to generate a run
 #based on the information given in the parameter
@@ -240,10 +248,6 @@ def main(unused_param):
         """
         Processes a line of the input text file.  It gets a 64x2 representation
         of the board, and returns it along with the label as a tuple.
-        
-        IDEAS FOR BATCHING:
-        1) reshape from [?, 64] to [?*64] then do the lookup and gather then reshape again
-        
         
         IMPORTANT NOTES:
         1) Need to figure out if lookup table is being created each time this function is being called
@@ -306,7 +310,53 @@ def main(unused_param):
                     [64,6])
                 
                 return data
-    
+
+    def process_line_as_2d_input_serving(board_config):
+        """
+        This function is likely temporary, and will be deleted when process_line_as_2d_input has 
+        the capabilities to do what it does now, as well as the changes that have been made in this function.
+        """
+        with tf.name_scope("process_data_2d"):
+            with tf.device("/cpu:0"):
+                # A tensor referenced when getting indices of characters for the the_values array
+                # NOTE: should make sure this is only being created once per creation of data pipeline
+                mapping_strings = tf.constant(["1", "K", "Q", "R", "B", "N", "P", "k", "q", "r", "b", "n", "p"])
+
+
+                the_values = tf.constant(
+                    [[0, 0, 0, 0, 0, 0],
+                     [1, 0, 0, 0, 0, 0],
+                     [0, 1, 0, 0, 0, 0],
+                     [0, 0, 1, 0, 0, 0],
+                     [0, 0, 0, 1, 0, 0],
+                     [0, 0, 0, 0, 1, 0],
+                     [0, 0, 0, 0, 0, 1],
+                     [-1, 0, 0, 0, 0, 0],
+                     [0, -1, 0, 0, 0, 0],
+                     [0, 0, -1, 0, 0, 0],
+                     [0, 0, 0, -1, 0, 0],
+                     [0, 0, 0, 0, -1, 0],
+                     [0, 0, 0, 0, 0, -1],
+                     ], dtype=tf.float32)
+
+                # Create the table for getting indices (for the_values) from the information about the board
+                the_table = tf.contrib.lookup.index_table_from_tensor(mapping=mapping_strings,
+                                                                      name="index_lookup_table")
+                # Using the reshape operation to declare the size of the tensor so it's known
+                # (to the computer not to whoever is reading this)
+                data = tf.reshape(
+                    # Get the values at the given indices
+                    tf.gather(
+                        the_values,
+                        # Get an array of indices corresponding to the array of characters
+                        the_table.lookup(
+                            # Split the string into an array of characters
+                            tf.string_split(
+                                board_config,
+                                delimiter="").values)),
+                    [-1, 64, 6])
+
+                return data
     
     def aquire_data_ops(filename_queue, processing_method, record_defaults=None):   
         """
@@ -374,19 +424,26 @@ def main(unused_param):
                 allow_smaller_final_batch=allow_smaller_final_batch)
             return batch, labels
     
-    
-    
+
     def serving_input_receiver_fn():
         """
         A function to use for input processing when serving the model.
         """
+        feature_spec = {'str': tf.FixedLenFeature([1], tf.string)}
         serialized_tf_example = tf.placeholder(
             dtype=tf.string,
             name='input_example_tensor')
-        data = process_line_as_2d_input(serialized_tf_example)
+
         receiver_tensors = {'example': serialized_tf_example}
+
+        features = tf.parse_example(serialized_tf_example, feature_spec)
+
+        features['str'] = tf.reshape(features['str'], [-1])
         
-        return tf.estimator.export.ServingInputReceiver(data, serialized_tf_example)
+        data = process_line_as_2d_input_serving(features['str'])
+        # data = tf.map_fn(process_line_as_2d_input_serving, features['str'], dtype=tf.float32)
+        
+        return tf.estimator.export.ServingInputReceiver(data, receiver_tensors)
     
 
     
