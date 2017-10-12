@@ -8,10 +8,10 @@ Currently the version of TensorFlow used in this code is 1.3.0, although some of
 
 # Current Code and Future Plans
 
--Use inception based convolutional neural networks as a method of scoring a given chess board
--Design and build a neural network based approach to move ordering
--Implement BNS utilizing  neural networks to estimate/adjust internal values
--Implement zero-window Negamax algorithm (likely heavily modified),  in a parallelized manner
--Implement opening and closing game position tables
+- Use inception based convolutional neural networks as a method of scoring a given chess board
+- Design and build a neural network based approach to move ordering
+- Implement BNS utilizing a neural networks to adjust separating value guess
+- Implement a faster zero-window Negamax algorithm (likely heavily modified), in a parallelized manner
+- Implement opening and closing game position tables
 
 Much, much more information/code to come!
