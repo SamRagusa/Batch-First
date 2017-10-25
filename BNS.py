@@ -67,18 +67,27 @@ class BNS(Player):
     A class representing a Chess playing AI implementing Negamax tree search with Alpha-Beta pruning.
     """
 
-    def __init__(self, is_white, the_depth, board_heuristic, the_board=None, deepening=False , random_decrease=0):
+    def __init__(self, is_white, the_depth, board_heuristic, the_board=None, deepening=False, ordered_move_generator=None , random_decrease=0):
         """
         Initialize the instance variables to be stored by the AI.
+
+        Notes:
+        1) Pretty sure having the_board be a default parameter may be problematic.  Should likely change this
         """
         self._board = the_board
         self._depth = the_depth
         self._is_white = is_white
         self._deepening = deepening
+
         if board_heuristic is None:
             self._heuristic = self.heuristic_creator(random_decrease=random_decrease)
         else:
             self._heuristic = board_heuristic
+
+        if ordered_move_generator is None:
+            self._ordered_move_generator = self._board.generate_legal_moves
+        else:
+            self._ordered_move_generator = ordered_move_generator
 
         self._tt = {}
 
@@ -142,7 +151,7 @@ class BNS(Player):
 
         else:
             best_value = float('-inf')
-            for move in self._board.legal_moves:
+            for move in self._ordered_move_generator():
                 self._board.push(move)
                 v = - self.negamax(depth - 1, - beta, - alpha, - color)
                 best_value = max(best_value, v)
@@ -348,15 +357,15 @@ def main(_):
     board = MyBoard()
 
 
-    ann_evaluator_white = ANNEvaluator(board)
+    ann_evaluator_white = ANNEvaluator(board, host="localhost")
     ann_evaluator_black = ANNEvaluator(board, for_white=False)
 
 
     # better_ai = Negamax(True, 2, None, board, random_decrease=0.05)
-    better_ai = BNS(True, 3, ann_evaluator_white.score_board, board, deepening=True)
+    better_ai = BNS(True, 4, ann_evaluator_white.score_board, board, deepening=True)
     # better_ai = BNS(True, 4, None, board, random_decrease=0)#, deepening=True)
     # other_better_ai = BNS(True, 5, None, board, random_decrease=0)
-    # other_better_ai = BNS(True, 8, ann_evaluator.get_win_probability_function(), board)
+    other_better_ai = BNS(True, 4, ann_evaluator_white.score_board, board, deepening=True, ordered_move_generator= board.ordered_move_generator_basic)
     # other_better_ai = Negamax(True, 3, ann_evaluator_white.test_get_win_probability_function, board)
     # worse_ai = BNS(False, 6, ann_evaluator_black.test_get_win_probability_function, board, random_decrease=.0)
     # worse_ai = BNS(False, 4, ann_evaluator_black.test_get_win_probability_function, board, random_decrease=.05)
@@ -378,7 +387,7 @@ def main(_):
     1) Test BNS without replacing TTs after every game and see if they still have no collisions
     """
 
-    NUM_GAMES = 5
+    NUM_GAMES = 1
     PRINT_EVERY_MOVE = False
     PRINT_AT_END_OF_GAME = True
     PRINT_AT_MOVE_INCREMENT = False
@@ -407,15 +416,15 @@ def main(_):
             better_ai_move_to_make, better_ai_moves, _= better_ai.make_move()
             # better_ai_move_to_make = better_ai.make_move()
             move_time = time.time() - start_move_time
-            # print("Deepening time:", move_time)
+            print("No move ordering time:", move_time)
             better_ai_time = better_ai_time + move_time
             # print(board)
 
-            # start_move_time = time.time()
-            # other_better_ai_move = other_better_ai.make_move()
-            # move_time = time.time() - start_move_time
-            # print("Non-deepening time:", move_time)
-            # other_better_ai_time =  other_better_ai_time + move_time
+            start_move_time = time.time()
+            other_better_ai_move = other_better_ai.make_move()
+            move_time = time.time() - start_move_time
+            print("Basic move ordering time:", move_time)
+            other_better_ai_time =  other_better_ai_time + move_time
             # print(board)
 
             if False:#not other_better_ai_move in better_ai_moves:
