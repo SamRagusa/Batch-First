@@ -7,8 +7,8 @@ In the Wu-Tang Clan song Da Mystery Of Chessboxin', you can find the following q
 This engine will embody those ideas.
 
 # Current Methods
-- Using inception based convolutional neural networks as a method of scoring a given chess board
-- Using Numba to compile all python code used for move generation to machine code with the LLVM compiler (complete negamax algorithm will be compiled very soon)
+- A convolutional neural network architecture inspired by the movement of chess pieces is used as the board evaluation function (detailed explanation coming very soon)
+- Using Numba to compile all python code used for move generation to machine code with the LLVM compiler (complete negamax algorithm to come)
 - Using Best Node Search as the tree search algorithm
 - Using TensorFlow Serving for neural network inference
 
@@ -20,6 +20,6 @@ This engine will embody those ideas.
 
 # Other Information
 - Much of the code is not yet completed, but should be completed and uploaded before the end of 2017
-- Special thanks to the python-chess package which most of my Numba move generation code is based on 
+- Special thanks to the python-chess package which most of my Numba move generation code is based on
 
 Much, much more information and code to come!

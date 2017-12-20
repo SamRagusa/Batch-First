@@ -6,10 +6,7 @@ Created on Jul 2, 2017
 
 import tensorflow as tf
 
-import ann_creation_helper_for_commit as ann_h
-
-from functools import reduce
-
+import ann_creation_helper as ann_h
 
 
 tf.logging.set_verbosity(tf.logging.INFO)
@@ -23,12 +20,12 @@ def main(unused_param):
     """
     Set up the data pipelines, create the computational graph, train the model, and evaluate the results.
     """
-    SAVE_MODEL_DIR = "/home/sam/Desktop/tmp/pre_commit_test"
+    SAVE_MODEL_DIR = "/home/sam/Desktop/tmp/pre_commit_test_2"
     TRAINING_FILENAMES = ["/srv/databases/chess_engine/full_3/shuffled_training_set.txt"]
     VALIDATION_FILENAMES = ["/srv/databases/chess_engine/full_5/scoring_validation_set.tfrecords"]
     TRAIN_OP_SUMMARIES = ["gradient_norm", "gradients"]
     NUM_OUTPUTS = 1
-    DENSE_SHAPE = [1024,512,256]
+    DENSE_SHAPE = [1024,1024,512]
     OPTIMIZER = 'Adam'
     TRAINING_MIN_AFTER_DEQUEUE = 20000
     VALIDATION_MIN_AFTER_DEQUEUE = 10000
@@ -41,19 +38,19 @@ def main(unused_param):
 
 
 
+
+
     INCEPTION_MODULES = [
         [
-            [[32, 2], [50, 2], [64, 2]],
-            [[32, 3], [64, 2]],
-            [[5, 4]]],  # 133 5x5 feature map outputs
+            [[64,2],[128,2]],
+            [[64,3]]],
         [
-            [[64, 1]],
-            [[32, 1], [16, 2]],
-            [[32, 1], [16, 3]]]]  # output of 2000  neurons
+            [[64,1]],
+            [[16,1], [32,1,6]],
+            [[16,1], [32,6,1]]]]
 
 
-
-    BATCHES_IN_TRAINING_EPOCH = 758545383  // (TRAINING_BATCH_SIZE)
+    BATCHES_IN_TRAINING_EPOCH = 758545383  // TRAINING_BATCH_SIZE
     #reduce(
         # lambda x, y: x + y,
         # [ann_h.line_counter(filename) for filename in TRAINING_FILENAMES]) // (TRAINING_BATCH_SIZE * 10)
@@ -64,12 +61,12 @@ def main(unused_param):
 
     learning_decay_function = lambda gs  : tf.train.exponential_decay(LEARNING_RATE,
                                                                       global_step=gs,
-                                                                      decay_steps=BATCHES_IN_TRAINING_EPOCH//60,
+                                                                      decay_steps=BATCHES_IN_TRAINING_EPOCH//38,
                                                                       decay_rate=0.9,
                                                                       staircase=True)
 
-    print(BATCHES_IN_TRAINING_EPOCH)
-    print(BATCHES_IN_VALIDATION_EPOCH)
+    # print(BATCHES_IN_TRAINING_EPOCH)
+    # print(BATCHES_IN_VALIDATION_EPOCH)
 
 
     # Create the Estimator
@@ -93,7 +90,7 @@ def main(unused_param):
             'equality_scalar': EQUALITY_SCALAR_MULT})
 
     validation_hook = ann_h.ValidationRunHook(
-        step_increment=BATCHES_IN_TRAINING_EPOCH//6000,
+        step_increment=BATCHES_IN_TRAINING_EPOCH//60,
         estimator=classifier,
         filenames=VALIDATION_FILENAMES,
         batch_size=VALIDATION_BATCH_SIZE,

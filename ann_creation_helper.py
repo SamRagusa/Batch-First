@@ -44,8 +44,12 @@ def build_fully_connected_layers_with_batch_norm(the_input, shape, mode, num_pre
     return the_input, activation_summaries
 
 
-def build_inception_module_with_batch_norm(the_input, module, mode, activation_summaries=[], num_previously_built_inception_modules=0, padding='same'):
+def build_inception_module_with_batch_norm(the_input, module, mode, activation_summaries=[], num_previously_built_inception_modules=0, padding='same', force_no_concat=False):
     """
+    NOTE:
+    1) This comment no longer fully describes the functionality of the function.  It will be updated in the near future
+    when I have a bit more time to focus on this type of stuff.
+
     Builds an inception module based on the design given to the function.  It returns the final layer in the module,
     and the activation summaries generated for the layers within the inception module.
 
@@ -67,11 +71,11 @@ def build_inception_module_with_batch_norm(the_input, module, mode, activation_s
                         path_outputs[j - 1] = cur_input
 
                     cur_input = the_input
-
+                kernel_size = [section[1], section[1]] if len(section)==2 else [section[1], section[2]]
                 cur_conv_output = tf.layers.conv2d(
                     inputs=cur_input,
                     filters=section[0],
-                    kernel_size=[section[1], section[1]],
+                    kernel_size=kernel_size,
                     padding=padding,
                     use_bias=False,
                     kernel_initializer=layers.xavier_initializer(),
@@ -91,104 +95,10 @@ def build_inception_module_with_batch_norm(the_input, module, mode, activation_s
 
     with tf.variable_scope("inception_module_" + str(num_previously_built_inception_modules + 1)):
         for j in range(1, len(path_outputs)):
-            if path_outputs[0].get_shape().as_list()[1:3] != path_outputs[j].get_shape().as_list()[1:3]:
+            if force_no_concat or path_outputs[0].get_shape().as_list()[1:3] != path_outputs[j].get_shape().as_list()[1:3]:
                 return [temp_input for temp_input in path_outputs], activation_summaries
 
         return tf.concat([temp_input for temp_input in path_outputs], 3), activation_summaries
-
-def build_inception_module(the_input, module, activation_summaries=[], num_previously_built_inception_modules=0, init_bias_value=.01, padding='same'):
-    """
-    NOTES:
-    1) This will very likely not be used again, as batch normalization has been working very well.
-    """
-    path_outputs = [None for _ in range(len(module))]
-    to_summarize = []
-    cur_input = None
-    for j, path in enumerate(module):
-        with tf.variable_scope("inception_module_" + str(num_previously_built_inception_modules + 1) + "_path_" + str(j + 1)):
-            for i, section in enumerate(path):
-                if i == 0:
-                    if j != 0:
-                        path_outputs[j - 1] = cur_input
-
-                    cur_input = the_input
-
-                cur_input = tf.layers.conv2d(
-                    inputs=cur_input,
-                    filters=section[0],
-                    kernel_size=[section[1], section[1]],
-                    padding=padding,
-                    activation=tf.nn.relu,
-                    kernel_initializer=layers.xavier_initializer(),
-                    bias_initializer=tf.constant_initializer(init_bias_value, dtype=tf.float32),
-                    name="layer_" + str(i + 1))
-
-                to_summarize.append(cur_input)
-
-    path_outputs[-1] = cur_input
-
-    activation_summaries = activation_summaries + [layers.summarize_activation(layer) for layer in to_summarize]
-
-    with tf.variable_scope("inception_module_" + str(num_previously_built_inception_modules + 1)):
-        for j in range(1, len(path_outputs)):
-            if path_outputs[0].get_shape().as_list()[1:3] != path_outputs[j].get_shape().as_list()[1:3]:
-                return [temp_input for temp_input in path_outputs], activation_summaries
-
-        return tf.concat([temp_input for temp_input in path_outputs], 3), activation_summaries
-
-
-def build_fully_connected_layers(the_input, shape, mode, dropout_rates=None, num_previous_fully_connected_layers=0, init_bias_value=.01, activation_summaries=[]):
-    """
-    NOTES:
-    1)This will very likely not be used again, using dropout made no sense, and
-    batch normalization replaces the need for biases.
-
-
-    a function to build the fully connected layers onto the computational graph from
-    given specifications.
-
-    Dropout_rates if kept as the default None will be 0 for every layer, if set to a scalar
-    between 0 (inclusive) and 1 (exclusive) will apply the given dropout rate to every layer
-    being built, lastly dropout_rates can be an array the same size as the shape parameter,
-    where the dropout rate at index j will be applied to the layer with shape given at index
-    j of the shape parameter.
-    """
-
-    if dropout_rates == None:
-        dropout_rates = [0] * len(shape)
-    elif not isinstance(dropout_rates, list):
-        if dropout_rates >= 0 and dropout_rates < 1:
-            dropout_rates = [dropout_rates] * len(shape)
-        else:
-            print("THIS ERROR NEEDS TO BE HANDLED BETTER!   1")
-    else:
-        if len(dropout_rates) != len(shape):
-            print("THIS ERROR NEEDS TO BE HANDLED BETTER!   2")
-
-    for index, size, dropout in zip(range(len(shape)), shape, dropout_rates):
-        with tf.variable_scope("FC_" + str(num_previous_fully_connected_layers + index + 1)):
-            temp_layer_dense = tf.layers.dense(
-                inputs=the_input,
-                units=size,
-                activation=tf.nn.relu,
-                kernel_initializer=layers.xavier_initializer(),
-                bias_initializer=tf.constant_initializer(init_bias_value, dtype=tf.float32),
-                name="layer")
-            if dropout != 0:
-                the_input = tf.layers.dropout(
-                    inputs=temp_layer_dense,
-                    rate=dropout,
-                    training=mode == tf.estimator.ModeKeys.TRAIN,
-                    name="dropout")
-            else:
-                the_input = temp_layer_dense
-        activation_summaries.append(layers.summarize_activation(temp_layer_dense))
-
-    return the_input, activation_summaries
-
-
-
-
 
 
 
