@@ -19,10 +19,10 @@ class MyBoard(chess.Board):
 
     def tf_representation(self, promoted=False):
         """
-        Returns the board in the format currently being accepted by the 
+        Returns the board in the format currently being accepted by the
         neural network input function.  If it's blacks turn,
         the board is made to be as if it were whites turn.
-        
+
         Current board format example:
         rnbqkbnrpppppppp11111111111111111111111111111111PPPPPPPPRNBQKBNR
 
@@ -31,7 +31,7 @@ class MyBoard(chess.Board):
         an alternate string representation here, but should be transformed as described in the Trello card
         describing this problem.
         """
-        
+
         #If it's whites turn
         if self.turn:
             return "".join(
@@ -43,19 +43,19 @@ class MyBoard(chess.Board):
             to_build = []
             for square in chess.SQUARES_180:
                 piece = self.piece_at(square)
-    
+
                 if not piece:
-                    
+
                     to_build.append(str(1))
                 else:
                     to_build.append(piece.symbol())
                     if promoted and chess.BB_SQUARES[square] & self.promoted:
                         builder.append("~")
-    
+
                 if chess.BB_SQUARES[square] & chess.BB_FILE_H:
                     builder.append(to_build)
                     to_build = []
-            
+
             return "".join(sum(reversed(builder),[]))
 
 
@@ -125,5 +125,44 @@ class MyBoard(chess.Board):
                 del move_dict[move]
 
 
+    def database_board_representation(self):
+        """
+        This method returns a string representation of the board for use during database generation.
+        """
+        builder = ["" for _ in range(64)]
+        if self.ep_square is None:
+            ep_square = -1
+        else:
+            ep_square = self.ep_square
 
+        castling_rooks = []
+        if self.castling_rights != 0:
+            if self.castling_rights & chess.BB_A1:
+                castling_rooks.append(chess.A1)
+            if self.castling_rights & chess.BB_H1:
+                castling_rooks.append(chess.H1)
+            if self.castling_rights & chess.BB_A8:
+                castling_rooks.append(chess.A8)
+            if self.castling_rights & chess.BB_H8:
+                castling_rooks.append(chess.H8)
+
+        for square in chess.SQUARES_180:
+            piece = self.piece_at(square)
+
+            if not piece:
+                if ep_square == square:
+                    builder[square] = "1"
+                else:
+                    builder[square] = "0"
+
+            else:
+                if square in castling_rooks:
+                    if piece.color == chess.WHITE:
+                        builder[square] = 'C'
+                    else:
+                        builder[square] = 'c'
+                else:
+                    builder[square] = piece.symbol()
+
+        return "".join(builder)
 
