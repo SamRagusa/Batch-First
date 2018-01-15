@@ -1249,6 +1249,16 @@ def _ep_skewered(board_state, king, capturer):
     return False
 
 
+@jit(boolean(BoardState.class_type.instance_type), nopython=True)
+def is_in_check(board_state):
+    if board_state.turn == TURN_WHITE:
+        king = msb(board_state.occupied_w & board_state.kings)
+        return bool(_attackers_mask(board_state, TURN_BLACK, king, board_state.occupied))
+    else:
+        king = msb(board_state.occupied_b & board_state.kings)
+        return bool(_attackers_mask(board_state, TURN_WHITE, king, board_state.occupied))
+
+
 @jit(boolean(BoardState.class_type.instance_type, uint8, uint64, Move.class_type.instance_type), nopython=True)
 def _is_safe(board_state, king, blockers, move):
 
