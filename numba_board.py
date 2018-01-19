@@ -146,6 +146,13 @@ class BoardState:
         self.fullmove_number = fullmove_number
         self.cur_hash = cur_hash
 
+@jit
+def get_info_for_tensorflow(board_state):
+    return np.array([board_state.occupied_w, board_state.occupied_b, board_state.kings, board_state.queens,
+                     board_state.rooks, board_state.bishops, board_state.knights, board_state.pawns,
+                     board_state.castling_rights,
+                     np.int64(0 if board_state.ep_square is None else board_state.ep_square)], dtype=np.int64)
+
 
 @jit(BoardState.class_type.instance_type(BoardState.class_type.instance_type), nopython=True)
 def copy_board_state(board_state):

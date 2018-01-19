@@ -1,14 +1,12 @@
-import numpy as np
 import numba as nb
-from numba import int8, int32, uint8, uint16, uint64, float32, boolean, void, deferred_type, optional
-from numba import jit, jitclass, vectorize
-from numba import config
-from collections import OrderedDict
+from numba import float32
+
 from numba_board import *
 
-import random as rand
-from numpy import rec
+from board_eval_client import ANNEvaluator
 
+# from numpy import rec
+import numpy as np
 
 numpy_move_dtype = np.dtype([("from_square", np.uint8), ("to_square", np.uint8), ("promotion", np.uint8)])
 move_type = nb.from_dtype(numpy_move_dtype)
@@ -106,6 +104,11 @@ class GameNode:
             False,
             np.uint8(0))
 
+    def has_uncreated_child(self):
+        if self.next_move_score is None:
+            return False
+        return True
+
 
 
 gamenode_type.define(GameNode.class_type.instance_type)
@@ -114,7 +117,7 @@ gamenode_type.define(GameNode.class_type.instance_type)
 
 
 
-@jit(GameNode.class_type.instance_type(uint8, float32),  nopython=True)
+@njit(GameNode.class_type.instance_type(uint8, float32))
 def create_root_game_node(depth, seperator):
     return GameNode(create_initial_board_state(),
                     None,
@@ -128,14 +131,15 @@ def create_root_game_node(depth, seperator):
                     False,
                     np.uint8(0))
 
-@jit(boolean(GameNode.class_type.instance_type), nopython=True)
-def has_uncreated_child(game_node):
-    if game_node.next_move_score is None:
-        return False
-    return True
+# @njit(boolean(GameNode.class_type.instance_type))
+# def has_uncreated_child(game_node):
+#     if game_node.next_move_score is None:
+#         return False
+#     return True
 
 
-@jit(boolean(GameNode.class_type.instance_type),nopython=True)
+# @jit(boolean(GameNode.class_type.instance_type),nopython=True)  #This worked, but prevented other functions from compiling
+@njit
 def should_terminate(game_node):
     cur_node = game_node
     while cur_node is not None:
@@ -146,6 +150,7 @@ def should_terminate(game_node):
 
 
 #@jit((GameNode.class_type.instance_type, float32),nopython=True)
+# @njit
 def zero_window_update_node_from_value(node, value):
     if not node is None:
         if not node.terminated:
@@ -160,9 +165,19 @@ def zero_window_update_node_from_value(node, value):
                     zero_window_update_node_from_value(temp_parent, -node.best_value)
 
 
-@jit(float32(BoardState.class_type.instance_type), nopython=True)#, nogil=True)
+# @jit(float32(BoardState.class_type.instance_type), nopython=True, nogil=True, cache=True)#, parallel=True)
+@njit(cache=True) #Can release the GIL here if wanted, but doesn't really speed things up
 def simple_board_state_evaluation_for_white(board_state):
     score = np.float32(0)
+
+    # value_array = np.array([.1, .3, .45, .6, .9], dtype=np.float32)
+    # piece_bb_array = np.array(
+    #     [board_state.pawns,board_state.knights , board_state.bishops, board_state.rooks, board_state.queens],
+    #     dtype=np.uint64)
+    #
+    # for index in nb.prange(value_array.shape[0]):
+    #     score += value_array[index] * (np.float32(popcount(piece_bb_array[index] & board_state.occupied_w)) - np.float32(popcount(piece_bb_array[index] & board_state.occupied_b)))
+
 
     for piece_val, piece_bb in zip(np.array([.1, .3, .45, .6, .9], dtype=np.float32), [board_state.pawns,board_state.knights , board_state.bishops, board_state.rooks, board_state.queens]):
         score += piece_val * (np.float32(popcount(piece_bb & board_state.occupied_w)) - np.float32(popcount(piece_bb & board_state.occupied_b)))
@@ -170,7 +185,7 @@ def simple_board_state_evaluation_for_white(board_state):
     return score
 
 
-@jit(float32(GameNode.class_type.instance_type), nopython=True)
+@njit(float32(GameNode.class_type.instance_type))
 def evaluate_game_node(game_node):
     """
     A super simple evaluation function for a game_node.
@@ -179,45 +194,43 @@ def evaluate_game_node(game_node):
 
 
 
-# @jit(void(GameNode.class_type.instance_type, float32), nopython=True)
-# def update_game_node(game_node, value):
-#     """
-#     IMPORTANT NOTES:
-#     1) This no longer works since I've switched the negamax implementation to only do zero window searchs,
-#     though could be updated to work fairly easily
-#     """
-#     cur_game_node = game_node
-#     cur_value = value
-#     while not cur_game_node is None:
-#         cur_game_node.best_value = max(cur_game_node.best_value, cur_value)
-#         cur_game_node.alpha = max(cur_game_node.alpha, cur_value)
-#         if cur_game_node.alpha >= cur_game_node.beta:
-#
-#             cur_game_node.terminated = True
-#
-#             cur_value = cur_game_node.best_value
-#             cur_game_node = cur_game_node.parent
-#
-#
-# @jit(void(GameNode.class_type.instance_type, int8), nopython=True)
-# def do_alpha_beta(game_node, color):
-#     """
-#     A simple alpha-beta algorithm to test my code.
-#
-#     IMPORTANT NOTES:
-#     1) This no longer works since I've switched the negamax implementation to only do zero window searchs,
-#     though could be updated to work fairly easily
-#     """
-#     if game_node.depth == 0:
-#         update_game_node(game_node, color * evaluate_game_node(game_node))
-#
-#     for move in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
-#         update_game_node(game_node, - do_alpha_beta(create_child_from_move(game_node, move), -color))
-#
-#         if game_node.terminated:
-#             break
-#
-    # return game_node.best_value
+# @njit(float32(GameNode.class_type.instance_type, float32, float32, nb.int8))
+def new_basic_do_alpha_beta(game_node, alpha, beta, color):
+    """
+    A simple alpha-beta algorithm to test my code.
+
+    IMPORTANT NOTES:
+    1) This no longer works since I've switched the negamax implementation to only do zero window searchs,
+    though could be updated to work fairly easily
+    """
+    has_move = False
+    for _ in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
+        has_move = True
+        break
+
+    if not has_move:
+        if is_in_check(game_node.board_state):
+            if color == 1:
+                return MAX_FLOAT32_VAL
+            return MIN_FLOAT32_VAL
+        return 0
+
+
+    if game_node.depth == 0:
+        return color * test_evaluate_batch(np.array([game_node]))[0].value
+
+    best_value = MIN_FLOAT32_VAL
+    for move in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
+        v = - new_basic_do_alpha_beta(game_node.zero_window_create_child_from_move(move), -beta, -alpha, -color)
+        best_value = max(best_value, v)
+        alpha = max(alpha, v)
+        if alpha >= beta:
+            break
+
+
+
+
+    return best_value
 
 
 
@@ -308,7 +321,7 @@ def check_linked_list_integrity(linked_list):
         print_linked_list_values(linked_list)
 
 
-# @njit
+# @jit(void(PriorityLinkedList.class_type.instance_type, GameNode.class_type.instance_type[:] , optional(LinkedListNode.class_type.instance_type)))#, nopython=True)
 def append_sorted_array_after_given_node(linked_list, sorted_array, final_node=None):
     """
     @param final_node The node in the linked list in which to start appending nodes after.  This parameter is None
@@ -325,8 +338,8 @@ def append_sorted_array_after_given_node(linked_list, sorted_array, final_node=N
         final_node.next = cur_node
 
 
-#jit(void(PriorityLinkedList, GameNode.class_type.instance_type[:]), nopython=True)
-#@njit
+# @njit
+# @jit(void(PriorityLinkedList.class_type.instance_type, GameNode.class_type.instance_type[:]))#, nopython=True)
 def push_sorted_array(linked_list, sorted_array):
     if linked_list.size == 0:
         append_sorted_array_after_given_node(linked_list, sorted_array)
@@ -348,7 +361,6 @@ def push_sorted_array(linked_list, sorted_array):
     linked_list.size += len(sorted_array)
 
 
-# @njit
 def pop_full_list_as_numpy_array(linked_list):
     array_to_return = np.empty(shape=linked_list.size, dtype=np.object)
     index_in_return_array = 0
@@ -363,6 +375,7 @@ def pop_full_list_as_numpy_array(linked_list):
     return array_to_return[:index_in_return_array]
 
 
+@njit
 def remove_consecutive_terminated_nodes_from_root(linked_list):
     while linked_list.size > 0 and should_terminate(linked_list.root_node.data):
         linked_list.root_node = linked_list.root_node.next
@@ -432,7 +445,7 @@ def create_next_batch_and_insert_sorted(linked_list, game_board_array, max_batch
         return array_to_return
 
 
-@jit(void(GameNode.class_type.instance_type), nopython=True)
+@njit(void(GameNode.class_type.instance_type))
 def set_up_next_best_move(node):
     next_move_index = np.argmax(node.unexplored_move_scores)
 
@@ -452,16 +465,17 @@ def set_up_next_best_move(node):
         node.next_move_score = None
 
 
-# @jit(void(GameNode.class_type.instance_type), nopython=True)
-def replace_next_best_move(node):
-    if len(node.unexplored_moves) == 0:
-        node.next_move = None
-        node.next_move_score = None #probably don't need to do this
-    else:
-        set_up_next_best_move(node)
+# # @jit(void(GameNode.class_type.instance_type), nopython=True)
+# @njit
+# def replace_next_best_move(node):
+#     if len(node.unexplored_moves) == 0:
+#         node.next_move = None
+#         node.next_move_score = None #probably don't need to do this
+#     else:
+#         set_up_next_best_move(node)
 
 
-@jit(GameNode.class_type.instance_type(GameNode.class_type.instance_type),nopython=True)
+@njit(GameNode.class_type.instance_type(GameNode.class_type.instance_type))
 def spawn_child_from_node(node):
     to_return = node.zero_window_create_child_from_move(node.next_move)
 
@@ -472,7 +486,6 @@ def spawn_child_from_node(node):
     return to_return
 
 
-# @njit
 def create_child_array(node_array):
     """
     Creates and returns an array of children spawned from an array of nodes who all have children left to
@@ -484,18 +497,37 @@ def create_child_array(node_array):
 
     return array_to_return
 
+evaluator = ANNEvaluator(None)
 
-# @njit
-# @jit(void(GameNode.class_type.instance_type[:]), nopython=True)
+def test_evaluate_batch(node_array):
+    # Should be doing this much more efficiently
+    global evaluator
+    if node_array.any():
+        return evaluator.for_numba_score_batch(node_array)
+    return None
+
+# @jit(void(GameNode.class_type.instance_type[:]))#, nopython=True)
 def evaluate_depth_zero_batch(node_array):
     """
     Evaluates the nodes given, storing the value for any node N, in N.best_value.
     """
-    for j in range(len(node_array)):
-        if node_array[j].board_state.turn == TURN_WHITE: #This assumes that the player doing the search is white
-            node_array[j].best_value = evaluate_game_node(node_array[j])
-        else:
-            node_array[j].best_value = -evaluate_game_node(node_array[j])
+    scores = test_evaluate_batch(node_array)
+    if not scores is None:
+        for node, value in zip(node_array, scores):
+            if node.board_state.turn == TURN_WHITE:#This assumes that the player doing the search is white
+                node.best_value = value.value
+            else:
+                node.best_value = - value.value
+
+    #########This code is used if the extremely basic heuristic is desired to be used
+    # for j in range(len(node_array)):
+    #     if node_array[j].board_state.turn == TURN_WHITE: #This assumes that the player doing the search is white
+    #         node_array[j].best_value = evaluate_game_node(node_array[j])
+    #     else:
+    #         node_array[j].best_value = -evaluate_game_node(node_array[j])
+
+
+
 
 
 def get_indicies_of_terminating_children(node_array):
@@ -588,7 +620,7 @@ def do_iteration(batch):
         terminating_children_indices = get_indicies_of_terminating_children(children_created)
 
         have_children_left_indices = np.array(
-            [True if has_uncreated_child(depth_not_zero_nodes[j]) else False for j in range(len(depth_not_zero_nodes))])
+            [True if depth_not_zero_nodes[j].has_uncreated_child() else False for j in range(len(depth_not_zero_nodes))])
 
         depth_not_zero_with_more_kids_nodes = depth_not_zero_nodes[have_children_left_indices]
 
@@ -682,14 +714,15 @@ print("Done compiling and starting run.\n")
 
 
 starting_time = time.time()
-perft_results = jitted_perft_test(create_initial_board_state(), 5)
+perft_results = jitted_perft_test(create_initial_board_state(), 4)
 print("Depth 4 perft test results:", perft_results, "in time", time.time()-starting_time, "\n")
 
 
 DEPTH_OF_SEARCH = 4
-MAX_BATCH_LIST = [j**2 for j in range(20,0,-1)]
+MAX_BATCH_LIST = [j**2 for j in range(20,0,-1)] + [5000]
+
 for j in MAX_BATCH_LIST:
-    root_node = create_root_game_node(DEPTH_OF_SEARCH,.1)
+    root_node = create_root_game_node(DEPTH_OF_SEARCH,-1)
 
     get_indicies_of_terminating_children(np.array([root_node]))
 
@@ -702,3 +735,9 @@ for j in MAX_BATCH_LIST:
 
     print("Value:", cur_value, "found with max batch", j, "in time:", time.time() - starting_time)
 
+print()
+
+root_node = create_root_game_node(DEPTH_OF_SEARCH,-1)
+for j in range(1):
+    starting_time = time.time()
+    print("Basic negamax with alpha-beta pruning resulted in:", new_basic_do_alpha_beta(root_node, MIN_FLOAT32_VAL, MAX_FLOAT32_VAL, 1), "in time:", time.time()-starting_time)

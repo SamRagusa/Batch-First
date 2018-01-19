@@ -5,6 +5,7 @@ Created on Oct 10, 2017
 
 
 import tensorflow as tf
+import numpy as np
 from tensorflow.contrib import layers
 from tensorflow.python import training
 
@@ -116,7 +117,7 @@ def cnn_model_fn(features, labels, mode, params):
         return mean_metric
 
     if mode == tf.estimator.ModeKeys.PREDICT:
-        features = features['feature']
+        input_layer = features["feature"]
     else:
         # I'm doing this twice (once here and one in the data pipeline), I should change that
         input_layer = tf.reshape(features, [-1, 8, 8, 16])
@@ -143,6 +144,7 @@ def cnn_model_fn(features, labels, mode, params):
 
         inception_module_outputs = tf.concat(inception_module_paths_flattened, 1)
     else:
+        #I think this causes problems if it occurs (not happening in current model)
         inception_module_outputs = cur_inception_module
 
 
@@ -166,6 +168,7 @@ def cnn_model_fn(features, labels, mode, params):
 
     loss = None
     train_op = None
+    ratio_old_new_sum_loss_to_negative_sum = None
 
     # (p,q,r) = (original_position, choosen_position, random_position)
     original_pos, desired_pos, random_pos = tf.split(tf.reshape(logits, [-1, 3, 1]), [1, 1, 1], 1)
@@ -191,6 +194,8 @@ def cnn_model_fn(features, labels, mode, params):
 
             equality_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(adjusted_equality_sum)))
             negative_equality_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(tf.negative(adjusted_equality_sum))))
+
+            ratio_old_new_sum_loss_to_negative_sum = tf.divide(equality_scalar_loss, negative_equality_scalar_loss)
 
             real_rand_loss_summary = tf.summary.scalar("real_greater_rand_loss", real_greater_rand_scalar_loss)
 
@@ -229,8 +234,6 @@ def cnn_model_fn(features, labels, mode, params):
         "serving_default": tf.estimator.export.RegressionOutput(value=logits)}
 
 
-
-
     real_rand_diff = desired_pos - random_pos
     old_plus_desired = original_pos + desired_pos
     # Create the validation metrics
@@ -245,9 +248,11 @@ def cnn_model_fn(features, labels, mode, params):
             "loss/real_greater_rand_loss": (real_greater_rand_scalar_loss, real_rand_loss_summary),
             "loss/mean_original_plus_desired_loss": (equality_scalar_loss, equality_sum_loss_summary),
             "loss/mean_negative_original_plus_desired": (negative_equality_scalar_loss, negative_equality_sum_loss_summary),
+            "loss/ratio_old_new_sum_loss_to_negative_sum" : (ratio_old_new_sum_loss_to_negative_sum, tf.summary.scalar("loss/ratio_old_new_sum_loss_to_negative_sum", ratio_old_new_sum_loss_to_negative_sum)),######################
             # "sanity_check/input_tensor_mean" : mean_metric_creator("sanity_check/input_tensor_mean")(features, None),
             "metrics/mean_old_pos": mean_metric_creator("metrics/mean_old_pos")(original_pos, None),
             "metrics/mean_new_pos": mean_metric_creator("metrics/mean_new_pos")(desired_pos, None),
+            "metrics/negative_new_to_old_ratio" : mean_metric_creator("metrics/negative_new_to_old_ratio")(tf.divide(-desired_pos, original_pos), None),########################3
             "metrics/mean_random_pos": mean_metric_creator("metrics/mean_random_pos")(random_pos, None),
             "metrics/mean_abs_old_pos": mean_metric_creator("metrics/mean_abs_old_pos")(tf.abs(original_pos), None),
             "metrics/mean_abs_new_pos": mean_metric_creator("metrics/mean_abs_new_pos")(tf.abs(desired_pos), None),
@@ -270,9 +275,6 @@ def cnn_model_fn(features, labels, mode, params):
         training_hooks=[summary_hook],
         export_outputs=the_export_outputs,
         eval_metric_ops=validation_metric)
-
-
-
 
 
 
@@ -325,7 +327,7 @@ def process_line_as_2d_input_with_ep(the_str):
         return data
 
 
-def full_onehot_process_line_as_2d_input(the_str, num_samples=-1):
+def full_onehot_process_line_as_2d_input(the_str, num_samples=-1, for_serving=False):
     with tf.name_scope("process_data_2d"):
         #with tf.device("/cpu:0"):
 
@@ -341,6 +343,9 @@ def full_onehot_process_line_as_2d_input(the_str, num_samples=-1):
         # Create the table for getting indices (for the_values) from the information about the board
         the_table = tf.contrib.lookup.index_table_from_tensor(mapping=mapping_strings, name="index_lookup_table")
 
+        value_for_string_split = the_str if for_serving else [the_str]
+
+
         data = tf.reshape(
             # Get the values at the given indices
             tf.gather(
@@ -349,9 +354,9 @@ def full_onehot_process_line_as_2d_input(the_str, num_samples=-1):
                 the_table.lookup(
                     # Split the string into an array of characters
                     tf.string_split(
-                        [the_str],
+                        value_for_string_split,
                         delimiter="").values)),
-            [num_samples, 64, number_of_mapping_strings]) #THIS SHOULD REALLY BE [3x8x8,num_mapping_strings]
+            [num_samples, 8,8, number_of_mapping_strings]) #THIS SHOULD REALLY BE [3x8x8,num_mapping_strings]
 
         return data
 
@@ -513,13 +518,77 @@ def input_data_fn(filenames, batch_size, epochs, min_after_dequeue, allow_smalle
             allow_smaller_final_batch=allow_smaller_final_batch)
         return batch, labels
 
+def new_serving_input_reciever_fn():
+    feature_spec = {"occupied_w" : tf.FixedLenFeature([1], tf.int64),
+                    "occupied_b" : tf.FixedLenFeature([1], tf.int64),
+                    "kings" : tf.FixedLenFeature([1], tf.int64),
+                    "queens": tf.FixedLenFeature([1], tf.int64),
+                    "rooks": tf.FixedLenFeature([1], tf.int64),
+                    "bishops" : tf.FixedLenFeature([1], tf.int64),
+                    "knights": tf.FixedLenFeature([1], tf.int64),
+                    "pawns": tf.FixedLenFeature([1], tf.int64),
+                    "ep_square" : tf.FixedLenFeature([1], tf.int64),
+                    "castling_rights" : tf.FixedLenFeature([1], tf.int64),
+                    }
+
+
+
+    serialized_tf_example = tf.placeholder(dtype=tf.string, name='input_example_tensor')
+
+    receiver_tensors = {'example': serialized_tf_example}
+
+    features = tf.parse_example(serialized_tf_example, feature_spec)
+
+    print("features:", features)
+
+
+    the_ints = tf.concat(
+        [
+            tf.bitwise.invert(tf.bitwise.bitwise_or(features["occupied_w"], features["occupied_b"])), #(Empty squares) might be faster to just pass occupied in the Protocol Buffer
+            features["ep_square"], #(ep_square) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
+            tf.bitwise.bitwise_and(features["occupied_w"], features["kings"]), #Likely can do without AND operation
+            tf.bitwise.bitwise_and(features["occupied_w"], features["queens"]),
+            tf.bitwise.bitwise_and(features["occupied_w"], features["rooks"]),
+            tf.bitwise.bitwise_and(features["occupied_w"], features["bishops"]),
+            tf.bitwise.bitwise_and(features["occupied_w"], features["knights"]),
+            tf.bitwise.bitwise_and(features["occupied_w"], features["pawns"]),
+            tf.bitwise.bitwise_and(features["occupied_w"], features["castling_rights"]), #(White castling rooks) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
+            tf.bitwise.bitwise_and(features["occupied_b"], features["kings"]),  # Likely can do without AND operation
+            tf.bitwise.bitwise_and(features["occupied_b"], features["queens"]),
+            tf.bitwise.bitwise_and(features["occupied_b"], features["rooks"]),
+            tf.bitwise.bitwise_and(features["occupied_b"], features["bishops"]),
+            tf.bitwise.bitwise_and(features["occupied_b"], features["knights"]),
+            tf.bitwise.bitwise_and(features["occupied_b"], features["pawns"]),
+            tf.bitwise.bitwise_and(features["occupied_b"], features["castling_rights"]), #(Black castling rooks) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
+        ],
+        axis=1
+    )
+
+    print("the_ints:", the_ints)
+
+
+    the_bytes = tf.cast(tf.bitcast(the_ints,tf.uint8),dtype=tf.int32)
+
+    print("the_bytes:", the_bytes)
+
+    bool_masks = tf.constant(
+        [np.unpackbits(num).tolist() for num in np.arange(2 ** 8, dtype=np.uint8)],
+        dtype=tf.float32)
+
+    data = tf.gather(bool_masks, the_bytes)
+
+    print("data:", data)
+
+    properly_aranged_data = tf.transpose(data, perm=[0, 2, 3, 1])
+
+    print("properly_aranged_data:", properly_aranged_data)
+
+    return tf.estimator.export.ServingInputReceiver(properly_aranged_data, receiver_tensors)
+
 
 def serving_input_receiver_fn():
     """
     A function to use for input processing when serving the model.
-
-    NOTES:
-    1) This should still work, but I haven't tested it since using I think TensorFlow 1.2.1
     """
     feature_spec = {'str': tf.FixedLenFeature([1], tf.string)}
     serialized_tf_example = tf.placeholder(dtype=tf.string, name='input_example_tensor')
@@ -531,7 +600,7 @@ def serving_input_receiver_fn():
     # I could probably not do this and handle the data better within the graph
     features['str'] = tf.reshape(features['str'], [-1])
 
-    data = full_onehot_process_line_as_2d_input(features['str'])
+    data = full_onehot_process_line_as_2d_input(features['str'], for_serving=True)
 
     return tf.estimator.export.ServingInputReceiver(data, receiver_tensors)
 
