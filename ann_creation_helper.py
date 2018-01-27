@@ -45,7 +45,7 @@ def build_fully_connected_layers_with_batch_norm(the_input, shape, mode, num_pre
     return the_input, activation_summaries
 
 
-def build_inception_module_with_batch_norm(the_input, module, mode, activation_summaries=[], num_previously_built_inception_modules=0, padding='same', force_no_concat=False):
+def build_inception_module_with_batch_norm(the_input, module, mode, activation_summaries=[], num_previously_built_inception_modules=0, padding='same', force_no_concat=False,make_trainable=True):
     """
     NOTE:
     1) This comment no longer fully describes the functionality of the function.  It will be updated in the near future
@@ -80,10 +80,12 @@ def build_inception_module_with_batch_norm(the_input, module, mode, activation_s
                     padding=padding,
                     use_bias=False,
                     kernel_initializer=layers.xavier_initializer(),
+                    trainable=make_trainable,
                     name="layer_" + str(i + 1))
 
                 cur_batch_normalized = tf.layers.batch_normalization(cur_conv_output,
                                                                      training=(mode == tf.estimator.ModeKeys.TRAIN),
+                                                                     trainable=make_trainable,
                                                                      fused=True)
 
                 cur_input = tf.nn.relu(cur_batch_normalized)
@@ -102,6 +104,12 @@ def build_inception_module_with_batch_norm(the_input, module, mode, activation_s
         return tf.concat([temp_input for temp_input in path_outputs], 3), activation_summaries
 
 
+def mean_metric_creator(name):
+    def mean_metric(inputs, forced_labels_param, weights=None):
+        mean_value = tf.reduce_mean(inputs)
+        return mean_value, tf.summary.scalar(name, mean_value)
+
+    return mean_metric
 
 
 def cnn_model_fn(features, labels, mode, params):
@@ -109,22 +117,13 @@ def cnn_model_fn(features, labels, mode, params):
     Generates an EstimatorSpec for the model.
     """
 
-    def mean_metric_creator(name):
-        def mean_metric(inputs, forced_labels_param, weights=None):
-            mean_value = tf.reduce_mean(inputs)
-            return mean_value, tf.summary.scalar(name, mean_value)
-
-        return mean_metric
-
     if mode == tf.estimator.ModeKeys.PREDICT:
         input_layer = features["feature"]
     else:
-        # I'm doing this twice (once here and one in the data pipeline), I should change that
+        #Reshape features from original shape of [-1, 3, 8, 8, 16]
         input_layer = tf.reshape(features, [-1, 8, 8, 16])
 
     cur_inception_module = input_layer
-    # cur_inception_module = features
-
 
 
     for module_num, module_shape in enumerate(params['inception_modules']):
@@ -146,8 +145,6 @@ def cnn_model_fn(features, labels, mode, params):
     else:
         #I think this causes problems if it occurs (not happening in current model)
         inception_module_outputs = cur_inception_module
-
-
 
 
     # Build the fully connected layers
@@ -178,9 +175,7 @@ def cnn_model_fn(features, labels, mode, params):
 
         # Implementing  an altered version of the loss function defined in Deep Pink
         with tf.variable_scope("loss"):
-            # moving_average_score = tf.train.ExponentialMovingAverage(decay=0.999)
-
-            increase_in_position_value = tf.constant(1.01, dtype=tf.float32)
+            increase_in_position_value = tf.constant(params["equality_scalar"], dtype=tf.float32)
 
             adjusted_equality_sum = tf.scalar_mul(increase_in_position_value, original_pos) + desired_pos
 
@@ -189,7 +184,6 @@ def cnn_model_fn(features, labels, mode, params):
 
             # old_new_squared_scalar_loss = tf.reduce_mean(tf.square(original_pos + desired_pos))
             # loss = real_greater_rand_scalar_loss +  old_new_squared_scalar_loss
-
 
 
             equality_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(adjusted_equality_sum)))
@@ -231,8 +225,7 @@ def cnn_model_fn(features, labels, mode, params):
 
     # A dictionary for scoring used when exporting model for serving.
     the_export_outputs = {
-        "serving_default": tf.estimator.export.RegressionOutput(value=logits)}
-
+        "serving_default" : tf.estimator.export.RegressionOutput(value=logits)}
 
     real_rand_diff = desired_pos - random_pos
     old_plus_desired = original_pos + desired_pos
@@ -248,11 +241,11 @@ def cnn_model_fn(features, labels, mode, params):
             "loss/real_greater_rand_loss": (real_greater_rand_scalar_loss, real_rand_loss_summary),
             "loss/mean_original_plus_desired_loss": (equality_scalar_loss, equality_sum_loss_summary),
             "loss/mean_negative_original_plus_desired": (negative_equality_scalar_loss, negative_equality_sum_loss_summary),
-            "loss/ratio_old_new_sum_loss_to_negative_sum" : (ratio_old_new_sum_loss_to_negative_sum, tf.summary.scalar("loss/ratio_old_new_sum_loss_to_negative_sum", ratio_old_new_sum_loss_to_negative_sum)),######################
+            "loss/ratio_old_new_sum_loss_to_negative_sum" : (ratio_old_new_sum_loss_to_negative_sum, tf.summary.scalar("loss/ratio_old_new_sum_loss_to_negative_sum", ratio_old_new_sum_loss_to_negative_sum)),
             # "sanity_check/input_tensor_mean" : mean_metric_creator("sanity_check/input_tensor_mean")(features, None),
             "metrics/mean_old_pos": mean_metric_creator("metrics/mean_old_pos")(original_pos, None),
             "metrics/mean_new_pos": mean_metric_creator("metrics/mean_new_pos")(desired_pos, None),
-            "metrics/negative_new_to_old_ratio" : mean_metric_creator("metrics/negative_new_to_old_ratio")(tf.divide(-desired_pos, original_pos), None),########################3
+            "metrics/negative_new_to_old_ratio" : mean_metric_creator("metrics/negative_new_to_old_ratio")(tf.divide(-desired_pos, original_pos), None),
             "metrics/mean_random_pos": mean_metric_creator("metrics/mean_random_pos")(random_pos, None),
             "metrics/mean_abs_old_pos": mean_metric_creator("metrics/mean_abs_old_pos")(tf.abs(original_pos), None),
             "metrics/mean_abs_new_pos": mean_metric_creator("metrics/mean_abs_new_pos")(tf.abs(desired_pos), None),
@@ -276,6 +269,176 @@ def cnn_model_fn(features, labels, mode, params):
         export_outputs=the_export_outputs,
         eval_metric_ops=validation_metric)
 
+
+def move_gen_cnn_model_fn(features, labels, mode, params):
+    """
+    Generates an EstimatorSpec for the model.
+    """
+
+    def index_tensor_to_index_pairs(index_tensor):
+        """
+        Takes an array of indices and returns an array defined by the following (not perfectly descriptive
+        but you get the idea):
+        output[j] = [j,index_matrix[j]]
+        """
+        replicated_first_indices = tf.tile(
+            tf.expand_dims(tf.range(tf.shape(index_tensor, out_type=tf.int64)[0], dtype=tf.int64), dim=1),
+            [1, tf.shape(index_tensor)[1]])
+        return tf.stack([replicated_first_indices, index_tensor], axis=2)
+
+
+
+    if mode == tf.estimator.ModeKeys.PREDICT:
+        input_layer = features["feature"]
+    else:
+        input_layer = features
+
+    cur_inception_module = input_layer
+    for module_num, module_shape in enumerate(params['inception_modules']):
+        cur_inception_module, activation_summaries = build_inception_module_with_batch_norm(
+            cur_inception_module,
+            module_shape,
+            mode,
+            padding='valid',
+            num_previously_built_inception_modules=module_num,
+            make_trainable=params["trainable_cnn_modules"])
+
+    if isinstance(cur_inception_module, list):
+        inception_module_paths_flattened = [
+            tf.reshape(
+                path,
+                [-1, reduce(lambda a, b: a * b, path.get_shape().as_list()[1:])]
+            ) for path in cur_inception_module]
+
+        inception_module_outputs = tf.concat(inception_module_paths_flattened, 1)
+    else:
+        inception_module_outputs = cur_inception_module
+
+
+
+    # Build the fully connected layers
+    dense_layers_outputs, activation_summaries = build_fully_connected_layers_with_batch_norm(
+        inception_module_outputs,
+        params['dense_shape'],
+        mode,
+        activation_summaries=activation_summaries)
+
+
+    # Create the final layer of the ANN
+    logits = tf.layers.dense(inputs=dense_layers_outputs,
+                             units=params['num_outputs'],
+                             use_bias=False,
+                             activation=None,
+                             kernel_initializer=layers.xavier_initializer(),
+                             name="logit_layer")
+
+
+
+    loss = None
+    train_op = None
+
+    bool_mask = None
+
+
+    # Calculate loss (for both TRAIN and EVAL modes)
+    if mode != tf.estimator.ModeKeys.PREDICT:
+        weight_mask = labels
+
+        bool_mask = tf.cast(weight_mask, tf.bool)
+        weight_mask = tf.to_float(bool_mask)
+
+        opposite_bool_mask = tf.logical_not(bool_mask)
+        important_logits = tf.boolean_mask(logits, bool_mask)
+        important_labels = tf.boolean_mask(labels, bool_mask)
+
+        mean_possible_moves = tf.reduce_mean(weight_mask)
+        total_possible_moves = tf.reduce_sum(weight_mask)
+
+
+
+
+        min_float_tensor = tf.fill(tf.shape(labels), np.finfo(np.float32).min)
+
+        labels_with_illegal_moves_set_to_min_value = tf.where(bool_mask, labels, min_float_tensor)
+        logits_with_illegal_moves_set_to_min_value = tf.where(bool_mask, logits, min_float_tensor)
+
+        indices_of_desired_moves = tf.argmax(labels_with_illegal_moves_set_to_min_value, axis=1)
+
+        index_pairs = index_tensor_to_index_pairs(tf.expand_dims(indices_of_desired_moves, axis=1))
+
+        max_legal_calculated_move_values = tf.gather_nd(logits, index_pairs)
+
+        move_scored_higher_than_desired_move = tf.greater_equal(logits_with_illegal_moves_set_to_min_value,
+                                                                max_legal_calculated_move_values)
+
+        total_moves_above_desired_moves = tf.reduce_sum(tf.cast(move_scored_higher_than_desired_move, dtype=tf.float32))
+
+
+        with tf.variable_scope("loss"):
+
+            loss = tf.losses.mean_squared_error(labels, logits, weights=weight_mask)
+            tf.summary.scalar("loss", loss)
+
+
+
+    # Configure the Training Op (for TRAIN mode)
+    if mode == tf.estimator.ModeKeys.TRAIN:
+        global_step = tf.train.get_global_step()
+        learning_rate = params['learning_decay_function'](global_step)
+        tf.summary.scalar("learning_rate", learning_rate)
+        train_op = layers.optimize_loss(
+            loss=loss,
+            global_step=global_step,
+            learning_rate=learning_rate,
+            optimizer=params['optimizer'],
+            summaries=params['train_summaries'])
+
+
+    # Generate predictions
+    predictions = {
+        "move_values": logits}
+
+    # A dictionary for scoring used when exporting model for serving.
+    the_export_outputs = {
+        "serving_default" : tf.estimator.export.PredictOutput(outputs={"logits": logits}),
+    }
+
+
+
+    # Create the validation metrics
+    validation_metric = None
+    if mode != tf.estimator.ModeKeys.PREDICT:
+        validation_metric = {
+            "metrics/total_moves_above_desired_moves" : (total_moves_above_desired_moves, tf.summary.scalar("metrics/total_moves_above_desired_moves", total_moves_above_desired_moves)),
+            "metrics/ratio_moves_above_desired_moves": (total_moves_above_desired_moves/total_possible_moves,tf.summary.scalar("metrics/ratio_moves_above_desired_moves",total_moves_above_desired_moves/total_possible_moves)),
+            "sanity_check/mean_possible_moves" : (mean_possible_moves, tf.summary.scalar("sanity_check/mean_possible_moves", mean_possible_moves)),
+            "sanity_check/total_possible_moves" : (total_possible_moves, tf.summary.scalar("sanity_check/total_possible_moves", total_possible_moves)),
+            "metrics/mean_evaluation_value" : mean_metric_creator("metrics/mean_evaluation_value")(important_logits,None),
+            "metrics/mean_expected_value" : mean_metric_creator("metrics/mean_expected_value")(important_labels,None),
+            "metrics/mean_abs_expected_value": mean_metric_creator("metrics/mean_abs_expected_value")(abs(important_labels), None),
+            "metrics/distance_from_desired" : mean_metric_creator("metrics/distance_from_desired")(important_logits-important_labels,None),
+            "metrics/abs_distance_from_desired": mean_metric_creator("metrics/abs_distance_from_desired")(tf.abs(important_logits - important_labels), None),
+            "metrics/distance_from_not_desired": mean_metric_creator("metrics/distance_from_not_desired")(tf.boolean_mask(logits, opposite_bool_mask) - tf.boolean_mask(labels, opposite_bool_mask),None),
+            "metrics/relative_distance_from_desired": mean_metric_creator("metrics/relative_distance_from_desired")(tf.abs((important_logits - tf.boolean_mask(labels, bool_mask))/important_logits), None),
+        }
+
+    # Create the trainable variable summaries and merge them together to give to a hook
+    trainable_var_summaries = layers.summarize_tensors(tf.get_collection(
+        tf.GraphKeys.TRAINABLE_VARIABLES))  # Not sure if needs to be stored as a variable, should check
+    merged_summaries = tf.summary.merge_all()
+    summary_hook = tf.train.SummarySaverHook(save_steps=params['log_interval'],
+                                             output_dir=params['model_dir'],
+                                             summary_op=merged_summaries)
+
+    # Return the EstimatorSpec object
+    return tf.estimator.EstimatorSpec(
+        mode=mode,
+        predictions=predictions,
+        loss=loss,
+        train_op=train_op,
+        training_hooks=[summary_hook],
+        export_outputs=the_export_outputs,
+        eval_metric_ops=validation_metric)
 
 
 
@@ -345,7 +508,6 @@ def full_onehot_process_line_as_2d_input(the_str, num_samples=-1, for_serving=Fa
 
         value_for_string_split = the_str if for_serving else [the_str]
 
-
         data = tf.reshape(
             # Get the values at the given indices
             tf.gather(
@@ -359,6 +521,7 @@ def full_onehot_process_line_as_2d_input(the_str, num_samples=-1, for_serving=Fa
             [num_samples, 8,8, number_of_mapping_strings]) #THIS SHOULD REALLY BE [3x8x8,num_mapping_strings]
 
         return data
+
 
 
 def acquire_data_ops(filename_queue, processing_method, record_defaults=None):
@@ -376,6 +539,7 @@ def acquire_data_ops(filename_queue, processing_method, record_defaults=None):
         row = tf.decode_csv(value, record_defaults=record_defaults)
         #The 3 is because this is used for training and it trains on triplets
         return processing_method(row[0], 3), tf.constant(True, dtype=tf.bool)
+
 
 
 def data_pipeline(filenames, batch_size, num_epochs=None, min_after_dequeue=10000, allow_smaller_final_batch=False):
@@ -503,6 +667,51 @@ def one_hot_create_tf_records_input_data_fn(filenames, batch_size, shuffle_buffe
     return tf_records_input_data_fn
 
 
+
+def move_gen_one_hot_create_tf_records_input_data_fn(filenames, batch_size, shuffle_buffer_size=100000, repeat=True, shuffle=True):
+    def tf_records_input_data_fn():
+        dataset = tf.data.TFRecordDataset(filenames)
+
+        def parser(record):
+            context_features = {
+                "board": tf.FixedLenFeature([64], tf.int64),
+            }
+
+            sequence_features = {
+                "moves": tf.FixedLenSequenceFeature([], tf.int64, allow_missing=True),
+                "move_scores": tf.FixedLenSequenceFeature([], tf.float32, allow_missing=True),
+            }
+
+
+            parsed_record = tf.parse_single_sequence_example(record, context_features=context_features,sequence_features=sequence_features)
+
+            reshaped_board = tf.reshape(parsed_record[0]["board"],[8,8])
+            sparse_tensor = tf.sparse_tensor_to_dense(tf.SparseTensor(tf.expand_dims(parsed_record[1]["moves"],1), parsed_record[1]["move_scores"],[1792]),validate_indices=False)
+
+            return reshaped_board, sparse_tensor
+
+
+        dataset = dataset.map(parser, num_parallel_calls=100)
+
+        if shuffle:
+            dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
+
+        dataset = dataset.batch(batch_size)
+
+        dataset = dataset.map(lambda x,y:(tf.one_hot(x,16),y))
+
+        if repeat:
+            dataset = dataset.repeat()
+
+        iterator = dataset.make_one_shot_iterator()
+
+        features = iterator.get_next()
+
+        return features[0],features[1]
+
+    return tf_records_input_data_fn
+
+
 def input_data_fn(filenames, batch_size, epochs, min_after_dequeue, allow_smaller_final_batch=False):
     """
     A function which is called to create the data pipeline ops made by the function
@@ -566,16 +775,17 @@ def new_serving_input_reciever_fn():
 
     print("the_ints:", the_ints)
 
-
     the_bytes = tf.cast(tf.bitcast(the_ints,tf.uint8),dtype=tf.int32)
 
     print("the_bytes:", the_bytes)
 
-    bool_masks = tf.constant(
+    float_bool_masks = tf.constant(
         [np.unpackbits(num).tolist() for num in np.arange(2 ** 8, dtype=np.uint8)],
         dtype=tf.float32)
 
-    data = tf.gather(bool_masks, the_bytes)
+    print("float_bool_masks",float_bool_masks)
+
+    data = tf.gather(float_bool_masks, the_bytes)
 
     print("data:", data)
 
@@ -586,18 +796,17 @@ def new_serving_input_reciever_fn():
     return tf.estimator.export.ServingInputReceiver(properly_aranged_data, receiver_tensors)
 
 
-def serving_input_receiver_fn():
+def board_as_str_serving_input_receiver_fn():
     """
-    A function to use for input processing when serving the model.
+    A function to use for input processing when serving the model from string representation of the board.
     """
     feature_spec = {'str': tf.FixedLenFeature([1], tf.string)}
     serialized_tf_example = tf.placeholder(dtype=tf.string, name='input_example_tensor')
 
-    receiver_tensors = {'example': serialized_tf_example}
+    receiver_tensors = {'example' : serialized_tf_example}
 
     features = tf.parse_example(serialized_tf_example, feature_spec)
 
-    # I could probably not do this and handle the data better within the graph
     features['str'] = tf.reshape(features['str'], [-1])
 
     data = full_onehot_process_line_as_2d_input(features['str'], for_serving=True)
@@ -620,47 +829,28 @@ def line_counter(filename):
         return sum(bl.count("\n") for bl in blocks(f))
 
 
+
+
 class ValidationRunHook(tf.train.SessionRunHook):
     """
     A subclass of tf.train.SessionRunHook to be used to evaluate validation data
     efficiently during an Estimator's training run.
 
-    NOTES:
-    1) self._metrics is likely no longer needed since switching from tf.contrib.learn.estimator
-    to tf.estimator
 
     TO DO:
-    1) Have this not be shuffling batches
-    2) Figure out how to handle steps to do one complete epoch
-    3) Have this not call the evaluate function because it has to restore from a
+    1) Figure out how to handle steps to do one complete epoch
+    2) Have this not call the evaluate function because it has to restore from a
     checkpoint, it will likely be faster if I evaluate it on the current training graph
-    4) Implement an epoch counter to be printed along with the validation results
-    5) Implement some kind of timer so that I can can see how long each epoch takes (printed with results of evaluation)
+    3) Implement an epoch counter to be printed along with the validation results
     """
 
-    def __init__(self, step_increment, estimator, filenames, batch_size=1000, min_after_dequeue=20000, metrics=None, temp_num_steps_in_epoch=None):
-        self._step_increment = step_increment
-        self._estimator = estimator
-        self._filenames = filenames
-        self._batch_size = batch_size
-        self._min_after_dequeue = min_after_dequeue
-        self._metrics = metrics
+    def __init__(self, step_increment, estimator, input_fn_creator, temp_num_steps_in_epoch=None, recall_input_fn_creator_after_evaluate=False):
+        self.step_increment = step_increment
+        self.estimator = estimator
+        self.input_fn_creator = input_fn_creator
+        self.recall_input_fn_creator_after_evaluate = recall_input_fn_creator_after_evaluate
+        self.temp_num_steps_in_epoch = temp_num_steps_in_epoch
 
-        # (hopefully) Not permanent
-        self._temp_num_steps_in_epoch = temp_num_steps_in_epoch
-
-    #The old method before using tf.data module
-    # def begin(self):
-    #     self._global_step_tensor = training.training_util.get_global_step()
-    #
-    #     if self._global_step_tensor is None:
-    #         raise RuntimeError("Global step should be created to use ValidationRunHook.")
-    #
-    #     self._input_fn = lambda: data_pipeline(
-    #         filenames=self._filenames,
-    #         batch_size=self._batch_size,
-    #         num_epochs=None,
-    #         allow_smaller_final_batch=False)  # Ideally this should be True
 
     def begin(self):
         self._global_step_tensor = tf.train.get_global_step()
@@ -668,8 +858,7 @@ class ValidationRunHook(tf.train.SessionRunHook):
         if self._global_step_tensor is None:
             raise RuntimeError("Global step should be created to use ValidationRunHook.")
 
-        self._input_fn = one_hot_create_tf_records_input_data_fn(filenames=self._filenames,
-                                                                 batch_size=self._batch_size)
+        self._input_fn = self.input_fn_creator()
 
     def after_create_session(self, session, coord):
         self._step_started = session.run(self._global_step_tensor)
@@ -677,10 +866,14 @@ class ValidationRunHook(tf.train.SessionRunHook):
     def before_run(self, run_context):
         return training.session_run_hook.SessionRunArgs(self._global_step_tensor)
 
-    def after_run(self, run_context, run_values):
-        if (run_values.results - self._step_started) % self._step_increment == 0:
-            print(self._estimator.evaluate(
-                input_fn=self._input_fn,
-                steps=self._temp_num_steps_in_epoch))
 
+    def after_run(self, run_context, run_values):
+        if (run_values.results - self._step_started) % self.step_increment == 0:
+            print(self.estimator.evaluate(
+                input_fn=self._input_fn,
+                steps=self.temp_num_steps_in_epoch,
+            ))
+
+            if self.recall_input_fn_creator_after_evaluate:
+                self._input_fn =  self.input_fn_creator()
 

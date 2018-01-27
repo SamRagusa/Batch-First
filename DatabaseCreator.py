@@ -3,13 +3,17 @@ Created on Aug 12, 2017
 
 @author: SamRagusa
 '''
-
+import numpy as np
+import tensorflow as tf
 import chess
 import chess.pgn
 import math
 import time
 from my_board import MyBoard
 from ann_creation_helper import line_counter
+from board_eval_client import ANNEvaluator
+from numba_board import create_board_state_from_fen, generate_legal_moves, BB_ALL, generate_move_to_enumeration_dict, Move, database_board_representation
+from numba_negamax_zero_window import GameNode, numpy_move_dtype
 
 
 
@@ -99,8 +103,8 @@ def create_database_from_pgn(filenames, to_collect_filters=[], post_collection_f
 
         cur_game = chess.pgn.read_game(pgn_file)
         while not cur_game is None:
+            # if cur_game.headers["Result"] != "1/2-1/2":
             for move in cur_game.main_line():
-
                 should_save = True
                 if to_collect_filters != []:
                     for filter in to_collect_filters:
@@ -232,9 +236,8 @@ def data_writer_creator(file_ratios, for_deep_pink_loss, comparison_move_generat
     @param line_to_fen_fn A function to convert from the string representation used as keys in
     the dictionary given to the data writer, to the fen representation accepted by the python-chess package.
     @param board_to_str_fn A function to convert a MyBoard object to the string representation desired for output.
-    @param no_deep_pink_loss_str_manipulations An array of functions taking a string representation of a board,
-    and returning a manipulated version of the string given.  These manipulations are currently only used when
-    producing datasets not compatible with Deep Pink's loss function.
+    @param no_deep_pink_loss_str_manipulations This parameter is not currently used. An array of functions taking
+    a string representation of a board, and returning a manipulated version of the string given.
     @param print_frequency The increment in which to print the number of boards processed and written to file.
 
 
@@ -319,13 +322,6 @@ def data_writer_creator(file_ratios, for_deep_pink_loss, comparison_move_generat
                         writer.write("".join(map(lambda x: x + str_to_add, data_strs)))
                         temp_board.pop()
                 else:
-                    for manipulation in no_deep_pink_loss_str_manipulations:
-                        cur_str = manipulation(cur_str)
-
-                    #If the string representation used to create the Deep Pink datasets is preferred use this instead
-                    #of the above for loop.
-                    # cur_str = board_to_str_fn(MyBoard(line_to_fen_fn(cur_str)))
-
                     writer.write(cur_str + "\n")
 
                 cur_entry_num += 1
@@ -374,16 +370,13 @@ pgn_file_paths = list(map(lambda filename : "databases/fics/" + filename, pgn_fi
 
 final_dataset_filenames = list(
     map(
-        lambda x: "/srv/databases/chess_engine/pre_commit_test/" + x,
+        lambda x: "/srv/databases/chess_engine/testing/" + x,
         [
             "scoring_training_set.txt",
             "scoring_validation_set.txt",
             "scoring_testing_set.txt",
-            # "bns_training_set.csv",
-            # "bns_validation_set.csv",
-            # "tree_search_validation_set.csv",
-            # "bns-tree_testing_set.csv"
             ]))
+
 
 
 file_ratios = [.72, .08, .2]
@@ -396,7 +389,8 @@ def current_line_to_fen(line):
     A function to convert a board from a given string representation (the one used as keys in
     the dictionary given to the data writer), to the fen representation accepted by the python-chess package.
 
-    In the current implementation, it is used to convert from a representation like the following:
+    In the current implementation, it is used to convert from a representation like
+    the following (with the first and second dashes being castling rights and ep square):
     "2r3k1/pr3pp1/2n3b1/P1PR2Pp/4PB2/1N2QP1q/7P/1R4K1,-,-"
     """
     line.split(",")
@@ -413,13 +407,106 @@ manipulations.append(lambda x: x.replace("/", ""))
 
 
 
+def generate_database_with_child_values_tf_records(board_database_filename, node_batch_eval_fn, output_filename,
+                                            line_to_fen_fn=None, print_interval=1000):
+    """
+    A function to generate a TFRecords dataset for the training of the move scoring neural network.  It uses an already
+    created database containing the necessary information to construct a board fen from each line.
+
+    @param board_database_filename The name of the file to use to create the database from
+    @param node_batch_eval_fn A function to score a set of GameNode objects.  (As of now it must return an iterable
+    where each element E in the iterable has the scalar evaluation score in E.value)
+    @param output_filename The desired filename of the TFRecords database being created
+    @param line_to_fen_fn A function to convert from ths string format each line in board_database_filename is in to
+    a fen representation (as a string).
+    @param print_interval The interval in which to print the functions progress and time taken since last print
+    """
+
+    if line_to_fen_fn is None:
+        line_to_fen_fn = lambda x: x
+
+    char_to_index_dict = {char: i for i, char in enumerate("01KQRBNPCkqrbnpc")}
+    CHARS_IN_EACH_BOARD = 64
+    move_to_str_dict = generate_move_to_enumeration_dict()
+
+    def line_to_serialized_example(line):
+        fen = line_to_fen_fn(line)
+
+        def white_fen_to_black(fen):
+            """
+            Reformats and returns the output from a given boards fen() method from one where it's blacks turn,
+            to one where it's whites turn.  This involves rotating the board along the x axis and switching the
+            color of the pieces
+            """
+            split_fen = fen.split()
+
+            split_fen[0] = "/".join(list(reversed([row.swapcase() for row in split_fen[0].split("/")])))
+            split_fen[1] = "b"
+            split_fen[2] = "".join(
+                map(lambda x: x if (x in split_fen[2].swapcase()) else '', ['K', 'Q', 'k', 'q', '-']))
+            if split_fen[3] != '-':
+                print(split_fen[3])  #THIS NEVER PRINTS, WHICH IS VERY CONSERNING
+                split_fen[3] = split_fen[3][0] + str(9 - int(split_fen[3][1]))
+                print(split_fen[3],"\n") #THIS NEVER PRINTS, WHICH IS VERY CONSERNING
+
+            return " ".join(split_fen)
+
+        if fen[1] == "w":
+            fen = white_fen_to_black(fen)
+
+        cur_board = create_board_state_from_fen(fen)
+        cur_node = GameNode(cur_board, None, 255, 0, 0, np.empty(0, dtype=numpy_move_dtype), None, None, None, False, 255)
+
+        moves = [move for move in generate_legal_moves(cur_board, BB_ALL, BB_ALL)]
+        children = np.array(list(map(lambda x: cur_node.zero_window_create_child_from_move(x), moves)), np.object)
+
+        results = node_batch_eval_fn(children)
+
+        the_moves = list(map(lambda x: move_to_str_dict[x.from_square, x.to_square], moves))
+        the_results = list(map(lambda x: x.value, results))
+
+
+        formatted_output = MyBoard(fen).database_board_representation()
+
+        context = tf.train.Features(feature={
+            "board": tf.train.Feature(int64_list=tf.train.Int64List(value=np.array([char_to_index_dict[formatted_output[j]] for j in range(CHARS_IN_EACH_BOARD)],dtype=np.int8))),
+        })
+
+        feature_lists = tf.train.FeatureLists(feature_list={
+            "moves" : tf.train.FeatureList(feature=[tf.train.Feature(int64_list=tf.train.Int64List(value=[move])) for move in the_moves]),
+            "move_scores" : tf.train.FeatureList(feature=[tf.train.Feature(float_list=tf.train.FloatList(value=[value])) for value in the_results]),
+            })
+
+        sequence_example = tf.train.SequenceExample(
+            context = context,
+            feature_lists=feature_lists
+        )
+
+        return sequence_example.SerializeToString()
 
 
 
+    start_time = time.time()
+    writer = tf.python_io.TFRecordWriter(output_filename)
+    lines = []
+    batch_size = 1000
+    for index, line in enumerate(open(board_database_filename, 'r')):
+        if index % print_interval == 0 and index != 0:
+            print(index, "boards processed in", time.time() - start_time, "seconds")
+            start_time = time.time()
+        lines.append(line)
+        if index % batch_size == 0:
+            for string in map(line_to_serialized_example, lines):
+                writer.write(string)
+            lines = []
+
+    writer.close()
 
 
+
+# Create the databases for use in training the board evaluation neural network.  Long term this will likely be combined
+# with the generation of the move scoring database to prevent any overlap in boards between the datasets.
 start_time = time.time()
-
 create_database_from_pgn(
     pgn_file_paths[:-1],
     to_collect_filters=[
@@ -439,6 +526,43 @@ create_database_from_pgn(
 
 print("Time taken to create databases:", time.time() - start_time)
 
+
+# Create the file containing the move scoring data (as a TFRecords database).  This will likely be combined with
+# the evaluation board generation to prevent any overlap in boards between the datasets.
+start_time = time.time()
+create_database_from_pgn(
+    [pgn_file_paths[-1]],
+    to_collect_filters=[
+        during_search_n_man_filter_creator(6),
+        during_search_leq_n_moves_made_filter_creater(5)],
+    fen_elements_stored=[0,2,3],
+    data_writer=data_writer_creator(
+        [1],
+        [False],
+        line_to_fen_fn=current_line_to_fen,
+        board_to_str_fn=lambda b : b.database_board_representation(),
+        no_deep_pink_loss_str_manipulations=manipulations,
+        print_frequency=100000),
+    output_filenames=["/srv/databases/chess_engine/testing/pre_commit_testing_boards.txt"])
+
+print("Time taken to create databases:", time.time() - start_time)
+
+
+
+
+ann_evaluator = ANNEvaluator(None,model_name="evaluation_ann")
+
+start_time = time.time()
+generate_database_with_child_values_tf_records(
+    board_database_filename="/srv/databases/chess_engine/testing/pre_commit_testing_boards.txt",
+    node_batch_eval_fn=lambda x : ann_evaluator.for_numba_score_batch(x),
+    output_filename="/srv/databases/chess_engine/testing/pre_commit_testing_move_gen_database.tfrecords",
+    line_to_fen_fn=current_line_to_fen,
+    print_interval=10000)
+
+
+
+print("Time taken to create child_value_database:", time.time() - start_time)
 
 
 
