@@ -5,7 +5,6 @@ from numba_board import *
 
 from board_eval_client import ANNEvaluator
 
-# from numpy import rec
 import numpy as np
 
 numpy_move_dtype = np.dtype([("from_square", np.uint8), ("to_square", np.uint8), ("promotion", np.uint8)])
@@ -17,6 +16,9 @@ def create_move_record_array_from_move_object_generator(move_generator):
     return np.array([(move.from_square, move.to_square, move.promotion) for move in move_generator], dtype=numpy_move_dtype)
 
 
+ANN_BOARD_EVALUATOR = ANNEvaluator(None,model_name="evaluation_ann")
+ANN_MOVE_EVALUATOR_WHITE = ANNEvaluator(None, model_name="move_scoring_ann_white")
+ANN_MOVE_EVALUATOR_BLACK = ANNEvaluator(None, model_name="move_scoring_ann_black")
 
 
 MIN_FLOAT32_VAL = np.finfo(np.float32).min
@@ -30,7 +32,9 @@ WIN_RESULT_SCORE = ALMOST_MAX_FLOAT_32_VAL
 LOSS_RESULT_SCORE = ALMOST_MIN_FLOAT_32_VAL
 TIE_RESULT_SCORE = np.float32(0)
 
-
+MOVE_TO_INDEX_ARRAY = np.zeros(shape=[64,64],dtype=np.int32)
+for key, value in generate_move_to_enumeration_dict().items():
+    MOVE_TO_INDEX_ARRAY[key[0],key[1]] = value
 
 gamenode_type = deferred_type()
 
@@ -131,11 +135,19 @@ def create_root_game_node(depth, seperator):
                     False,
                     np.uint8(0))
 
-# @njit(boolean(GameNode.class_type.instance_type))
-# def has_uncreated_child(game_node):
-#     if game_node.next_move_score is None:
-#         return False
-#     return True
+
+def create_game_node_from_fen(fen,depth, seperator):
+    return GameNode(create_board_state_from_fen(fen),
+                    None,
+                    depth,
+                    seperator,
+                    MIN_FLOAT32_VAL,
+                    np.empty(0, dtype=numpy_move_dtype),
+                    None,
+                    None,
+                    None,
+                    False,
+                    np.uint8(0))
 
 
 # @jit(boolean(GameNode.class_type.instance_type),nopython=True)  #This worked, but prevented other functions from compiling
@@ -165,20 +177,10 @@ def zero_window_update_node_from_value(node, value):
                     zero_window_update_node_from_value(temp_parent, -node.best_value)
 
 
-# @jit(float32(BoardState.class_type.instance_type), nopython=True, nogil=True, cache=True)#, parallel=True)
-@njit(cache=True) #Can release the GIL here if wanted, but doesn't really speed things up
+# @jit(float32(BoardState.class_type.instance_type), nopython=True, nogil=True, cache=True)
+@njit #Can release the GIL here if wanted, but doesn't really speed things up
 def simple_board_state_evaluation_for_white(board_state):
     score = np.float32(0)
-
-    # value_array = np.array([.1, .3, .45, .6, .9], dtype=np.float32)
-    # piece_bb_array = np.array(
-    #     [board_state.pawns,board_state.knights , board_state.bishops, board_state.rooks, board_state.queens],
-    #     dtype=np.uint64)
-    #
-    # for index in nb.prange(value_array.shape[0]):
-    #     score += value_array[index] * (np.float32(popcount(piece_bb_array[index] & board_state.occupied_w)) - np.float32(popcount(piece_bb_array[index] & board_state.occupied_b)))
-
-
     for piece_val, piece_bb in zip(np.array([.1, .3, .45, .6, .9], dtype=np.float32), [board_state.pawns,board_state.knights , board_state.bishops, board_state.rooks, board_state.queens]):
         score += piece_val * (np.float32(popcount(piece_bb & board_state.occupied_w)) - np.float32(popcount(piece_bb & board_state.occupied_b)))
 
@@ -191,46 +193,6 @@ def evaluate_game_node(game_node):
     A super simple evaluation function for a game_node.
     """
     return simple_board_state_evaluation_for_white(game_node.board_state)
-
-
-
-# @njit(float32(GameNode.class_type.instance_type, float32, float32, nb.int8))
-def new_basic_do_alpha_beta(game_node, alpha, beta, color):
-    """
-    A simple alpha-beta algorithm to test my code.
-
-    IMPORTANT NOTES:
-    1) This no longer works since I've switched the negamax implementation to only do zero window searchs,
-    though could be updated to work fairly easily
-    """
-    has_move = False
-    for _ in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
-        has_move = True
-        break
-
-    if not has_move:
-        if is_in_check(game_node.board_state):
-            if color == 1:
-                return MAX_FLOAT32_VAL
-            return MIN_FLOAT32_VAL
-        return 0
-
-
-    if game_node.depth == 0:
-        return color * test_evaluate_batch(np.array([game_node]))[0].value
-
-    best_value = MIN_FLOAT32_VAL
-    for move in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
-        v = - new_basic_do_alpha_beta(game_node.zero_window_create_child_from_move(move), -beta, -alpha, -color)
-        best_value = max(best_value, v)
-        alpha = max(alpha, v)
-        if alpha >= beta:
-            break
-
-
-
-
-    return best_value
 
 
 
@@ -451,7 +413,7 @@ def set_up_next_best_move(node):
 
     if node.unexplored_move_scores[next_move_index] != MIN_FLOAT32_VAL:
 
-        #Eventually this is what should be happening
+        #Eventually the following line of code is what should be running instead of what is currently used
         # node.next_move = node.unexplored_moves[next_move_index]
 
         node.next_move = Move(node.unexplored_moves[next_move_index]["from_square"],
@@ -465,21 +427,9 @@ def set_up_next_best_move(node):
         node.next_move_score = None
 
 
-# # @jit(void(GameNode.class_type.instance_type), nopython=True)
-# @njit
-# def replace_next_best_move(node):
-#     if len(node.unexplored_moves) == 0:
-#         node.next_move = None
-#         node.next_move_score = None #probably don't need to do this
-#     else:
-#         set_up_next_best_move(node)
-
-
 @njit(GameNode.class_type.instance_type(GameNode.class_type.instance_type))
 def spawn_child_from_node(node):
     to_return = node.zero_window_create_child_from_move(node.next_move)
-
-    # replace_next_best_move(node)
 
     set_up_next_best_move(node)
 
@@ -497,21 +447,45 @@ def create_child_array(node_array):
 
     return array_to_return
 
-evaluator = ANNEvaluator(None)
 
-def test_evaluate_batch(node_array):
+def ann_evaluate_batch(node_array):
     # Should be doing this much more efficiently
-    global evaluator
-    if node_array.any():
-        return evaluator.for_numba_score_batch(node_array)
+    if len(node_array) != 0:
+        return ANN_BOARD_EVALUATOR.for_numba_score_batch(node_array)
     return None
+
+
+def async_ann_evaluate_node_batch(node_array):
+    # Should be doing this much more efficiently
+    if len(node_array) != 0:
+        return ANN_BOARD_EVALUATOR.async_for_numba_score_batch(node_array)
+    return None
+
+
+def async_score_moves(node_array):
+    """
+    Returns a tuple of a bool numpy array of the tuple of indices who's turn is white, and a size two array of futures
+    for white and blacks move evaluation (or none if there were no nodes for white or black
+    """
+    if len(node_array) != 0:
+        white_turn_indices = [True if node.board_state.turn else False for node in node_array]
+        white_turn_nodes = node_array[white_turn_indices]
+        black_turn_nodes = node_array[np.invert(white_turn_indices)]
+        futures = [None, None]
+        if len(white_turn_nodes) != 0:
+            futures[0] = ANN_MOVE_EVALUATOR_WHITE.async_for_numba_move_batch(white_turn_nodes)
+        if len(black_turn_nodes) != 0:
+            futures[1] = ANN_MOVE_EVALUATOR_BLACK.async_for_numba_move_batch(black_turn_nodes)
+        return white_turn_indices,futures
+    # return None
+
 
 # @jit(void(GameNode.class_type.instance_type[:]))#, nopython=True)
 def evaluate_depth_zero_batch(node_array):
     """
     Evaluates the nodes given, storing the value for any node N, in N.best_value.
     """
-    scores = test_evaluate_batch(node_array)
+    scores = ann_evaluate_batch(node_array)
     if not scores is None:
         for node, value in zip(node_array, scores):
             if node.board_state.turn == TURN_WHITE:#This assumes that the player doing the search is white
@@ -529,7 +503,7 @@ def evaluate_depth_zero_batch(node_array):
 
 
 
-
+# @profile
 def get_indicies_of_terminating_children(node_array):
     """
     This function checks for things such as the game being over for whatever reason,
@@ -577,14 +551,6 @@ def set_move_scores_to_inverse_depth_multiplied_by_randoms(node):
     node.unexplored_move_scores = scores.astype(dtype=np.float32)
 
 
-# @jit(void(GameNode.class_type.instance_type), nopython=True)
-def set_move_scores_to_all_zeros(node):
-    """
-    Set all move scores to 0 for a given node.
-    """
-    node.unexplored_move_scores = np.zeros(shape=len(node.unexplored_moves), dtype=np.float32)
-
-
 def set_up_scored_move_generation(node_array):
     for j in range(len(node_array)):
         # set_move_scores_to_random_values(node_array[j])
@@ -592,18 +558,61 @@ def set_up_scored_move_generation(node_array):
 
         set_up_next_best_move(node_array[j])
 
+# @profile
+def ann_set_move_generation(node, scores, white_turn):
+    if white_turn:
+        move_indices = MOVE_TO_INDEX_ARRAY[node.unexplored_moves["from_square"],node.unexplored_moves["to_square"]]
+    else:
+        move_indices = MOVE_TO_INDEX_ARRAY[
+            8*(7-(node.unexplored_moves["from_square"]//8)) + (node.unexplored_moves["from_square"]%8),
+            8*(7-(node.unexplored_moves["to_square"]//8)) + (node.unexplored_moves["to_square"]%8)]
+
+    node.unexplored_move_scores = np.array([scores[index].score for index in move_indices],dtype=np.float32)
+
+
+# @profile
+def ann_set_up_scored_move_generation(node_array, white_turn_indices, futures):
+    white_move_nodes = node_array[white_turn_indices]
+    black_move_nodes = node_array[np.invert(white_turn_indices)]
+
+    if not futures[0] is None:
+        white_results = futures[0].result().result.classifications
+        white_result_index = 0
+
+        for j in range(len(white_move_nodes)):
+            ann_set_move_generation(white_move_nodes[j], white_results[white_result_index].classes, True)
+            white_result_index += 1
+
+            set_up_next_best_move(white_move_nodes[j])
+
+    if not futures[1] is None:
+        black_results = futures[1].result().result.classifications
+        black_result_index = 0
+
+        for j in range(len(black_move_nodes)):
+            ann_set_move_generation(black_move_nodes[j], black_results[black_result_index].classes, False)
+            black_result_index += 1
+
+            set_up_next_best_move(black_move_nodes[j])
+
+
+def set_node_aray_best_values_from_values(node_array,results):
+    for j, result in zip(range(len(node_array)),results):
+        if not node_array[j].parent is None:
+            node_array[j].best_value = result.value
+
 
 def update_tree_from_terminating_nodes(node_array):
     for j in range(len(node_array)):
         if not node_array[j].parent is None:
-
             zero_window_update_node_from_value(node_array[j].parent, - node_array[j].best_value)
         else:
             print("WE HAVE A ROOT NODE TERMINATING AND SHOULD PROBABLY DO SOMETHING ABOUT IT")
 
 
+
 # @profile
-def do_iteration(batch):
+def do_iteration(batch, testing=False):
     depth_zero_indices = np.array(
         [True if batch[j].depth == 0 else False for j in range(len(batch))])
     depth_not_zero_indices = np.logical_not(depth_zero_indices)
@@ -611,7 +620,7 @@ def do_iteration(batch):
     depth_zero_nodes = batch[depth_zero_indices]
     depth_not_zero_nodes = batch[depth_not_zero_indices]
 
-    evaluate_depth_zero_batch(depth_zero_nodes)
+    evaluation_result_future = async_ann_evaluate_node_batch(depth_zero_nodes)
 
     if len(depth_not_zero_nodes) != 0:
         children_created = create_child_array(depth_not_zero_nodes)
@@ -619,25 +628,39 @@ def do_iteration(batch):
         #for every child which is not terminating set it's move list to the full set of legal moves possible
         terminating_children_indices = get_indicies_of_terminating_children(children_created)
 
+        not_terminating_children = children_created[np.logical_not(terminating_children_indices)]
+        white_turn_indices, move_scoring_futures = async_score_moves(not_terminating_children)
+
         have_children_left_indices = np.array(
             [True if depth_not_zero_nodes[j].has_uncreated_child() else False for j in range(len(depth_not_zero_nodes))])
 
         depth_not_zero_with_more_kids_nodes = depth_not_zero_nodes[have_children_left_indices]
 
-        #for testing
-        for j in range(len(depth_not_zero_with_more_kids_nodes)):
-            if depth_not_zero_with_more_kids_nodes[j].next_move is None or depth_not_zero_with_more_kids_nodes[j].next_move_score is None:
-                print("A NODE WITH NO KIDS IS BEING TREATED AS IF IT HAD MORE CHILDREN!")
+        if testing:
+            for j in range(len(depth_not_zero_with_more_kids_nodes)):
+                if depth_not_zero_with_more_kids_nodes[j].next_move is None or depth_not_zero_with_more_kids_nodes[j].next_move_score is None:
+                    print("A NODE WITH NO KIDS IS BEING TREATED AS IF IT HAD MORE CHILDREN!")
+
+        if len(depth_zero_nodes) != 0:
+            result_value =evaluation_result_future.result().result.regressions
+            set_node_aray_best_values_from_values(depth_zero_nodes,result_value)
 
         NODES_TO_UPDATE_TREE_WITH = np.concatenate((depth_zero_nodes, children_created[terminating_children_indices]))
         update_tree_from_terminating_nodes(NODES_TO_UPDATE_TREE_WITH)
 
         NODES_TO_SET_UP_SCORING_GEN_STUFF = children_created[np.logical_not(terminating_children_indices)]
-        set_up_scored_move_generation(NODES_TO_SET_UP_SCORING_GEN_STUFF)
 
-        CHILDREN_THAT_ARE_NOT_TERMINAL = children_created[np.logical_not(terminating_children_indices)]
-        return np.concatenate((depth_not_zero_with_more_kids_nodes, CHILDREN_THAT_ARE_NOT_TERMINAL))
+
+        ann_set_up_scored_move_generation(NODES_TO_SET_UP_SCORING_GEN_STUFF, white_turn_indices, move_scoring_futures)
+        # set_up_scored_move_generation(NODES_TO_SET_UP_SCORING_GEN_STUFF)
+
+        return np.concatenate((depth_not_zero_with_more_kids_nodes, not_terminating_children))
     else:
+
+        if len(depth_zero_nodes) != 0:
+            result_value = evaluation_result_future.result().result.regressions
+            set_node_aray_best_values_from_values(depth_zero_nodes,result_value)
+
         update_tree_from_terminating_nodes(depth_zero_nodes)
         return np.empty(0)
 
@@ -662,7 +685,7 @@ def do_alpha_beta_search(root_game_node, max_batch_size, testing=False):
             if root_game_node.terminated or root_game_node.best_value > root_game_node.separator:
                 print("ROOT NODE WAS TERMINATED OR SHOULD BE TERMINATED AT START OF ITERATION.")
 
-        to_insert = do_iteration(next_batch)
+        to_insert = do_iteration(next_batch, testing)
 
         if testing:
             for j in range(len(to_insert)):
@@ -694,7 +717,6 @@ def do_alpha_beta_search(root_game_node, max_batch_size, testing=False):
 
             check_linked_list_integrity(priority_node_queue)
 
-
             iteration_counter += 1
 
     if testing:
@@ -707,6 +729,45 @@ def do_alpha_beta_search(root_game_node, max_batch_size, testing=False):
 
 
 
+# @njit(float32(GameNode.class_type.instance_type, float32, float32, nb.int8))
+def basic_do_alpha_beta(game_node, alpha, beta, color):
+    """
+    A simple alpha-beta algorithm to test my code.
+
+    """
+    has_move = False
+    for _ in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
+        has_move = True
+        break
+
+    if not has_move:
+        if is_in_check(game_node.board_state):
+            if color == 1:
+                return MAX_FLOAT32_VAL
+            return MIN_FLOAT32_VAL
+        return 0
+
+
+    if game_node.depth == 0:
+        return color * ann_evaluate_batch(np.array([game_node]))[0].value
+
+    best_value = MIN_FLOAT32_VAL
+    for move in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
+        v = - basic_do_alpha_beta(game_node.zero_window_create_child_from_move(move), -beta, -alpha, -color)
+        best_value = max(best_value, v)
+        alpha = max(alpha, v)
+        if alpha >= beta:
+            break
+
+    return best_value
+
+
+def ann_set_up_root_search_tree_node(fen, depth, seperator):
+    root_node_as_array = np.array([create_game_node_from_fen(fen, depth, seperator)])
+    get_indicies_of_terminating_children(root_node_as_array)
+    white_indexes, futures = async_score_moves(root_node_as_array)
+    ann_set_up_scored_move_generation(root_node_as_array,white_indexes, futures)
+    return root_node_as_array[0]
 
 
 
@@ -718,20 +779,16 @@ perft_results = jitted_perft_test(create_initial_board_state(), 4)
 print("Depth 4 perft test results:", perft_results, "in time", time.time()-starting_time, "\n")
 
 
+FEN_TO_TEST = "rn1q1rk1/p1p1bppp/bp2pn2/3pN3/2PP4/1P4P1/P2BPPBP/RN1QK2R w KQ - 6 9"
 DEPTH_OF_SEARCH = 4
-MAX_BATCH_LIST = [j**2 for j in range(20,0,-1)] + [5000]
+MAX_BATCH_LIST = [350]*1#[j**2 for j in range(20,0,-1)] + [5000]
 
+starting_time = time.time()
 for j in MAX_BATCH_LIST:
-    root_node = create_root_game_node(DEPTH_OF_SEARCH,-1)
+    root_node = ann_set_up_root_search_tree_node(FEN_TO_TEST,DEPTH_OF_SEARCH,-1)
 
-    get_indicies_of_terminating_children(np.array([root_node]))
-
-    # set_move_scores_to_all_zeros(root_node)
-    set_move_scores_to_random_values(root_node)
-
-    set_up_next_best_move(root_node)
     starting_time = time.time()
-    cur_value = do_alpha_beta_search(root_node, j)#, True)
+    cur_value = do_alpha_beta_search(root_node, j, True)
 
     print("Value:", cur_value, "found with max batch", j, "in time:", time.time() - starting_time)
 
@@ -740,4 +797,4 @@ print()
 root_node = create_root_game_node(DEPTH_OF_SEARCH,-1)
 for j in range(1):
     starting_time = time.time()
-    print("Basic negamax with alpha-beta pruning resulted in:", new_basic_do_alpha_beta(root_node, MIN_FLOAT32_VAL, MAX_FLOAT32_VAL, 1), "in time:", time.time()-starting_time)
+    print("Basic negamax with alpha-beta pruning resulted in:", basic_do_alpha_beta(root_node, MIN_FLOAT32_VAL, MAX_FLOAT32_VAL, 1), "in time:", time.time()-starting_time)

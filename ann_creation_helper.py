@@ -14,7 +14,7 @@ from functools import reduce
 
 
 
-def build_fully_connected_layers_with_batch_norm(the_input, shape, mode, num_previous_fully_connected_layers=0, activation_summaries=[]):
+def build_fully_connected_layers_with_batch_norm(the_input, shape, mode, num_previous_fully_connected_layers=0, activation_summaries=[], scope_prefix=""):
     """
     a function to build the fully connected layers with batch normalization onto the computational
     graph from given specifications.
@@ -24,7 +24,7 @@ def build_fully_connected_layers_with_batch_norm(the_input, shape, mode, num_pre
     """
 
     for index, size in enumerate(shape):
-        with tf.variable_scope("FC_" + str(num_previous_fully_connected_layers + index + 1)):
+        with tf.variable_scope(scope_prefix + "FC_" + str(num_previous_fully_connected_layers + index + 1)):
             temp_pre_activation = tf.layers.dense(
                 inputs=the_input,
                 units=size,
@@ -400,7 +400,8 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
 
     # A dictionary for scoring used when exporting model for serving.
     the_export_outputs = {
-        "serving_default" : tf.estimator.export.PredictOutput(outputs={"logits": logits}),
+        # "serving_default" : tf.estimator.export.PredictOutput(outputs={"logits": logits}),
+        "serving_default" : tf.estimator.export.ClassificationOutput(scores=logits),
     }
 
 
@@ -439,7 +440,6 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
         training_hooks=[summary_hook],
         export_outputs=the_export_outputs,
         eval_metric_ops=validation_metric)
-
 
 
 def process_line_as_2d_input_with_ep(the_str):
@@ -523,7 +523,6 @@ def full_onehot_process_line_as_2d_input(the_str, num_samples=-1, for_serving=Fa
         return data
 
 
-
 def acquire_data_ops(filename_queue, processing_method, record_defaults=None):
     """
     Get the line/lines from the files in the given filename queue,
@@ -539,7 +538,6 @@ def acquire_data_ops(filename_queue, processing_method, record_defaults=None):
         row = tf.decode_csv(value, record_defaults=record_defaults)
         #The 3 is because this is used for training and it trains on triplets
         return processing_method(row[0], 3), tf.constant(True, dtype=tf.bool)
-
 
 
 def data_pipeline(filenames, batch_size, num_epochs=None, min_after_dequeue=10000, allow_smaller_final_batch=False):
@@ -569,7 +567,7 @@ def data_pipeline(filenames, batch_size, num_epochs=None, min_after_dequeue=1000
             num_threads=12,
             allow_smaller_final_batch=allow_smaller_final_batch)
 
-        return example_batch, label_batch
+        return example_batch, None
 
 
 def create_tf_records_input_data_fn_with_ep(filenames, batch_size, shuffle_buffer_size=100000):
@@ -667,7 +665,6 @@ def one_hot_create_tf_records_input_data_fn(filenames, batch_size, shuffle_buffe
     return tf_records_input_data_fn
 
 
-
 def move_gen_one_hot_create_tf_records_input_data_fn(filenames, batch_size, shuffle_buffer_size=100000, repeat=True, shuffle=True):
     def tf_records_input_data_fn():
         dataset = tf.data.TFRecordDataset(filenames)
@@ -727,73 +724,94 @@ def input_data_fn(filenames, batch_size, epochs, min_after_dequeue, allow_smalle
             allow_smaller_final_batch=allow_smaller_final_batch)
         return batch, labels
 
-def new_serving_input_reciever_fn():
-    feature_spec = {"occupied_w" : tf.FixedLenFeature([1], tf.int64),
-                    "occupied_b" : tf.FixedLenFeature([1], tf.int64),
-                    "kings" : tf.FixedLenFeature([1], tf.int64),
-                    "queens": tf.FixedLenFeature([1], tf.int64),
-                    "rooks": tf.FixedLenFeature([1], tf.int64),
-                    "bishops" : tf.FixedLenFeature([1], tf.int64),
-                    "knights": tf.FixedLenFeature([1], tf.int64),
-                    "pawns": tf.FixedLenFeature([1], tf.int64),
-                    "ep_square" : tf.FixedLenFeature([1], tf.int64),
-                    "castling_rights" : tf.FixedLenFeature([1], tf.int64),
-                    }
+
+def serving_input_reciever_fn_creater(whites_turn):
+    """
+    TO MAKE BLACKS TURN:
+    1) switch color of pieces (switch occupied_w with occupied_b
+    2) reverse the positioning of the board
+    """
+    def serving_input_reciever_fn():
+        feature_spec = {"occupied_w" : tf.FixedLenFeature([1], tf.int64),
+                        "occupied_b" : tf.FixedLenFeature([1], tf.int64),
+                        "kings" : tf.FixedLenFeature([1], tf.int64),
+                        "queens": tf.FixedLenFeature([1], tf.int64),
+                        "rooks": tf.FixedLenFeature([1], tf.int64),
+                        "bishops" : tf.FixedLenFeature([1], tf.int64),
+                        "knights": tf.FixedLenFeature([1], tf.int64),
+                        "pawns": tf.FixedLenFeature([1], tf.int64),
+                        "ep_square" : tf.FixedLenFeature([1], tf.int64),
+                        "castling_rights" : tf.FixedLenFeature([1], tf.int64),
+                        }
 
 
 
-    serialized_tf_example = tf.placeholder(dtype=tf.string, name='input_example_tensor')
+        serialized_tf_example = tf.placeholder(dtype=tf.string, name='input_example_tensor')
 
-    receiver_tensors = {'example': serialized_tf_example}
+        receiver_tensors = {'example': serialized_tf_example}
 
-    features = tf.parse_example(serialized_tf_example, feature_spec)
+        features = tf.parse_example(serialized_tf_example, feature_spec)
 
-    print("features:", features)
+        print("features:", features)
+        if whites_turn:
+            first_players_occupied = features["occupied_w"]
+            second_players_occupied = features["occupied_b"]
+        else:
+            first_players_occupied = features["occupied_b"]
+            second_players_occupied = features["occupied_w"]
 
 
-    the_ints = tf.concat(
-        [
-            tf.bitwise.invert(tf.bitwise.bitwise_or(features["occupied_w"], features["occupied_b"])), #(Empty squares) might be faster to just pass occupied in the Protocol Buffer
-            features["ep_square"], #(ep_square) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
-            tf.bitwise.bitwise_and(features["occupied_w"], features["kings"]), #Likely can do without AND operation
-            tf.bitwise.bitwise_and(features["occupied_w"], features["queens"]),
-            tf.bitwise.bitwise_and(features["occupied_w"], features["rooks"]),
-            tf.bitwise.bitwise_and(features["occupied_w"], features["bishops"]),
-            tf.bitwise.bitwise_and(features["occupied_w"], features["knights"]),
-            tf.bitwise.bitwise_and(features["occupied_w"], features["pawns"]),
-            tf.bitwise.bitwise_and(features["occupied_w"], features["castling_rights"]), #(White castling rooks) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
-            tf.bitwise.bitwise_and(features["occupied_b"], features["kings"]),  # Likely can do without AND operation
-            tf.bitwise.bitwise_and(features["occupied_b"], features["queens"]),
-            tf.bitwise.bitwise_and(features["occupied_b"], features["rooks"]),
-            tf.bitwise.bitwise_and(features["occupied_b"], features["bishops"]),
-            tf.bitwise.bitwise_and(features["occupied_b"], features["knights"]),
-            tf.bitwise.bitwise_and(features["occupied_b"], features["pawns"]),
-            tf.bitwise.bitwise_and(features["occupied_b"], features["castling_rights"]), #(Black castling rooks) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
-        ],
-        axis=1
-    )
 
-    print("the_ints:", the_ints)
 
-    the_bytes = tf.cast(tf.bitcast(the_ints,tf.uint8),dtype=tf.int32)
+        the_ints = tf.concat([
+            tf.bitwise.invert(tf.bitwise.bitwise_or(features["occupied_w"], features["occupied_b"])),# (Empty squares) might be faster to just pass occupied in the Protocol Buffer
+            features["ep_square"],# (ep_square) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
+            tf.bitwise.bitwise_and(first_players_occupied, features["kings"]),# Likely can do without AND operation
+            tf.bitwise.bitwise_and(first_players_occupied, features["queens"]),
+            tf.bitwise.bitwise_and(first_players_occupied, features["rooks"]),
+            tf.bitwise.bitwise_and(first_players_occupied, features["bishops"]),
+            tf.bitwise.bitwise_and(first_players_occupied, features["knights"]),
+            tf.bitwise.bitwise_and(first_players_occupied, features["pawns"]),
+            tf.bitwise.bitwise_and(first_players_occupied, features["castling_rights"]),# (White castling rooks) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
+            tf.bitwise.bitwise_and(second_players_occupied, features["kings"]),# Likely can do without AND operation
+            tf.bitwise.bitwise_and(second_players_occupied, features["queens"]),
+            tf.bitwise.bitwise_and(second_players_occupied, features["rooks"]),
+            tf.bitwise.bitwise_and(second_players_occupied, features["bishops"]),
+            tf.bitwise.bitwise_and(second_players_occupied, features["knights"]),
+            tf.bitwise.bitwise_and(second_players_occupied, features["pawns"]),
+            tf.bitwise.bitwise_and(second_players_occupied, features["castling_rights"]),# (Black castling rooks) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
+            ],
+            axis=1
+        )
 
-    print("the_bytes:", the_bytes)
+        print("the_ints:", the_ints)
 
-    float_bool_masks = tf.constant(
-        [np.unpackbits(num).tolist() for num in np.arange(2 ** 8, dtype=np.uint8)],
-        dtype=tf.float32)
+        the_bytes = tf.cast(tf.bitcast(the_ints,tf.uint8),dtype=tf.int32)
 
-    print("float_bool_masks",float_bool_masks)
+        print("the_bytes:", the_bytes)
 
-    data = tf.gather(float_bool_masks, the_bytes)
+        float_bool_masks = tf.constant(
+            [np.unpackbits(num).tolist() for num in np.arange(2 ** 8, dtype=np.uint8)],
+            dtype=tf.float32)
 
-    print("data:", data)
+        print("float_bool_masks",float_bool_masks)
 
-    properly_aranged_data = tf.transpose(data, perm=[0, 2, 3, 1])
+        data = tf.gather(float_bool_masks, the_bytes)
 
-    print("properly_aranged_data:", properly_aranged_data)
+        print("data:", data)
 
-    return tf.estimator.export.ServingInputReceiver(properly_aranged_data, receiver_tensors)
+        properly_aranged_data = tf.transpose(data, perm=[0, 2, 3, 1])
+        print("properly_aranged_data:", properly_aranged_data)
+
+        if not whites_turn:
+            THE_AXIS_TO_REVERSE = 1 ####################################################################################################I AM NOT CONFIDENT ABOUT THIS IT MAY BE 1#####################################################################################
+            properly_aranged_data = tf.reverse(properly_aranged_data, axis=[THE_AXIS_TO_REVERSE])
+
+            print("new properly_aranged_data:", properly_aranged_data)
+
+        return tf.estimator.export.ServingInputReceiver(properly_aranged_data, receiver_tensors)
+
+    return serving_input_reciever_fn
 
 
 def board_as_str_serving_input_receiver_fn():
@@ -827,8 +845,6 @@ def line_counter(filename):
 
     with open(filename, "r") as f:
         return sum(bl.count("\n") for bl in blocks(f))
-
-
 
 
 class ValidationRunHook(tf.train.SessionRunHook):

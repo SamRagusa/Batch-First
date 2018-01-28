@@ -505,6 +505,156 @@ def _set_piece_at(board_state, square, piece_type, color, promoted):
         board_state.promoted ^= mask
 
 
+def piece_at(board_state, square):
+    piece_type = piece_type_at(board_state, square)
+    if piece_type:
+        return chess.Piece(int(piece_type), bool(np.uint64(board_state.occupied_w) & BB_SQUARES[square]))
+    return None
+
+
+def _set_castling_fen(board_state, castling_fen):
+    """
+    Adaptation of the chess.Board._set_castling_fen method.
+    """
+
+    if not castling_fen or castling_fen == "-": # I think I can take out the first condition of this if statement
+        board_state.castling_rights = BB_VOID
+        return
+
+    if not chess.FEN_CASTLING_REGEX.match(castling_fen):
+        raise ValueError("invalid castling fen: {0}".format(repr(castling_fen)))
+
+
+    char_to_castling_bb = {char: bb for char, bb in zip("kqKQ", [BB_H8, BB_A8, BB_H1, BB_A1])}
+    for cur_char in castling_fen:
+        board_state.castling_rights = np.uint64(board_state.castling_rights) | np.uint64(
+            char_to_castling_bb.get(cur_char))
+
+
+def create_board_state_from_board_fen(fen):
+    """
+    Adapted from chess.BaseBoard._set_board_fen
+    """
+    # Ensure the FEN is valid.
+    rows = fen.split("/")
+    if len(rows) != 8:
+        raise ValueError("expected 8 rows in position part of fen: {0}".format(repr(fen)))
+
+    # Validate each row.
+    for row in rows:
+        field_sum = 0
+        previous_was_digit = False
+        previous_was_piece = False
+
+        for c in row:
+            if c in ["1", "2", "3", "4", "5", "6", "7", "8"]:
+                if previous_was_digit:
+                    raise ValueError("two subsequent digits in position part of fen: {0}".format(repr(fen)))
+                field_sum += int(c)
+                previous_was_digit = True
+                previous_was_piece = False
+            elif c == "~":
+                if not previous_was_piece:
+                    raise ValueError("~ not after piece in position part of fen: {0}".format(repr(fen)))
+                previous_was_digit = False
+                previous_was_piece = False
+            elif c.lower() in ["p", "n", "b", "r", "q", "k"]:
+                field_sum += 1
+                previous_was_digit = False
+                previous_was_piece = True
+            else:
+                raise ValueError("invalid character in position part of fen: {0}".format(repr(fen)))
+
+        if field_sum != 8:
+            raise ValueError("expected 8 columns per row in position part of fen: {0}".format(repr(fen)))
+
+    # Clear the board.
+    board_state = _clear_board(create_initial_board_state())
+
+
+    str_to_piece_vals = {str_rep: (piece_type, piece_color) for str_rep, piece_type, piece_color in
+                         zip("pnbrqkPNBRQK", list(PIECE_TYPES) * 2,
+                             [TURN_BLACK] * len(PIECE_TYPES) + [TURN_WHITE] * len(PIECE_TYPES))}
+
+    # Put pieces on the board.
+    square_index = 0
+    for c in fen:
+        if c in ["1", "2", "3", "4", "5", "6", "7", "8"]:
+            square_index += int(c)
+        elif not str_to_piece_vals.get(c) is None:
+            piece_type, piece_color = str_to_piece_vals.get(c)
+            _set_piece_at(board_state, SQUARES_180[square_index], piece_type, piece_color, False)  #I should be dealing with promotion better
+            square_index += 1
+        elif c == "~":
+            board_state.promoted |= BB_SQUARES[SQUARES_180[square_index - 1]]
+
+    return board_state
+
+
+def create_board_state_from_fen(fen):
+    """
+    Adapted from chess.Board.set_fen
+
+    Parses a FEN and sets the position from it.
+
+    :raises: :exc:`ValueError` if the FEN string is invalid.
+    """
+    # Ensure there are six parts.
+    parts = fen.split()
+    if len(parts) != 6:
+        raise ValueError("fen string should consist of 6 parts: {0}".format(repr(fen)))
+
+    # Check that the turn part is valid.
+    if not parts[1] in ["w", "b"]:
+        raise ValueError("expected 'w' or 'b' for turn part of fen: {0}".format(repr(fen)))
+
+    # Check that the castling part is valid.
+    if not chess.FEN_CASTLING_REGEX.match(parts[2]):
+        raise ValueError("invalid castling part in fen: {0}".format(repr(fen)))
+
+    # Check that the en passant part is valid.
+    if parts[3] != "-":
+        if parts[3] not in chess.SQUARE_NAMES:
+            raise ValueError("invalid en passant part in fen: {0}".format(repr(fen)))
+
+    # Check that the half move part is valid.
+    if int(parts[4]) < 0:
+        raise ValueError("halfmove clock can not be negative: {0}".format(repr(fen)))
+
+    # Check that the fullmove number part is valid.
+    # 0 is allowed for compability but later replaced with 1.
+    if int(parts[5]) < 0:
+        raise ValueError("fullmove number must be positive: {0}".format(repr(fen)))
+
+    # Validate the board part and set it.
+    board_state = create_board_state_from_board_fen(parts[0])
+
+    # Set the turn.
+    if parts[1] == "w":
+        board_state.turn = TURN_WHITE
+    else:
+        board_state.turn = TURN_BLACK
+
+    # Set castling flags.
+    _set_castling_fen(board_state, parts[2])
+
+    # Set the en passant square.
+    if parts[3] == "-":
+        board_state.ep_square = None
+    else:
+        board_state.ep_square = np.uint8(chess.SQUARE_NAMES.index(parts[3]))
+
+    # Set the mover counters.
+    board_state.halfmove_clock = np.uint16(parts[4])
+    board_state.fullmove_number = np.uint16(parts[5])
+
+    board_state.cur_hash = np.uint64(zobrist_hash(chess.Board(fen)))
+
+    # Clear move stack.
+    # self.clear_stack()
+
+    return board_state
+
 
 @jit(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type), nopython=True)
 def is_zeroing(board_state, move):
@@ -1283,9 +1433,9 @@ def _is_safe(board_state, king, blockers, move):
                 BB_RAYS[move.from_square][move.to_square] & BB_SQUARES[king])
 
 
+#I don't think I'm ever changing these default parameters and should probably just remove them
 @jit((BoardState.class_type.instance_type, uint64, uint64), nopython=True)
 def generate_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
-
     if board_state.turn == TURN_WHITE:
         king = msb(board_state.kings & board_state.occupied_w)
     else:
@@ -1306,6 +1456,21 @@ def generate_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
     return
 
 
+def generate_move_to_enumeration_dict():
+    possible_moves = {}
+
+    board_state = create_board_state_from_fen('8/8/8/8/8/8/8/8 w - - 0 1')
+    for square in SQUARES:
+        for piece in (KNIGHT, QUEEN):
+            _set_piece_at(board_state, square, piece, TURN_WHITE, False)
+            for move in generate_legal_moves(board_state,BB_ALL, BB_ALL):
+                if possible_moves.get((move.from_square, move.to_square)) is None:
+                    possible_moves[move.from_square, move.to_square] = len(possible_moves)
+            _remove_piece_at(board_state, square)
+
+    return possible_moves
+
+
 
 
 
@@ -1320,9 +1485,5 @@ def jitted_perft_test(board_state, depth):
         num_nodes += jitted_perft_test(copy_push(board_state, move), depth - 1)
 
     return num_nodes
-
-
-
-
 
 

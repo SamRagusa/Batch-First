@@ -13,12 +13,12 @@ def main(unused_param):
     """
     Set up the data pipelines, create the computational graph, train the model, and evaluate the results.
     """
-    SAVE_MODEL_DIR = "/srv/tmp/move_ordering_full_data_5"
+    SAVE_MODEL_DIR = "/srv/tmp/current/move_ordering_full_data_11"
     TRAINING_FILENAMES = ["/srv/databases/chess_engine/move_gen/full_training_data_part_" + str(num) + ".tfrecords" for num in range(9)]
     VALIDATION_FILENAMES = ["/srv/databases/chess_engine/move_gen/full_training_data_part_9.tfrecords"]
     TRAIN_OP_SUMMARIES = ["gradient_norm", "gradients"]
     NUM_OUTPUTS = 1792
-    DENSE_SHAPE = [2048,2048]
+    DENSE_SHAPE = [1024,1024,1024]
     OPTIMIZER = 'Adam'
     TRAINING_BATCH_SIZE = 100
     VALIDATION_BATCH_SIZE = 2000
@@ -32,22 +32,18 @@ def main(unused_param):
             [[128,2],[256,2]],
             [[256,3]]],
         [
-            [[256,1]],
-            [[64,1], [128,1,6]],
-            [[64,1], [128,6,1]]]]  #Output of 10752 neurons
+            [[128,1]],
+            [[32,1], [64,1,6]],
+            [[32,1], [64,6,1]]]]  #Output of 5376 neurons
 
 
-    BATCHES_IN_TRAINING_EPOCH = 3870000 // (TRAINING_BATCH_SIZE)#reduce(
-        # lambda x, y: x + y,
-        # [ann_h.line_counter(filename) for filename in TRAINING_FILENAMES]) // (TRAINING_BATCH_SIZE)
-    BATCHES_IN_VALIDATION_EPOCH = 430000// VALIDATION_BATCH_SIZE#ann_h.line_counter(VALIDATION_FILENAMES[0]) // VALIDATION_BATCH_SIZE#
-    #84289074 // VALIDATION_BATCH_SIZE
-    #ann_h.line_counter(VALIDATION_FILENAMES[0]) // VALIDATION_BATCH_SIZE
+    BATCHES_IN_TRAINING_EPOCH = 3870000 // (TRAINING_BATCH_SIZE)
+    BATCHES_IN_VALIDATION_EPOCH = 430000// VALIDATION_BATCH_SIZE
 
 
     learning_decay_function = lambda gs  : tf.train.exponential_decay(LEARNING_RATE,
                                                                       global_step=gs,
-                                                                      decay_steps=BATCHES_IN_TRAINING_EPOCH,
+                                                                      decay_steps=2*BATCHES_IN_TRAINING_EPOCH,
                                                                       decay_rate=0.96,
                                                                       staircase=True)
 
@@ -80,7 +76,7 @@ def main(unused_param):
 
 
     validation_hook = ann_h.ValidationRunHook(
-        step_increment=BATCHES_IN_TRAINING_EPOCH//4,
+        step_increment=BATCHES_IN_TRAINING_EPOCH,
         estimator=classifier,
         input_fn_creator=lambda: ann_h.move_gen_one_hot_create_tf_records_input_data_fn(VALIDATION_FILENAMES,VALIDATION_BATCH_SIZE,repeat=False,shuffle=False),
         temp_num_steps_in_epoch=BATCHES_IN_VALIDATION_EPOCH,
@@ -95,10 +91,15 @@ def main(unused_param):
     )
 
 
-    # Export the model for serving
+    # Export the model for serving for whites turn
     classifier.export_savedmodel(
-        SAVE_MODEL_DIR,
-        serving_input_receiver_fn=ann_h.newer_serving_input_reciever_fn)
+        SAVE_MODEL_DIR + "/whites_turn",
+        serving_input_receiver_fn=ann_h.serving_input_reciever_fn_creater(True))
+
+    # Export the model for serving for blacks turn
+    classifier.export_savedmodel(
+        SAVE_MODEL_DIR + "/blacks_turn",
+        serving_input_receiver_fn=ann_h.serving_input_reciever_fn_creater(False))
 
 
 
