@@ -12,7 +12,7 @@ import time
 from my_board import MyBoard
 from ann_creation_helper import line_counter
 from board_eval_client import ANNEvaluator
-from numba_board import create_board_state_from_fen, generate_legal_moves, BB_ALL, generate_move_to_enumeration_dict, Move, database_board_representation
+from numba_board import create_board_state_from_fen, generate_legal_moves, BB_ALL, generate_move_to_enumeration_dict, Move
 from numba_negamax_zero_window import GameNode, numpy_move_dtype
 
 
