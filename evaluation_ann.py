@@ -17,32 +17,30 @@ def main(unused_param):
     """
     Set up the data pipelines, create the computational graph, train the model, and evaluate the results.
     """
-    SAVE_MODEL_DIR = "/srv/tmp/blahblah_6"
+    SAVE_MODEL_DIR = "/srv/tmp/current/smaller_eval_test_4"
     TRAINING_FILENAMES = ["/srv/databases/chess_engine/full_3/shuffled_training_set.txt"]
     VALIDATION_FILENAMES = ["/srv/databases/chess_engine/full_5/scoring_validation_set.tfrecords"]
     TRAIN_OP_SUMMARIES = ["gradient_norm", "gradients"]
     NUM_OUTPUTS = 1
-    DENSE_SHAPE = [2058,1024,512]
+    DENSE_SHAPE = [500,400,300,100]#[500,350,250]
     OPTIMIZER = 'Adam'
     TRAINING_MIN_AFTER_DEQUEUE = 20000
-    TRAINING_BATCH_SIZE = 512#1024
-    EQUALITY_SCALAR_MULT = 1.01
+    TRAINING_BATCH_SIZE = 1000#500
     VALIDATION_BATCH_SIZE = 2000
     NUM_TRAINING_EPOCHS = 500
-    LOG_ITERATION_INTERVAL =1000
-    OLD_MOVE_SCALAR_MULT = 1.005
-    LEARNING_RATE = .000001#.000002
-
+    LOG_ITERATION_INTERVAL =2000
+    OLD_MOVE_SCALAR_MULT = 1
+    LEARNING_RATE = .0005#.000002
 
 
     INCEPTION_MODULES = [
         [
-            [[128,2],[256,2]],
-            [[256,3]]],
+            [[32,2],[64,2]],
+            [[64,3]]],
         [
-            [[256,1]],
-            [[64,1], [128,1,6]],
-            [[64,1], [128,6,1]]]]  #Output of 10752 neurons
+            [[64,1]],
+            [[32,1], [64,1,6]],
+            [[32,1], [64,6,1]]]]  #Output of 3072 neurons
 
 
 
@@ -58,9 +56,10 @@ def main(unused_param):
 
     learning_decay_function = lambda gs  : tf.train.exponential_decay(LEARNING_RATE,
                                                                       global_step=gs,
-                                                                      decay_steps=BATCHES_IN_TRAINING_EPOCH//15,
+                                                                      decay_steps=BATCHES_IN_TRAINING_EPOCH//8,
                                                                       decay_rate=0.92,
                                                                       staircase=True)
+
 
     print(BATCHES_IN_TRAINING_EPOCH)
     print(BATCHES_IN_VALIDATION_EPOCH)
@@ -85,10 +84,10 @@ def main(unused_param):
             "train_summaries": TRAIN_OP_SUMMARIES,
             "learning_decay_function" : learning_decay_function,
             "inc_old_move_scalar" : OLD_MOVE_SCALAR_MULT,
-            "equality_scalar": EQUALITY_SCALAR_MULT})
+            })
 
     validation_hook = ann_h.ValidationRunHook(
-        step_increment=BATCHES_IN_TRAINING_EPOCH//(5*300),
+        step_increment=BATCHES_IN_TRAINING_EPOCH//(5*10),
         estimator=classifier,
         input_fn_creator=lambda: ann_h.one_hot_create_tf_records_input_data_fn(VALIDATION_FILENAMES,VALIDATION_BATCH_SIZE),
         temp_num_steps_in_epoch=500)#BATCHES_IN_VALIDATION_EPOCH)
@@ -105,11 +104,17 @@ def main(unused_param):
     )
 
 
-    # Export the model for serving
+    # Export the model for serving for whites turn
     classifier.export_savedmodel(
-        SAVE_MODEL_DIR,
-        serving_input_receiver_fn=ann_h.new_serving_input_reciever_fn,
-        as_text=True)
+        SAVE_MODEL_DIR + "/whites_turn",
+        serving_input_receiver_fn=ann_h.serving_input_reciever_fn_creater(True)
+    )
+
+    # Export the model for serving for blacks turn
+    classifier.export_savedmodel(
+        SAVE_MODEL_DIR + "/blacks_turn",
+        serving_input_receiver_fn=ann_h.serving_input_reciever_fn_creater(False)
+    )
 
 
 

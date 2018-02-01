@@ -13,28 +13,29 @@ def main(unused_param):
     """
     Set up the data pipelines, create the computational graph, train the model, and evaluate the results.
     """
-    SAVE_MODEL_DIR = "/srv/tmp/current/move_ordering_full_data_11"
+    SAVE_MODEL_DIR = "/srv/tmp/current/move_ordering_full_data_17"
     TRAINING_FILENAMES = ["/srv/databases/chess_engine/move_gen/full_training_data_part_" + str(num) + ".tfrecords" for num in range(9)]
     VALIDATION_FILENAMES = ["/srv/databases/chess_engine/move_gen/full_training_data_part_9.tfrecords"]
     TRAIN_OP_SUMMARIES = ["gradient_norm", "gradients"]
     NUM_OUTPUTS = 1792
-    DENSE_SHAPE = [1024,1024,1024]
+    DENSE_SHAPE =  [300,300,500]#[800,800,800]
     OPTIMIZER = 'Adam'
-    TRAINING_BATCH_SIZE = 100
+    TRAINING_BATCH_SIZE = 250
     VALIDATION_BATCH_SIZE = 2000
     LOG_ITERATION_INTERVAL =2000
-    OLD_MOVE_SCALAR_MULT = 1.005
-    LEARNING_RATE = .00001#.000002
+    LEARNING_RATE = .0001#.000002
     MAKE_CNN_MODULES_TRAINABLE = True
+
 
     INCEPTION_MODULES = [
         [
-            [[128,2],[256,2]],
-            [[256,3]]],
+            [[32,2],[64,2]],
+            [[64,3]]],
         [
-            [[128,1]],
-            [[32,1], [64,1,6]],
-            [[32,1], [64,6,1]]]]  #Output of 5376 neurons
+            [[64,1]],
+            [[16,1], [32,1,6]],
+            [[16,1], [32,6,1]]]]  #Output of 1536 neurons
+
 
 
     BATCHES_IN_TRAINING_EPOCH = 3870000 // (TRAINING_BATCH_SIZE)
@@ -43,7 +44,7 @@ def main(unused_param):
 
     learning_decay_function = lambda gs  : tf.train.exponential_decay(LEARNING_RATE,
                                                                       global_step=gs,
-                                                                      decay_steps=2*BATCHES_IN_TRAINING_EPOCH,
+                                                                      decay_steps=4*BATCHES_IN_TRAINING_EPOCH,
                                                                       decay_rate=0.96,
                                                                       staircase=True)
 
@@ -69,7 +70,6 @@ def main(unused_param):
             "learning_rate": LEARNING_RATE,
             "train_summaries": TRAIN_OP_SUMMARIES,
             "learning_decay_function" : learning_decay_function,
-            "inc_old_move_scalar" : OLD_MOVE_SCALAR_MULT,
             "trainable_cnn_modules" : MAKE_CNN_MODULES_TRAINABLE,
         })
 
@@ -91,16 +91,15 @@ def main(unused_param):
     )
 
 
-    # Export the model for serving for whites turn
     classifier.export_savedmodel(
         SAVE_MODEL_DIR + "/whites_turn",
-        serving_input_receiver_fn=ann_h.serving_input_reciever_fn_creater(True))
+        serving_input_receiver_fn=ann_h.serving_input_reciever_legal_moves_fn(True),
+    )
 
-    # Export the model for serving for blacks turn
     classifier.export_savedmodel(
         SAVE_MODEL_DIR + "/blacks_turn",
-        serving_input_receiver_fn=ann_h.serving_input_reciever_fn_creater(False))
-
+        serving_input_receiver_fn=ann_h.serving_input_reciever_legal_moves_fn(False),
+    )
 
 
 

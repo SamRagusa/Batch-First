@@ -146,7 +146,7 @@ class BoardState:
         self.fullmove_number = fullmove_number
         self.cur_hash = cur_hash
 
-@jit
+@njit
 def get_info_for_tensorflow(board_state):
     return np.array([board_state.occupied_w, board_state.occupied_b, board_state.kings, board_state.queens,
                      board_state.rooks, board_state.bishops, board_state.knights, board_state.pawns,

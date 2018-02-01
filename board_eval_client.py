@@ -4,10 +4,16 @@ Created on Oct 5, 2017
 @author: SamRagusa
 '''
 from grpc.beta import implementations
-from numba_board import get_info_for_tensorflow
+from numba_board import get_info_for_tensorflow, generate_move_to_enumeration_dict, TURN_WHITE
 from diff_tensorflow_serving.apis import prediction_service_pb2
 from tensorflow_serving.apis import regression_pb2
 from tensorflow_serving.apis import classification_pb2
+import numpy as np
+
+
+MOVE_TO_INDEX_ARRAY = np.zeros(shape=[64,64],dtype=np.int32)
+for key, value in generate_move_to_enumeration_dict().items():
+    MOVE_TO_INDEX_ARRAY[key[0],key[1]] = value
 
 
 def fill_example_from_board_state(example, board_state):
@@ -28,6 +34,36 @@ def fill_example_from_board_state(example, board_state):
     example.features.feature["ep_square"].int64_list.value.append(board_info[9])
 
 
+# @profile
+def fill_example_from_board_state_with_moves(example, game_node):
+    """
+    Fills the given tf.train.Example with the relevant information from the given board state.
+    """
+    board_info = get_info_for_tensorflow(game_node.board_state)
+
+    example.features.feature["occupied_w"].int64_list.value.append(board_info[0])
+    example.features.feature["occupied_b"].int64_list.value.append(board_info[1])
+    example.features.feature["kings"].int64_list.value.append(board_info[2])
+    example.features.feature["queens"].int64_list.value.append(board_info[3])
+    example.features.feature["rooks"].int64_list.value.append(board_info[4])
+    example.features.feature["bishops"].int64_list.value.append(board_info[5])
+    example.features.feature["knights"].int64_list.value.append(board_info[6])
+    example.features.feature["pawns"].int64_list.value.append(board_info[7])
+    example.features.feature["castling_rights"].int64_list.value.append(board_info[8])
+    example.features.feature["ep_square"].int64_list.value.append(board_info[9])
+    if game_node.board_state.turn != TURN_WHITE:        #THE ANNs DON'T SCORE BOARDS FOR THE RIGHT PLAYER SO THIS IS SWITCHED
+        example.features.feature["legal_move_indices"].int64_list.value.extend(
+            MOVE_TO_INDEX_ARRAY[game_node.unexplored_moves["from_square"], game_node.unexplored_moves["to_square"]])
+    else:
+        example.features.feature["legal_move_indices"].int64_list.value.extend(
+            MOVE_TO_INDEX_ARRAY[
+                # This is for the rotation of the board, and will be done better and likely in TensorFlow in the longer term
+                8 * (7 - (game_node.unexplored_moves["from_square"] >> 3)) + (game_node.unexplored_moves["from_square"] & 7),
+                8 * (7 - (game_node.unexplored_moves["to_square"] >> 3)) + (game_node.unexplored_moves["to_square"] & 7)])
+
+
+
+
 class ANNEvaluator:
     def __init__(self, the_board, host="172.17.0.2", port=9000, model_name='evaluation_ann', model_desired_signature='serving_default', for_white=True):#
         self.host = host
@@ -41,12 +77,14 @@ class ANNEvaluator:
         self.request.model_spec.signature_name = self.model_desired_signature
         self.board = the_board
         self.for_white = for_white
+        self.total_evaluated_nodes = 0
+        self.total_evaluations = 0
 
 
 
 
 
-    def async_for_numba_score_batch(self, game_nodes, timeout=10):
+    def async_evaluate_boards_batch(self, game_nodes, timeout=10):
         """
         This functions sends a ProtoBuf representing an array of GameNode JitClass objects to
         TensorFlow Serving, and returns a future representing the values of the given nodes (done by regression).
@@ -69,10 +107,13 @@ class ANNEvaluator:
             (self.request.input.example_list.examples.add() for _ in range(len(game_nodes))),
             (node.board_state for node in game_nodes)))
 
+        self.total_evaluations += 1
+        self.total_evaluated_nodes += len(game_nodes)
+
         return self.stub.Regress.future(self.request, timeout)
 
 
-    def async_for_numba_move_batch(self, game_nodes, timeout=10):
+    def async_evaluate_move_batch(self, game_nodes, timeout=10):
         """
         This functions sends a ProtoBuf representing an array of GameNode JitClass objects to
         TensorFlow Serving, and returns a future representing the scoring of possible moves from the
@@ -92,9 +133,12 @@ class ANNEvaluator:
         request.model_spec.signature_name = self.model_desired_signature
 
         list(map(
-            fill_example_from_board_state,
+            fill_example_from_board_state_with_moves,
             (request.input.example_list.examples.add() for _ in range(len(game_nodes))),
-            (node.board_state for node in game_nodes)))
+            game_nodes))
+
+        self.total_evaluations += 1
+        self.total_evaluated_nodes += len(game_nodes)
 
         return self.stub.Classify.future(request, timeout)
 
@@ -114,5 +158,8 @@ class ANNEvaluator:
             fill_example_from_board_state,
             (self.request.input.example_list.examples.add() for _ in range(len(game_nodes))),
             (node.board_state for node in game_nodes)))
+
+        self.total_evaluations += 1
+        self.total_evaluated_nodes += len(game_nodes)
 
         return self.stub.Regress(self.request, timeout).result.regressions
