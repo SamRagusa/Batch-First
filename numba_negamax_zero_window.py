@@ -1,7 +1,7 @@
 import numba as nb
-import tensorflow as tf
+
 import threading
-import multiprocessing
+from concurrent.futures import ThreadPoolExecutor
 
 from numba import float32
 
@@ -15,23 +15,11 @@ from move_evaluation_ann import main as move_ann_main
 
 import numpy as np
 
-numpy_move_dtype = np.dtype([("from_square", np.uint8), ("to_square", np.uint8), ("promotion", np.uint8)])
-move_type = nb.from_dtype(numpy_move_dtype)
 
-
-
-def create_move_record_array_from_move_object_generator(move_generator): #This will be eliminated long term
-    return np.array([(move.from_square, move.to_square, move.promotion) for move in move_generator], dtype=numpy_move_dtype)
-
-
-PREDICTOR, RESULT_GETTER, CLOSER = evaluation_ann_main([None,True])
+PREDICTOR, CLOSER = evaluation_ann_main([None,True])
 MOVE_PREDICTOR, MOVE_CLOSER = move_ann_main([None, True])
 
 
-
-# ANN_BOARD_EVALUATOR = ANNEvaluator(None, model_name="evaluation_ann")
-# ANN_MOVE_EVALUATOR_BLACK = ANNEvaluator(None, model_name="move_scoring_ann_white", model_desired_signature="legal_moves")      #THE ANNs DON'T SCORE BOARDS FOR THE RIGHT PLAYER SO THIS IS SWITCHED
-# ANN_MOVE_EVALUATOR_WHITE = ANNEvaluator(None, model_name="move_scoring_ann_black", model_desired_signature="legal_moves")
 
 MIN_FLOAT32_VAL = np.finfo(np.float32).min
 MAX_FLOAT32_VAL = np.finfo(np.float32).max
@@ -238,11 +226,14 @@ def set_node(hash_table, board_hash, depth, upper_bound=MAX_FLOAT32_VAL, lower_b
     hash_table[index]["lower_bound"] = lower_bound
 
 
-@njit
+@njit#((GameNode.class_type.instance_type, optional(hash_table_numba_dtype[:,:])))
 def terminated_from_tt(game_node, hash_table):
     """
     Checks if the node should be terminated from the information in contained in the given hash_table.  It also
     updates the values in the given node when applicable.
+
+    NOTES:
+    1) This logic has not been heavily thought out, I've been focused on nodes per second as of now.
     """
     hash_entry = hash_table[game_node.board_state.cur_hash & ONES_IN_RELEVANT_BITS]
     if hash_entry["depth"] != 255 and hash_entry["entry_hash"] == game_node.board_state.cur_hash:
@@ -326,8 +317,7 @@ def zero_window_update_node_from_value(node, value, hash_table):
                     zero_window_update_node_from_value(temp_parent, -node.best_value, hash_table)
 
 
-# @jit(float32(BoardState.class_type.instance_type), nopython=True, nogil=True, cache=True)
-# @njit #Can release the GIL here if wanted, but doesn't really speed things up
+# @njit
 # def simple_board_state_evaluation_for_white(board_state):
 #     score = np.float32(0)
 #     for piece_val, piece_bb in zip(np.array([.1, .3, .45, .6, .9], dtype=np.float32), [board_state.pawns,board_state.knights , board_state.bishops, board_state.rooks, board_state.queens]):
@@ -385,37 +375,35 @@ def create_child_array(node_array):
     return array_to_return
 
 
-# def ann_evaluate_batch(node_array):
-#     """
-#     This is only used for the basic_do_alpha_beta function.
-#     """
-#     if len(node_array) != 0:
-#         return ANN_BOARD_EVALUATOR.for_numba_score_batch(node_array)
-#     return None
-#
-#
-# def async_ann_evaluate_node_batch(node_array):
-#     # Should be doing this much more efficiently
-#     if len(node_array) != 0:
-#         return ANN_BOARD_EVALUATOR.async_evaluate_boards_batch(node_array)
-
 
 def start_node_evaluations(node_array):
     scalar_array = jitclass_to_numpy_scalar_array([node.board_state for node in node_array])
     # print(scalar_array)
-    t = threading.Thread(target=PREDICTOR,
-                         args=(scalar_array["kings"],
-                               scalar_array["queens"],
-                               scalar_array["rooks"],
-                               scalar_array["bishops"],
-                               scalar_array["knights"],
-                               scalar_array["pawns"],
-                               scalar_array["castling_rights"],
-                               scalar_array["ep_square"],
-                               scalar_array["occupied_w"],
-                               scalar_array["occupied_b"],
-                               scalar_array["occupied"],
-                               scalar_array["turn"]))
+
+
+    def evaluate_and_set():
+        results = PREDICTOR(scalar_array["kings"],
+                            scalar_array["queens"],
+                            scalar_array["rooks"],
+                            scalar_array["bishops"],
+                            scalar_array["knights"],
+                            scalar_array["pawns"],
+                            scalar_array["castling_rights"],
+                            scalar_array["ep_square"],
+                            scalar_array["occupied_w"],
+                            scalar_array["occupied_b"],
+                            scalar_array["occupied"],
+                            scalar_array["turn"])
+
+        for j, result in enumerate(results):
+            if node_array[j].board_state.turn == TURN_WHITE:
+                node_array[j].best_value = result
+            else:
+                node_array[j].best_value = result
+
+
+    t = threading.Thread(target=evaluate_and_set)
+
     t.start()
     return t
 
@@ -467,68 +455,50 @@ def newer_start_move_scoring(node_array, testing=False):
 
 
 
-# def async_score_moves(node_array):
-#     """
-#     Returns a tuple of a bool numpy array of the tuple of indices who's turn is white, and a size two array of futures
-#     for white and blacks move evaluation (or none if there were no nodes for white or black
-#     """
-#     if len(node_array) != 0:
-#         white_turn_indices = [True if node.board_state.turn else False for node in node_array]
-#         white_turn_nodes = node_array[white_turn_indices]
-#         black_turn_nodes = node_array[np.invert(white_turn_indices)]
-#         futures = [None, None]
-#         if len(white_turn_nodes) != 0:
-#             futures[0] = ANN_MOVE_EVALUATOR_WHITE.async_evaluate_move_batch(white_turn_nodes)
-#         if len(black_turn_nodes) != 0:
-#             futures[1] = ANN_MOVE_EVALUATOR_BLACK.async_evaluate_move_batch(black_turn_nodes)
-#         return white_turn_indices, futures
-#         # return None
+@njit(nogil=True)#(boolean(GameNode.class_type.instance_type, optional(hash_table_numba_dtype[:,:])),nogil=True)
+def check_and_update_valid_moves(game_node, hash_table):
+    if not hash_table is None:
+        if terminated_from_tt(game_node, hash_table):
+            return True
 
-
-# @profile
-def get_indicies_of_terminating_children(node_array, hash_table):
-    """
-    This function checks for things such as the game being over for whatever reason,
-    or information being found in the TT causing a node to terminate,
-    or found in endgame tablebases,...
-
-    Currently Doing:
-    1) Checking if game is a checkmate or stalemate
-    2) Checking if game is the transposition table (hash_table)
-
-    TO-DO:
-    1) Check for 50 move rule
-    2) Check an endgame table if popcount(node.board_state.occupied) <=6: (if using Syzygy 6 man tablebase)
-
-
-    NOTES:
-    1) In long term implementation will likely do a modification of starting a legal move generator
-    and stopping when it reaches it's first move instead of doing it's entire move gen, but not yet...
-    """
-    # Creating zeros with dtype of np.bool will result in an array of False
-    terminating = np.zeros(shape=len(node_array), dtype=np.bool)
-    for j in range(len(node_array)):
-        if not hash_table is None and terminated_from_tt(node_array[j], hash_table):
-            terminating[j] = True
-        else:
-            legal_move_struct_array = create_move_record_array_from_move_object_generator(
-                generate_legal_moves(node_array[j].board_state, BB_ALL, BB_ALL))
-
-            if len(legal_move_struct_array) == 0:
-                if is_in_check(node_array[j].board_state):
-                    if node_array[j].board_state.turn == TURN_WHITE:
-                        node_array[j].best_value = LOSS_RESULT_SCORE
-                    else:
-                        node_array[j].best_value = WIN_RESULT_SCORE
-                else:
-                    node_array[j].best_value = TIE_RESULT_SCORE
-
-                terminating[j] = True
+    legal_move_struct_array = create_legal_move_struct(game_node.board_state, BB_ALL, BB_ALL)
+    if not legal_move_struct_array is None:
+        game_node.unexplored_moves = legal_move_struct_array
+        game_node.children_left = len(legal_move_struct_array)
+    else:
+        if is_in_check(game_node.board_state):
+            if game_node.board_state.turn == TURN_WHITE:
+                game_node.best_value = LOSS_RESULT_SCORE
             else:
-                node_array[j].unexplored_moves = legal_move_struct_array
-                node_array[j].children_left = np.uint8(len(legal_move_struct_array))
+                game_node.best_value = WIN_RESULT_SCORE
+        else:
+            game_node.best_value = TIE_RESULT_SCORE
+        return True
+    return False
 
-    return terminating
+
+def get_indices_of_terminating_children(node_array, hash_table):
+    """
+    Currently using ThreadPoolExecutor to do this on multiple cores, after using Numba to release the GIL.
+    This will soon be completely vectorized.
+    """
+    MAX_WORKERS = 6 #This number is picked arbitrarily, setting this equal to 12 (how many cores I have available) does not improve speed
+
+    def loop_wrapper(inner_node_array):
+        terminating = np.zeros(shape=len(inner_node_array), dtype=np.bool)
+        for j in range(len(inner_node_array)):
+            terminating[j] = check_and_update_valid_moves(inner_node_array[j], hash_table)
+        return terminating
+
+    chunk_length = (len(node_array) + MAX_WORKERS - 1) // MAX_WORKERS
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        return np.concatenate(list(executor.map(loop_wrapper,  [node_array[j * chunk_length:(j + 1) * chunk_length] for j in range(MAX_WORKERS)])))
+
+
+
+
+
+
 
 
 # @jit(void(GameNode.class_type.instance_type), nopython=True)
@@ -549,58 +519,6 @@ def get_indicies_of_terminating_children(node_array, hash_table):
 #
 #         set_up_next_best_move(node_array[j])
 
-
-
-
-
-# @profile
-def ann_set_up_scored_move_generation(node_array, white_turn_indices, futures):
-    white_move_nodes = node_array[white_turn_indices]
-    black_move_nodes = node_array[np.invert(white_turn_indices)]
-
-    if not futures[0] is None:
-        white_results = futures[0].result().result.classifications
-        for j in range(len(white_move_nodes)):
-            white_move_nodes[j].unexplored_move_scores = np.array([move_score.score for move_score in white_results[j].classes], dtype=np.float32)
-
-            set_up_next_best_move(white_move_nodes[j])
-
-    if not futures[1] is None:
-        black_results = futures[1].result().result.classifications
-        for j in range(len(black_move_nodes)):
-            black_move_nodes[j].unexplored_move_scores = np.array([-move_score.score for move_score in black_results[j].classes], dtype=np.float32)
-
-            set_up_next_best_move(black_move_nodes[j])
-
-
-
-
-
-# def set_node_array_best_values_from_values(node_array, results, testing=False):
-#     for j, result in zip(range(len(node_array)), results):
-#         if testing and node_array[j].parent is None:
-#             print("CHANGING BEST VALUE ON ROOT NODE FROM", node_array[j].best_value, "to", result.value if node_array[j].board_state.turn == TURN_WHITE else -result.value)
-#
-#         if node_array[j].board_state.turn == TURN_WHITE:
-#             node_array[j].best_value = result.value
-#         else:
-#             node_array[j].best_value = - result.value
-
-# @njit
-def new_set_node_array_best_values_from_values(node_array):
-    results = RESULT_GETTER()
-
-
-    # time.sleep(10)
-    for j, result in enumerate(results):
-        # if testing:
-        #     if node_array[j].parent is None:
-        #         print("CHANGING BEST VALUE ON ROOT NODE FROM", node_array[j].best_value, "to", result.value if node_array[j].board_state.turn == TURN_WHITE else -result.value)
-
-        if node_array[j].board_state.turn == TURN_WHITE:
-            node_array[j].best_value = - result
-        else:
-            node_array[j].best_value = result
 
 
 def update_tree_from_terminating_nodes(node_array, hash_table):
@@ -626,7 +544,6 @@ def do_iteration(batch, hash_table, testing=False):
     depth_zero_nodes = batch[depth_zero_indices]
     depth_not_zero_nodes = batch[depth_not_zero_indices]
 
-    # evaluation_result_future = async_ann_evaluate_node_batch(depth_zero_nodes)
     if len(depth_zero_nodes) != 0:
         evaluation_thread = start_node_evaluations(depth_zero_nodes)
 
@@ -634,10 +551,10 @@ def do_iteration(batch, hash_table, testing=False):
         children_created = create_child_array(depth_not_zero_nodes)
 
         # for every child which is not terminating from something set it's move list to the full set of legal moves possible
-        terminating_children_indices = get_indicies_of_terminating_children(children_created, hash_table)
+        terminating_children_indices = get_indices_of_terminating_children(children_created, hash_table)
 
         not_terminating_children = children_created[np.logical_not(terminating_children_indices)]
-        # white_turn_indices, move_scoring_futures = async_score_moves(not_terminating_children)
+
         if len(not_terminating_children) != 0:
             move_thread = newer_start_move_scoring(not_terminating_children, testing)
 
@@ -653,10 +570,7 @@ def do_iteration(batch, hash_table, testing=False):
                     print("A NODE WITH NO KIDS IS BEING TREATED AS IF IT HAD MORE CHILDREN!")
 
         if len(depth_zero_nodes) != 0:
-            # result_value = evaluation_result_future.result().result.regressions
             evaluation_thread.join()
-            new_set_node_array_best_values_from_values(depth_zero_nodes)
-            # set_node_array_best_values_from_values(depth_zero_nodes, result_value, testing
 
         NODES_TO_UPDATE_TREE_WITH = np.concatenate((depth_zero_nodes, children_created[terminating_children_indices]))
         update_tree_from_terminating_nodes(NODES_TO_UPDATE_TREE_WITH, hash_table)
@@ -664,8 +578,6 @@ def do_iteration(batch, hash_table, testing=False):
 
         if len(not_terminating_children) != 0:
             move_thread.join()
-            # new_set_up_scored_moves(not_terminating_children)
-        # ann_set_up_scored_move_generation(not_terminating_children, white_turn_indices, move_scoring_futures)
         # set_up_scored_move_generation(not_terminating_children)
 
 
@@ -673,7 +585,6 @@ def do_iteration(batch, hash_table, testing=False):
     else:
         if len(depth_zero_nodes) != 0:
             evaluation_thread.join()
-            new_set_node_array_best_values_from_values(depth_zero_nodes)
 
         update_tree_from_terminating_nodes(depth_zero_nodes, hash_table)
         return np.empty(0)
@@ -743,9 +654,6 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
                         print("A terminated node was found in the newly created next_batch!")
                     elif should_terminate(next_batch[j]):
                         print("Found node which should terminate in the newly created next_batch!")
-                    elif next_batch[j].children_left <= 0:
-                        print("Found node with", next_batch[j].to_insert_cleaned,
-                              "children left being in the newly created next_batch!")
 
     if print_info or full_testing:
         print("Number of iterations taken", iteration_counter, "in total time", time.time() - starting_time)
@@ -788,15 +696,14 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
 #
 #     return best_value
 
-
-def ann_set_up_root_search_tree_node(fen, depth, seperator):
-    root_node_as_array = np.array([create_game_node_from_fen(fen, depth, seperator)])
-    get_indicies_of_terminating_children(root_node_as_array, None)
-    # thread = start_move_scoring(root_node_as_array)
+def set_up_root_search_tree_node(fen, depth, seperator):
+    root_node = create_game_node_from_fen(fen, depth, seperator)
+    root_node.unexplored_moves = create_legal_move_struct(root_node.board_state, BB_ALL, BB_ALL)
+    root_node.children_left = len(root_node.unexplored_moves)
+    root_node_as_array = np.array([root_node])
     thread = newer_start_move_scoring(root_node_as_array)
     thread.join()
-
-    return root_node_as_array[0]
+    return root_node
 
 
 
@@ -821,10 +728,10 @@ BINS_TO_USE = np.arange(15, -15, -.025)
 
 starting_time = time.time()
 for j in MAX_BATCH_LIST:
-    root_node = ann_set_up_root_search_tree_node(FEN_TO_TEST, DEPTH_OF_SEARCH, SEPERATING_VALUE)
+    root_node = set_up_root_search_tree_node(FEN_TO_TEST, DEPTH_OF_SEARCH, SEPERATING_VALUE)
     print("Root node starting possible moves:", root_node.children_left)
     starting_time = time.time()
-    cur_value = do_alpha_beta_search_with_bins(root_node, j, BINS_TO_USE, print_info=False, full_testing=False)
+    cur_value = do_alpha_beta_search_with_bins(root_node, j, BINS_TO_USE, print_info=True, full_testing=False)
     print("Root node children_left after search:", root_node.children_left)
     if cur_value == MIN_FLOAT32_VAL:
         print("MIN FLOAT VALUE")

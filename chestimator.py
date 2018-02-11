@@ -19,8 +19,7 @@ class ChEstimator(Estimator):
     def create_predictor(self,
                         predict_keys=None,
                         hooks=None,
-                        checkpoint_path=None,
-                        queue_size=5000):
+                        checkpoint_path=None):
 
 
         run_metadata = tf.RunMetadata()
@@ -78,6 +77,8 @@ class ChEstimator(Estimator):
 
             the_bytes = tf.cast(tf.bitcast(the_ints, tf.uint8), dtype=tf.int32)
 
+            #I haven't switched this to the dynamic partition/stich method used for move scoring because for some reason
+            #I'm unable to use the GPU Kernel for dynamic partition right now, and thus it's very slow.  Long term this will be switched
             reversed_bytes = tf.reverse(the_bytes, axis=[2])
 
             properly_arranged_bytes = tf.where(turn_white, the_bytes, reversed_bytes)
@@ -93,12 +94,7 @@ class ChEstimator(Estimator):
             estimator_spec = self._call_model_fn({"feature":properly_aranged_data}, None, model_fn_lib.ModeKeys.PREDICT, None)
             predictions = self._extract_keys(estimator_spec.predictions, predict_keys)[predict_keys]
 
-            #THIS IS GOING TO BE REMOVED SOON FOR SPEED
-            output_queue = tf.FIFOQueue(queue_size,tf.float32, shapes=[[1]])
-            enque_prediction_op = output_queue.enqueue_many(predictions)
-
-            squeezed_dequeue_result_op = tf.squeeze(output_queue.dequeue_many(output_queue.size()), axis=1)
-
+            squeezed_predictions = tf.squeeze(predictions, axis=1)
 
             mon_sess = training.MonitoredSession(
                     session_creator=training.ChiefSessionCreator(
@@ -112,7 +108,7 @@ class ChEstimator(Estimator):
                 if mon_sess.should_stop():
                     raise StopIteration
 
-                mon_sess.run(enque_prediction_op,
+                return mon_sess.run(squeezed_predictions,
                              {kings : the_kings,
                               queens : the_queens,
                               rooks : the_rooks,
@@ -129,12 +125,6 @@ class ChEstimator(Estimator):
                              run_metadata=run_metadata)
 
 
-            def dequeue_results():
-                """
-                THIS IS GOING TO BE REMOVED SOON.
-                """
-                return mon_sess.run(squeezed_dequeue_result_op)
-
             def finish():
                 fetched_timeline = timeline.Timeline(run_metadata.step_stats)
                 chrome_trace = fetched_timeline.generate_chrome_trace_format()
@@ -142,7 +132,7 @@ class ChEstimator(Estimator):
                     f.write(chrome_trace)
                 mon_sess.close()
 
-            return predict, dequeue_results, finish
+            return predict, finish
 
 
 
@@ -212,7 +202,7 @@ class MoveChEstimator(Estimator):
 
         int_turn_white = tf.cast(turn_white, tf.int32)
 
-        to_reverse, to_not_reverse = tf.dynamic_partition(the_bytes, int_turn_white, 2)#THIS IS PURPOSELY FLIPPED!!!!!!!!!!!!!!!!!!!!!!!!!
+        to_not_reverse, to_reverse = tf.dynamic_partition(the_bytes, int_turn_white, 2)#THIS IS PURPOSELY FLIPPED!!!!!!!!!!!!!!!!!!!!!!!!!
 
         reversed_bytes = tf.reverse(to_reverse, axis=[2])
 
@@ -221,7 +211,7 @@ class MoveChEstimator(Estimator):
         indices_to_reassemble = tf.dynamic_partition(tf.range(bytes_shape[0]), int_turn_white, 2)#THIS IS PURPOSELY FLIPPED!!!!!!!!!!!!!!!
 
 
-        properly_arranged_bytes = tf.dynamic_stitch(indices_to_reassemble, [reversed_bytes, to_not_reverse])
+        properly_arranged_bytes = tf.dynamic_stitch(indices_to_reassemble, [to_not_reverse,reversed_bytes])
 
         float_bool_masks = tf.constant(
             [np.unpackbits(num).tolist() for num in np.arange(2 ** 8, dtype=np.uint8)],

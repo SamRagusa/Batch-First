@@ -125,14 +125,19 @@ def cnn_model_fn(features, labels, mode, params):
 
     cur_inception_module = input_layer
 
-
+    activation_summaries = []
     for module_num, module_shape in enumerate(params['inception_modules']):
-        cur_inception_module, activation_summaries = build_inception_module_with_batch_norm(
-            cur_inception_module,
-            module_shape,
-            mode,
-            padding='valid',
-            num_previously_built_inception_modules=module_num)
+        if callable(module_shape):
+            cur_inception_module = module_shape(cur_inception_module)
+        else:
+            cur_inception_module, activation_summaries = build_inception_module_with_batch_norm(
+                cur_inception_module,
+                module_shape,
+                mode,
+                padding='valid',
+                num_previously_built_inception_modules=module_num)
+
+
 
     if isinstance(cur_inception_module, list):
         inception_module_paths_flattened = [
@@ -143,7 +148,6 @@ def cnn_model_fn(features, labels, mode, params):
 
         inception_module_outputs = tf.concat(inception_module_paths_flattened, 1)
     else:
-        #I think this causes problems if it occurs (not happening in current model)
         inception_module_outputs = cur_inception_module
 
 
@@ -168,10 +172,11 @@ def cnn_model_fn(features, labels, mode, params):
     ratio_old_new_sum_loss_to_negative_sum = None
 
     # (p,q,r) = (original_position, choosen_position, random_position)
-    original_pos, desired_pos, random_pos = tf.split(tf.reshape(logits, [-1, 3, 1]), [1, 1, 1], 1)
+
 
     # Calculate loss (for both TRAIN and EVAL modes)
     if mode != tf.estimator.ModeKeys.PREDICT:
+        original_pos, desired_pos, random_pos = tf.split(tf.reshape(logits, [-1, 3, 1]), [1, 1, 1], 1)
 
         # Implementing  an altered version of the loss function defined in Deep Pink
         with tf.variable_scope("loss"):
@@ -221,17 +226,22 @@ def cnn_model_fn(features, labels, mode, params):
     # predictions = None
     # if mode != tf.estimator.ModeKeys.PREDICT:
     predictions = {
-        "real_rand_guessing": tf.greater(desired_pos, random_pos)}
+        # "real_rand_guessing": tf.greater(desired_pos, random_pos)
+        "scores" : logits
+    }
 
     # A dictionary for scoring used when exporting model for serving.
     the_export_outputs = {
         "serving_default" : tf.estimator.export.RegressionOutput(value=logits)}
 
-    real_rand_diff = desired_pos - random_pos
-    old_plus_desired = original_pos + desired_pos
+
     # Create the validation metrics
     validation_metric = None
     if mode != tf.estimator.ModeKeys.PREDICT:
+        real_rand_diff = desired_pos - random_pos
+        old_plus_desired = original_pos + desired_pos
+
+
         validation_metric = {
             "metrics/rand_vs_real_accuracy": mean_metric_creator("metrics/rand_vs_real_accuracy")(tf.cast(tf.greater(desired_pos, random_pos), tf.float32), None),
             "metrics/mean_dist_real_rand": mean_metric_creator("metrics/mean_dist_real_rand")(real_rand_diff, None),
@@ -291,7 +301,7 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
     if mode == tf.estimator.ModeKeys.PREDICT:
         input_layer = features["data"]
 
-        legal_move_indices = features["move_indices"]
+        # legal_move_indices = features["move_indices"]
     else:
         input_layer = features
 
@@ -409,12 +419,12 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
         }
         # A dictionary for scoring used when exporting model for serving.
     else:
-        real_indices = index_tensor_to_index_pairs(legal_move_indices)
-        legal_move_logits = tf.gather_nd(logits, real_indices)
+        # real_indices = index_tensor_to_index_pairs(legal_move_indices)
+        # legal_move_logits = tf.gather_nd(logits, real_indices)
         the_export_outputs = {
             # "serving_default" : tf.estimator.export.PredictOutput(outputs={"logits": logits}),
             "serving_default": tf.estimator.export.ClassificationOutput(scores=logits),
-            "legal_moves" :  tf.estimator.export.ClassificationOutput(scores=legal_move_logits),
+            # "legal_moves" :  tf.estimator.export.ClassificationOutput(scores=legal_move_logits),
         }
 
 
@@ -779,7 +789,7 @@ def serving_input_reciever_fn_creater(whites_turn):
 
             the_ints = tf.concat([
                 tf.bitwise.invert(tf.bitwise.bitwise_or(features["occupied_w"], features["occupied_b"])),# (Empty squares) might be faster to just pass occupied in the Protocol Buffer
-                features["ep_square"],# (ep_square) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
+                features["ep_square"],# (ep_square) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)#########################################################THIS I THINK IS COMPLETELY WRONG SINCE I NEVER DID THE GATHER###########################
                 tf.bitwise.bitwise_and(first_players_occupied, features["kings"]),# Likely can do without AND operation
                 tf.bitwise.bitwise_and(first_players_occupied, features["queens"]),
                 tf.bitwise.bitwise_and(first_players_occupied, features["rooks"]),
