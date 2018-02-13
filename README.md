@@ -26,7 +26,7 @@ The versions listed are the versions I'm currently using, but are not necessaril
 - [khash_numba](https://github.com/synapticarbors/khash_numba)
 - [TensorFlow Serving](https://github.com/tensorflow/serving) v0.4.0 (No longer used during runtime, and will be phased out completely soon)
 
-#Notes For Awesome Developers/People
+# Notes For Awesome Developers/People
 This engine is still in development, and thus needs work.  If you have any ideas, questions, are interested in potentially working on the engine, or anything else, I encourage you to send me an email!  
    
 
