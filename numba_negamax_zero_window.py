@@ -20,7 +20,6 @@ PREDICTOR, CLOSER = evaluation_ann_main([None,True])
 MOVE_PREDICTOR, MOVE_CLOSER = move_ann_main([None, True])
 
 
-
 MIN_FLOAT32_VAL = np.finfo(np.float32).min
 MAX_FLOAT32_VAL = np.finfo(np.float32).max
 FLOAT32_EPS = np.finfo(np.float32).eps
@@ -490,9 +489,8 @@ def get_indices_of_terminating_children(node_array, hash_table):
             terminating[j] = check_and_update_valid_moves(inner_node_array[j], hash_table)
         return terminating
 
-    chunk_length = (len(node_array) + MAX_WORKERS - 1) // MAX_WORKERS
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        return np.concatenate(list(executor.map(loop_wrapper,  [node_array[j * chunk_length:(j + 1) * chunk_length] for j in range(MAX_WORKERS)])))
+        return np.concatenate(list(executor.map(loop_wrapper,np.array_split(node_array, MAX_WORKERS))))
 
 
 
@@ -593,7 +591,7 @@ def do_iteration(batch, hash_table, testing=False):
 
 # @profile
 def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, hash_table=None, print_info=False, full_testing=False):
-    open_node_holder = PriorityBins(bins_to_use, max_batch_size) #This will likely be put outside of this function long term
+    open_node_holder = PriorityBins(bins_to_use, max_batch_size, num_workers_to_use=12, search_extra_ratio=1.2, testing=full_testing) #This will likely be put outside of this function long term
 
     if hash_table is None:
         hash_table = get_empty_hash_table()
@@ -634,14 +632,20 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
 
         try_num_getting_batch = 1
         while True:
-            # print(len(open_node_holder))
-            next_batch = open_node_holder.insert_batch_and_get_next_batch(to_insert, max_batch_size * try_num_getting_batch)
+        #     print(len(open_node_holder))
+            next_batch = open_node_holder.insert_batch_and_get_next_batch(to_insert, custom_max_nodes=max_batch_size*try_num_getting_batch)
 
             to_insert = np.array([])
             if len(next_batch) != 0 or (len(next_batch) == 0 and len(open_node_holder) == 0):
                 break
             else:
-                try_num_getting_batch = 1
+                try_num_getting_batch += 1
+
+
+        # if len(to_insert) != 0 or not open_node_holder.is_empty():
+        #     next_batch = open_node_holder.new_insert_batch_and_get_next_batch(to_insert)
+        # else:
+        #     next_batch = []
 
         if print_info or full_testing:
             iteration_counter += 1
@@ -665,36 +669,56 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
     return root_game_node.best_value
 
 
-# # @njit(float32(GameNode.class_type.instance_type, float32, float32, nb.int8))
-# def basic_do_alpha_beta(game_node, alpha, beta, color):
-#     """
-#     A simple alpha-beta algorithm to test my code.
-#
-#     """
-#     has_move = False
-#     for _ in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
-#         has_move = True
-#         break
-#
-#     if not has_move:
-#         if is_in_check(game_node.board_state):
-#             if color == 1:
-#                 return MAX_FLOAT32_VAL
-#             return MIN_FLOAT32_VAL
-#         return 0
-#
-#     if game_node.depth == 0:
-#         return color * ann_evaluate_batch(np.array([game_node]))[0].value
-#
-#     best_value = MIN_FLOAT32_VAL
-#     for move in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
-#         v = - basic_do_alpha_beta(game_node.zero_window_create_child_from_move(move), -beta, -alpha, -color)
-#         best_value = max(best_value, v)
-#         alpha = max(alpha, v)
-#         if alpha >= beta:
-#             break
-#
-#     return best_value
+# @njit(float32(GameNode.class_type.instance_type, float32, float32, nb.int8))
+# @profile
+def basic_do_alpha_beta(game_node, alpha, beta, color):
+    """
+    A simple alpha-beta algorithm to test my code.
+
+    NOTES:
+    1) This is PAINFULLY slow
+    """
+    has_move = False
+    for _ in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
+        has_move = True
+        break
+
+    if not has_move:
+        if is_in_check(game_node.board_state):
+            if color == 1:
+                return MAX_FLOAT32_VAL
+            return MIN_FLOAT32_VAL
+        return 0
+
+    if game_node.depth == 0:
+        return color *  PREDICTOR([np.int64(np.uint64(game_node.board_state.kings))],
+                                  [np.int64(np.uint64(game_node.board_state.queens))],
+                                  [np.int64(np.uint64(game_node.board_state.rooks))],
+                                  [np.int64(np.uint64(game_node.board_state.bishops))],
+                                  [np.int64(np.uint64(game_node.board_state.knights))],
+                                  [np.int64(np.uint64(game_node.board_state.pawns))],
+                                  [np.int64(np.uint64(game_node.board_state.castling_rights))],
+                                  [np.int64(np.uint64(game_node.board_state.ep_square)) if not game_node.board_state.ep_square is None else 255 ],
+                                  [np.int64(np.uint64(game_node.board_state.occupied_w))],
+                                  [np.int64(np.uint64(game_node.board_state.occupied_b))],
+                                  [np.int64(np.uint64(game_node.board_state.occupied))],
+                                  [game_node.board_state.turn])
+
+
+
+    best_value = MIN_FLOAT32_VAL
+    for move in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
+        v = - basic_do_alpha_beta(game_node.zero_window_create_child_from_move(move), -beta, -alpha, -color)
+        best_value = max(best_value, v)
+        alpha = max(alpha, v)
+        if alpha >= beta:
+            break
+
+    return best_value
+
+
+
+
 
 def set_up_root_search_tree_node(fen, depth, seperator):
     root_node = create_game_node_from_fen(fen, depth, seperator)
@@ -722,9 +746,9 @@ print("Done compiling and starting run.\n")
 
 FEN_TO_TEST = "rn1qk2r/p1p1bppp/bp2pn2/3p4/2PP4/1P3NP1/P2BPPBP/RN1QK2R w KQkq - 4 8"  # "rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"
 DEPTH_OF_SEARCH = 4
-MAX_BATCH_LIST = [1000]*3#[250, 500, 1000, 2000]# [j**2 for j in range(40,0,-2)] + [5000]
-SEPERATING_VALUE = -2.7
-BINS_TO_USE = np.arange(15, -15, -.025)
+MAX_BATCH_LIST = [250, 500, 1000, 2000]*3# [j**2 for j in range(40,0,-2)] + [5000]
+SEPERATING_VALUE = -8
+BINS_TO_USE = np.arange(15, -15, -.1)#np.arange(15, -15, -.025)
 
 starting_time = time.time()
 for j in MAX_BATCH_LIST:
@@ -740,14 +764,18 @@ for j in MAX_BATCH_LIST:
     print("Value:", cur_value, "found with max batch", j, "in time:", time.time() - starting_time)
     print()
 
-CLOSER()
-MOVE_CLOSER()
+
 # print("Total white move sets evaluated:", ANN_MOVE_EVALUATOR_WHITE.total_evaluated_nodes, "with an average batch size of:", ANN_MOVE_EVALUATOR_WHITE.total_evaluated_nodes / ANN_MOVE_EVALUATOR_WHITE.total_evaluations)
 # print("Total black move sets evaluated:", ANN_MOVE_EVALUATOR_BLACK.total_evaluated_nodes, "with an average batch size of:", ANN_MOVE_EVALUATOR_BLACK.total_evaluated_nodes / ANN_MOVE_EVALUATOR_BLACK.total_evaluations)
 # print("Total boards scored:", ANN_BOARD_EVALUATOR.total_evaluated_nodes, "with an average batch size of:", ANN_BOARD_EVALUATOR.total_evaluated_nodes / ANN_BOARD_EVALUATOR.total_evaluations)
 
-# root_node = create_root_game_node(DEPTH_OF_SEARCH, -1)
+#This is PAINFULLY slow
+# root_node = create_game_node_from_fen(FEN_TO_TEST, DEPTH_OF_SEARCH ,-1)
 # for j in range(1):
 #     starting_time = time.time()
 #     print("Basic negamax with alpha-beta pruning resulted in:",
 #           basic_do_alpha_beta(root_node, MIN_FLOAT32_VAL, MAX_FLOAT32_VAL, 1), "in time:", time.time() - starting_time)
+
+
+CLOSER()
+MOVE_CLOSER()
