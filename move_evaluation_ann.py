@@ -74,8 +74,8 @@ def main(using_to_serve):
         })
 
 
-    if using_to_serve[1]:
-        return the_estimator.create_predictor("move_values")
+    if using_to_serve[0]:
+        return the_estimator.white_move_create_predictor("move_values")
 
 
     validation_hook = ann_h.ValidationRunHook(

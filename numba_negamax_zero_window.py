@@ -15,9 +15,10 @@ from move_evaluation_ann import main as move_ann_main
 
 import numpy as np
 
+if __name__ == "__main__":
+    PREDICTOR, CLOSER = evaluation_ann_main([True])
+    MOVE_PREDICTOR, MOVE_CLOSER = move_ann_main([True])
 
-PREDICTOR, CLOSER = evaluation_ann_main([None,True])
-MOVE_PREDICTOR, MOVE_CLOSER = move_ann_main([None, True])
 
 
 MIN_FLOAT32_VAL = np.finfo(np.float32).min
@@ -48,7 +49,6 @@ for key, value in generate_move_to_enumeration_dict().items():
     MOVE_TO_INDEX_ARRAY[key[0],key[1]] = value
     REVERSED_MOVE_TO_INDEX_ARRAY[switch_square_fn(key[0]), switch_square_fn(key[1])] = value
 
-
 numpy_board_state_dtype = np.dtype([("pawns", np.uint64),
                                     ("knights", np.uint64),
                                     ("bishops", np.uint64),
@@ -67,7 +67,6 @@ numpy_board_state_dtype = np.dtype([("pawns", np.uint64),
                                     ("cur_hash", np.uint64)])
 
 numba_numpy_board_type = nb.from_dtype(numpy_board_state_dtype)
-
 
 
 @njit
@@ -375,30 +374,46 @@ def create_child_array(node_array):
 
 
 
-def start_node_evaluations(node_array):
-    scalar_array = jitclass_to_numpy_scalar_array([node.board_state for node in node_array])
-    # print(scalar_array)
 
+def for_all_white_jitclass_to_array_for_ann(board):
+    if board.turn == TURN_WHITE:
+        return [board.kings, board.queens, board.rooks, board.bishops, board.knights, board.pawns,
+                        board.castling_rights, 0 if board.ep_square is None else BB_SQUARES[np.int32(board.ep_square)],
+                        board.occupied_w, board.occupied_b, board.occupied]
+    else:
+        return [board.kings, board.queens, board.rooks, board.bishops, board.knights, board.pawns,
+                        board.castling_rights, 0 if board.ep_square is None else BB_SQUARES[np.int32(board.ep_square)],
+                        board.occupied_b, board.occupied_w, board.occupied]
+
+
+
+def for_all_white_jitclass_array_to_basic_input_for_anns(board_array):
+    to_return = np.empty(shape=[len(board_array),11], dtype=np.uint64)
+    black_turn = np.zeros(shape=len(board_array), dtype=np.bool)
+    for j, board in enumerate(board_array):
+
+        to_return[j] = for_all_white_jitclass_to_array_for_ann(board)
+
+        if board.turn == TURN_BLACK:
+            black_turn[j] = True
+
+
+    to_return[black_turn] = vectorized_flip_vertically(to_return[black_turn])
+
+    return to_return.transpose()
+
+
+def all_white_start_node_evaluations(node_array):
+    ann_inputs = for_all_white_jitclass_array_to_basic_input_for_anns(np.array([node.board_state for node in node_array], dtype=np.object))
 
     def evaluate_and_set():
-        results = PREDICTOR(scalar_array["kings"],
-                            scalar_array["queens"],
-                            scalar_array["rooks"],
-                            scalar_array["bishops"],
-                            scalar_array["knights"],
-                            scalar_array["pawns"],
-                            scalar_array["castling_rights"],
-                            scalar_array["ep_square"],
-                            scalar_array["occupied_w"],
-                            scalar_array["occupied_b"],
-                            scalar_array["occupied"],
-                            scalar_array["turn"])
+        results = PREDICTOR(ann_inputs)
 
         for j, result in enumerate(results):
             if node_array[j].board_state.turn == TURN_WHITE:
                 node_array[j].best_value = result
             else:
-                node_array[j].best_value = result
+                node_array[j].best_value = - result
 
 
     t = threading.Thread(target=evaluate_and_set)
@@ -407,16 +422,21 @@ def start_node_evaluations(node_array):
     return t
 
 
-# @profile
-def newer_start_move_scoring(node_array, testing=False):
-    scalar_array = jitclass_to_numpy_scalar_array([node.board_state for node in node_array])
+@njit
+def jitted_set_move_scores_and_next_move(node, scores):
+    node.unexplored_move_scores = -scores
+    set_up_next_best_move(node)
+
+
+def newest_start_move_scoring(node_array, testing=False):
+    ann_inputs = for_all_white_jitclass_array_to_basic_input_for_anns(np.array([node.board_state for node in node_array],dtype=np.object))
 
     #This is taking up a lot of time, a change of the GameNode class to a numpy scalar is something I've been thinking
     #about and which (I believe) would allow for a much faster implementation of this
     move_index_arrays = [MOVE_TO_INDEX_ARRAY[node.unexplored_moves["from_square"], node.unexplored_moves[
-        "to_square"]] if node.board_state.turn != TURN_WHITE else REVERSED_MOVE_TO_INDEX_ARRAY[
-        node.unexplored_moves["from_square"], node.unexplored_moves["to_square"]] for j, node in
-                         enumerate(node_array)]
+        "to_square"]] if node.board_state.turn == TURN_WHITE else 1792 - MOVE_TO_INDEX_ARRAY[
+        node.unexplored_moves["from_square"], node.unexplored_moves["to_square"]] for node in
+                         node_array]
 
     size_array = np.array([ary.shape[0] for ary in move_index_arrays])
 
@@ -424,28 +444,16 @@ def newer_start_move_scoring(node_array, testing=False):
         [np.repeat(np.arange(len(size_array)), size_array), np.concatenate(move_index_arrays, axis=0)], axis=1)
 
     def set_move_scores():
-        results = MOVE_PREDICTOR(scalar_array["kings"],
-                               scalar_array["queens"],
-                               scalar_array["rooks"],
-                               scalar_array["bishops"],
-                               scalar_array["knights"],
-                               scalar_array["pawns"],
-                               scalar_array["castling_rights"],
-                               scalar_array["ep_square"],
-                               scalar_array["occupied_w"],
-                               scalar_array["occupied_b"],
-                               scalar_array["occupied"],
-                               scalar_array["turn"],
-                               for_result_getter)
+        results = MOVE_PREDICTOR(ann_inputs,
+                                 for_result_getter)
 
         for node, scores in  zip(node_array, np.split(results,np.cumsum(size_array))):
-            if testing and len(scores) != len(node.unexplored_moves):
-                print("WE HAVE A SIZING ISSUE HERE!")
-            if node.board_state.turn == TURN_WHITE:
-                node.unexplored_move_scores = scores
-            else:
-                node.unexplored_move_scores = - scores
-            set_up_next_best_move(node)
+            # if node.board_state.turn == TURN_WHITE:
+            #     node.unexplored_move_scores = scores
+            # else:
+            jitted_set_move_scores_and_next_move(node, scores)
+            # node.unexplored_move_scores = scores
+            # set_up_next_best_move(node)
 
 
     t  = threading.Thread(target=set_move_scores)
@@ -528,7 +536,6 @@ def update_tree_from_terminating_nodes(node_array, hash_table):
             print("WE HAVE A ROOT NODE TERMINATING AND SHOULD PROBABLY DO SOMETHING ABOUT IT")
 
 
-# @profile
 def do_iteration(batch, hash_table, testing=False):
     """
     TO-DO:
@@ -543,9 +550,10 @@ def do_iteration(batch, hash_table, testing=False):
     depth_not_zero_nodes = batch[depth_not_zero_indices]
 
     if len(depth_zero_nodes) != 0:
-        evaluation_thread = start_node_evaluations(depth_zero_nodes)
+        evaluation_thread = all_white_start_node_evaluations(depth_zero_nodes)
 
     if len(depth_not_zero_nodes) != 0:
+
         children_created = create_child_array(depth_not_zero_nodes)
 
         # for every child which is not terminating from something set it's move list to the full set of legal moves possible
@@ -554,7 +562,8 @@ def do_iteration(batch, hash_table, testing=False):
         not_terminating_children = children_created[np.logical_not(terminating_children_indices)]
 
         if len(not_terminating_children) != 0:
-            move_thread = newer_start_move_scoring(not_terminating_children, testing)
+            # move_thread = newer_start_move_scoring(not_terminating_children, testing)
+            move_thread = newest_start_move_scoring(not_terminating_children, testing)
 
         have_children_left_indices = np.array(
             [True if depth_not_zero_nodes[j].has_uncreated_child() else False for j in
@@ -588,8 +597,6 @@ def do_iteration(batch, hash_table, testing=False):
         return np.empty(0)
 
 
-
-# @profile
 def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, hash_table=None, print_info=False, full_testing=False):
     open_node_holder = PriorityBins(bins_to_use, max_batch_size, num_workers_to_use=12, search_extra_ratio=1.2, testing=full_testing) #This will likely be put outside of this function long term
 
@@ -670,51 +677,53 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
 
 
 # @njit(float32(GameNode.class_type.instance_type, float32, float32, nb.int8))
-# @profile
-def basic_do_alpha_beta(game_node, alpha, beta, color):
-    """
-    A simple alpha-beta algorithm to test my code.
-
-    NOTES:
-    1) This is PAINFULLY slow
-    """
-    has_move = False
-    for _ in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
-        has_move = True
-        break
-
-    if not has_move:
-        if is_in_check(game_node.board_state):
-            if color == 1:
-                return MAX_FLOAT32_VAL
-            return MIN_FLOAT32_VAL
-        return 0
-
-    if game_node.depth == 0:
-        return color *  PREDICTOR([np.int64(np.uint64(game_node.board_state.kings))],
-                                  [np.int64(np.uint64(game_node.board_state.queens))],
-                                  [np.int64(np.uint64(game_node.board_state.rooks))],
-                                  [np.int64(np.uint64(game_node.board_state.bishops))],
-                                  [np.int64(np.uint64(game_node.board_state.knights))],
-                                  [np.int64(np.uint64(game_node.board_state.pawns))],
-                                  [np.int64(np.uint64(game_node.board_state.castling_rights))],
-                                  [np.int64(np.uint64(game_node.board_state.ep_square)) if not game_node.board_state.ep_square is None else 255 ],
-                                  [np.int64(np.uint64(game_node.board_state.occupied_w))],
-                                  [np.int64(np.uint64(game_node.board_state.occupied_b))],
-                                  [np.int64(np.uint64(game_node.board_state.occupied))],
-                                  [game_node.board_state.turn])
-
-
-
-    best_value = MIN_FLOAT32_VAL
-    for move in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
-        v = - basic_do_alpha_beta(game_node.zero_window_create_child_from_move(move), -beta, -alpha, -color)
-        best_value = max(best_value, v)
-        alpha = max(alpha, v)
-        if alpha >= beta:
-            break
-
-    return best_value
+# def basic_do_alpha_beta(game_node, alpha, beta, color):
+#     """
+#     A simple alpha-beta algorithm to test my code.
+#
+#     NOTES:
+#     1) This is PAINFULLY slow
+#     """
+#     has_move = False
+#     for _ in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
+#         has_move = True
+#         break
+#
+#     if not has_move:
+#         if is_in_check(game_node.board_state):
+#             if color == 1:
+#                 return MAX_FLOAT32_VAL
+#             return MIN_FLOAT32_VAL
+#         return 0
+#
+#     if game_node.depth == 0:
+#         return color *  PREDICTOR([np.int64(np.uint64(game_node.board_state.kings))],
+#                                   [np.int64(np.uint64(game_node.board_state.queens))],
+#                                   [np.int64(np.uint64(game_node.board_state.rooks))],
+#                                   [np.int64(np.uint64(game_node.board_state.bishops))],
+#                                   [np.int64(np.uint64(game_node.board_state.knights))],
+#                                   [np.int64(np.uint64(game_node.board_state.pawns))],
+#                                   [np.int64(np.uint64(game_node.board_state.castling_rights))],
+#                                   [np.int64(np.uint64(game_node.board_state.ep_square)) if not game_node.board_state.ep_square is None else 255],
+#                                   [np.int64(np.uint64(game_node.board_state.occupied_w))],
+#                                   [np.int64(np.uint64(game_node.board_state.occupied_b))],
+#                                   [np.int64(np.uint64(game_node.board_state.occupied))],
+#                                   [game_node.board_state.turn])
+#
+#
+#
+#         # start_node_evaluations(np.array([game_node])).join()
+#         # return color *  game_node.best_value
+#
+#     best_value = MIN_FLOAT32_VAL
+#     for move in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
+#         v = - basic_do_alpha_beta(game_node.zero_window_create_child_from_move(move), -beta, -alpha, -color)
+#         best_value = max(best_value, v)
+#         alpha = max(alpha, v)
+#         if alpha >= beta:
+#             break
+#
+#     return best_value
 
 
 
@@ -725,7 +734,7 @@ def set_up_root_search_tree_node(fen, depth, seperator):
     root_node.unexplored_moves = create_legal_move_struct(root_node.board_state, BB_ALL, BB_ALL)
     root_node.children_left = len(root_node.unexplored_moves)
     root_node_as_array = np.array([root_node])
-    thread = newer_start_move_scoring(root_node_as_array)
+    thread = newest_start_move_scoring(root_node_as_array)
     thread.join()
     return root_node
 
@@ -738,44 +747,45 @@ def set_up_root_search_tree_node(fen, depth, seperator):
 
 
 
-print("Done compiling and starting run.\n")
+if __name__ == "__main__":
+    print("Done compiling and starting run.\n")
 
-# starting_time = time.time()
-# perft_results = jitted_perft_test(create_board_state_from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"), 4)
-# print("Depth 4 perft test results:", perft_results, "in time", time.time()-starting_time, "\n")
+    # starting_time = time.time()
+    # perft_results = jitted_perft_test(create_board_state_from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"), 4)
+    # print("Depth 4 perft test results:", perft_results, "in time", time.time()-starting_time, "\n")
 
-FEN_TO_TEST = "rn1qk2r/p1p1bppp/bp2pn2/3p4/2PP4/1P3NP1/P2BPPBP/RN1QK2R w KQkq - 4 8"  # "rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"
-DEPTH_OF_SEARCH = 4
-MAX_BATCH_LIST = [250, 500, 1000, 2000]*3# [j**2 for j in range(40,0,-2)] + [5000]
-SEPERATING_VALUE = -8
-BINS_TO_USE = np.arange(15, -15, -.1)#np.arange(15, -15, -.025)
+    FEN_TO_TEST = "rn1qk2r/p1p1bppp/bp2pn2/3p4/2PP4/1P3NP1/P2BPPBP/RN1QK2R w KQkq - 4 8"  # "rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"
+    DEPTH_OF_SEARCH = 4
+    MAX_BATCH_LIST = [250,500, 1000, 2000]# [j**2 for j in range(40,0,-2)] + [5000]
+    SEPERATING_VALUE = -8
+    BINS_TO_USE = np.arange(15, -15, -.1)#np.arange(15, -15, -.025)
 
-starting_time = time.time()
-for j in MAX_BATCH_LIST:
-    root_node = set_up_root_search_tree_node(FEN_TO_TEST, DEPTH_OF_SEARCH, SEPERATING_VALUE)
-    print("Root node starting possible moves:", root_node.children_left)
     starting_time = time.time()
-    cur_value = do_alpha_beta_search_with_bins(root_node, j, BINS_TO_USE, print_info=True, full_testing=False)
-    print("Root node children_left after search:", root_node.children_left)
-    if cur_value == MIN_FLOAT32_VAL:
-        print("MIN FLOAT VALUE")
-    elif cur_value == LOSS_RESULT_SCORE:
-        print("LOSS RESULT SCORE")
-    print("Value:", cur_value, "found with max batch", j, "in time:", time.time() - starting_time)
-    print()
+    for j in MAX_BATCH_LIST:
+        root_node = set_up_root_search_tree_node(FEN_TO_TEST, DEPTH_OF_SEARCH, SEPERATING_VALUE)
+        print("Root node starting possible moves:", root_node.children_left)
+        starting_time = time.time()
+        cur_value = do_alpha_beta_search_with_bins(root_node, j, BINS_TO_USE, print_info=True, full_testing=False)
+        print("Root node children_left after search:", root_node.children_left)
+        if cur_value == MIN_FLOAT32_VAL:
+            print("MIN FLOAT VALUE")
+        elif cur_value == LOSS_RESULT_SCORE:
+            print("LOSS RESULT SCORE")
+        print("Value:", cur_value, "found with max batch", j, "in time:", time.time() - starting_time)
+        print()
 
 
-# print("Total white move sets evaluated:", ANN_MOVE_EVALUATOR_WHITE.total_evaluated_nodes, "with an average batch size of:", ANN_MOVE_EVALUATOR_WHITE.total_evaluated_nodes / ANN_MOVE_EVALUATOR_WHITE.total_evaluations)
-# print("Total black move sets evaluated:", ANN_MOVE_EVALUATOR_BLACK.total_evaluated_nodes, "with an average batch size of:", ANN_MOVE_EVALUATOR_BLACK.total_evaluated_nodes / ANN_MOVE_EVALUATOR_BLACK.total_evaluations)
-# print("Total boards scored:", ANN_BOARD_EVALUATOR.total_evaluated_nodes, "with an average batch size of:", ANN_BOARD_EVALUATOR.total_evaluated_nodes / ANN_BOARD_EVALUATOR.total_evaluations)
-
-#This is PAINFULLY slow
-# root_node = create_game_node_from_fen(FEN_TO_TEST, DEPTH_OF_SEARCH ,-1)
-# for j in range(1):
-#     starting_time = time.time()
-#     print("Basic negamax with alpha-beta pruning resulted in:",
-#           basic_do_alpha_beta(root_node, MIN_FLOAT32_VAL, MAX_FLOAT32_VAL, 1), "in time:", time.time() - starting_time)
+    # print("Total white move sets evaluated:", ANN_MOVE_EVALUATOR_WHITE.total_evaluated_nodes, "with an average batch size of:", ANN_MOVE_EVALUATOR_WHITE.total_evaluated_nodes / ANN_MOVE_EVALUATOR_WHITE.total_evaluations)
+    # print("Total black move sets evaluated:", ANN_MOVE_EVALUATOR_BLACK.total_evaluated_nodes, "with an average batch size of:", ANN_MOVE_EVALUATOR_BLACK.total_evaluated_nodes / ANN_MOVE_EVALUATOR_BLACK.total_evaluations)
+    # print("Total boards scored:", ANN_BOARD_EVALUATOR.total_evaluated_nodes, "with an average batch size of:", ANN_BOARD_EVALUATOR.total_evaluated_nodes / ANN_BOARD_EVALUATOR.total_evaluations)
 
 
-CLOSER()
-MOVE_CLOSER()
+    # root_node = create_game_node_from_fen(FEN_TO_TEST, DEPTH_OF_SEARCH ,-1)
+    # for j in range(1):
+    #     starting_time = time.time()
+    #     print("Basic negamax with alpha-beta pruning resulted in:",
+    #           basic_do_alpha_beta(root_node, MIN_FLOAT32_VAL, MAX_FLOAT32_VAL, 1), "in time:", time.time() - starting_time)
+
+
+    CLOSER()
+    MOVE_CLOSER()

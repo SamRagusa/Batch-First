@@ -281,6 +281,18 @@ INITIAL_BOARD_HASH = np.uint64(5060803636482931868)
 
 
 
+
+flip_vert_const_1 = np.uint64(0x00FF00FF00FF00FF)
+flip_vert_const_2 = np.uint64(0x0000FFFF0000FFFF)
+
+@vectorize([uint64(uint64)])
+def vectorized_flip_vertically(bb):
+    bb = ((bb >>  8) & flip_vert_const_1) | ((bb & flip_vert_const_1) <<  8)
+    bb = ((bb >> 16) & flip_vert_const_2) | ((bb & flip_vert_const_2) << 16)
+    bb = ( bb >> 32) | ( bb << 32)
+    return bb
+
+
 # THIS IS VERY SLOW AND A TEMPORARY IMPLEMENTATION
 @njit(uint8(uint64))
 def msb(n):
@@ -303,7 +315,6 @@ def scan_reversed(bb):
 
 
 
-# This is kinda fast, but I don't think nearly fast enough
 @njit(uint8(uint64))
 def popcount(n):
     n = (n & 0x5555555555555555) + ((n & 0xAAAAAAAAAAAAAAAA) >> 1)
@@ -1515,9 +1526,14 @@ def create_legal_move_struct(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
 
 
 
-
 def generate_move_to_enumeration_dict():
     """
+    Generates a dictionary where the keys are (from_square, to_square) and their values are the move number
+    that move has been assigned.  It is done in a way such that for move number N from board B, if you were to flip B
+    vertically, the same move would have number 1792-N. (there are 1792 moves recognized)
+
+
+
     IMPORTANT NOTES:
     1) This ignores the fact that not all pawn promotions are the same, this effects the number of logits
     in the move scoring ANN
@@ -1525,7 +1541,7 @@ def generate_move_to_enumeration_dict():
     possible_moves = {}
 
     board_state = create_board_state_from_fen('8/8/8/8/8/8/8/8 w - - 0 1')
-    for square in SQUARES:
+    for square in SQUARES[:len(SQUARES)//2]:
         for piece in (KNIGHT, QUEEN):
             _set_piece_at(board_state, square, piece, TURN_WHITE, False)
             for move in generate_legal_moves(board_state,BB_ALL, BB_ALL):
@@ -1533,10 +1549,14 @@ def generate_move_to_enumeration_dict():
                     possible_moves[move.from_square, move.to_square] = len(possible_moves)
             _remove_piece_at(board_state, square)
 
+    switch_square_fn = lambda x: 8 * (7 - (x >> 3)) + (x & 7)
+
+    total_possible_moves = len(possible_moves)*2 - 1
+
+    for (from_square, to_square), move_num in list(possible_moves.items()):
+        possible_moves[switch_square_fn(from_square), switch_square_fn(to_square)] = total_possible_moves - move_num
+
     return possible_moves
-
-
-
 
 
 @njit(uint64(BoardState.class_type.instance_type, uint8))
@@ -1550,5 +1570,3 @@ def jitted_perft_test(board_state, depth):
         num_nodes += jitted_perft_test(copy_push(board_state, move), depth - 1)
 
     return num_nodes
-
-

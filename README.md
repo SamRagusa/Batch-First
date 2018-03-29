@@ -19,12 +19,13 @@ The Batch First engine will embody these ideas.
 
 # Dependencies
 The versions listed are the versions I'm currently using, but are not necessarily the only versions which will work.
-- [TensorFlow](https://github.com/tensorflow/tensorflow) v1.4.1 (moving to v1.5 soon)
+- [TensorFlow](https://github.com/tensorflow/tensorflow) v1.6.0
 - [NumPy](https://github.com/numpy/numpy) v1.13.3
 - [Numba](https://github.com/numba/numba) v0.35.0
 - [python-chess](https://github.com/niklasf/python-chess) v0.22.1
 - [khash_numba](https://github.com/synapticarbors/khash_numba)
-- [TensorFlow Serving](https://github.com/tensorflow/serving) v0.4.0 (No longer used during runtime, and will be phased out completely soon)
+
+I run this using the [Intel Distribution For Python](https://software.intel.com/en-us/distribution-for-python) for the speed improvements to NumPy and Numba.   
 
 # Notes For Awesome Developers/People
 This engine is still in development, and thus needs work.  If you have any ideas, questions, are interested in potentially working on the engine, or anything else, I encourage you to send me an email!  

@@ -101,8 +101,8 @@ def main(using_to_serve):
 
 
 
-    if using_to_serve[1]:
-        return the_estimator.create_predictor( "scores")
+    if using_to_serve[0]:
+        return the_estimator.all_white_create_predictor( "scores")
 
     validation_hook = ann_h.ValidationRunHook(
         step_increment=BATCHES_IN_TRAINING_EPOCH//(5*10),

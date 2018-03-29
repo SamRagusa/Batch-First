@@ -11,9 +11,10 @@ import math
 import time
 from my_board import MyBoard
 from ann_creation_helper import line_counter
-from board_eval_client import ANNEvaluator
-from numba_board import create_board_state_from_fen, generate_legal_moves, BB_ALL, generate_move_to_enumeration_dict, Move
-from numba_negamax_zero_window import GameNode, numpy_move_dtype
+from numba_board import create_board_state_from_fen, generate_legal_moves, BB_ALL, generate_move_to_enumeration_dict, Move, TURN_WHITE, copy_push, database_board_representation
+from numba_negamax_zero_window import for_all_white_jitclass_array_to_basic_input_for_anns
+from evaluation_ann import main as evaluation_ann_main
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 
@@ -407,8 +408,10 @@ manipulations.append(lambda x: x.replace("/", ""))
 
 
 
+
+
 def generate_database_with_child_values_tf_records(board_database_filename, node_batch_eval_fn, output_filename,
-                                            line_to_fen_fn=None, print_interval=1000):
+                                            line_to_fen_fn=None, print_interval=1000, num_workers=None):
     """
     A function to generate a TFRecords dataset for the training of the move scoring neural network.  It uses an already
     created database containing the necessary information to construct a board fen from each line.
@@ -429,52 +432,14 @@ def generate_database_with_child_values_tf_records(board_database_filename, node
     CHARS_IN_EACH_BOARD = 64
     move_to_str_dict = generate_move_to_enumeration_dict()
 
-    def line_to_serialized_example(line):
-        fen = line_to_fen_fn(line)
-
-        def white_fen_to_black(fen):
-            """
-            Reformats and returns the output from a given boards fen() method from one where it's blacks turn,
-            to one where it's whites turn.  This involves rotating the board along the x axis and switching the
-            color of the pieces
-            """
-            split_fen = fen.split()
-
-            split_fen[0] = "/".join(list(reversed([row.swapcase() for row in split_fen[0].split("/")])))
-            split_fen[1] = "b"
-            split_fen[2] = "".join(
-                map(lambda x: x if (x in split_fen[2].swapcase()) else '', ['K', 'Q', 'k', 'q', '-']))
-            if split_fen[3] != '-':
-                print(split_fen[3])  #THIS NEVER PRINTS, WHICH IS VERY CONSERNING
-                split_fen[3] = split_fen[3][0] + str(9 - int(split_fen[3][1]))
-                print(split_fen[3],"\n") #THIS NEVER PRINTS, WHICH IS VERY CONSERNING
-
-            return " ".join(split_fen)
-
-        if fen[1] == "w":
-            fen = white_fen_to_black(fen)
-
-        cur_board = create_board_state_from_fen(fen)
-        cur_node = GameNode(cur_board, None, 255, 0, 0, np.empty(0, dtype=numpy_move_dtype), None, None, None, False, 255)
-
-        moves = [move for move in generate_legal_moves(cur_board, BB_ALL, BB_ALL)]
-        children = np.array(list(map(lambda x: cur_node.zero_window_create_child_from_move(x), moves)), np.object)
-
-        results = node_batch_eval_fn(children)
-
-        the_moves = list(map(lambda x: move_to_str_dict[x.from_square, x.to_square], moves))
-        the_results = list(map(lambda x: x.value, results))
-
-
-        formatted_output = MyBoard(fen).database_board_representation()
-
+    def create_serialized_example(the_str, moves, results):
         context = tf.train.Features(feature={
-            "board": tf.train.Feature(int64_list=tf.train.Int64List(value=np.array([char_to_index_dict[formatted_output[j]] for j in range(CHARS_IN_EACH_BOARD)],dtype=np.int8))),
+            "board": tf.train.Feature(int64_list=tf.train.Int64List(value=np.array([char_to_index_dict[the_str[j]] for j in range(CHARS_IN_EACH_BOARD)],dtype=np.int8))),
         })
 
         feature_lists = tf.train.FeatureLists(feature_list={
-            "moves" : tf.train.FeatureList(feature=[tf.train.Feature(int64_list=tf.train.Int64List(value=[move])) for move in the_moves]),
-            "move_scores" : tf.train.FeatureList(feature=[tf.train.Feature(float_list=tf.train.FloatList(value=[value])) for value in the_results]),
+            "moves" : tf.train.FeatureList(feature=[tf.train.Feature(int64_list=tf.train.Int64List(value=[move])) for move in moves]),
+            "move_scores" : tf.train.FeatureList(feature=[tf.train.Feature(float_list=tf.train.FloatList(value=[value])) for value in results]),
             })
 
         sequence_example = tf.train.SequenceExample(
@@ -482,25 +447,81 @@ def generate_database_with_child_values_tf_records(board_database_filename, node
             feature_lists=feature_lists
         )
 
+        # print("created example")
+
         return sequence_example.SerializeToString()
 
+    def lines_to_serialized_example(lines):
+
+        def make_fen_white(fen):
+            """
+            Reformats and returns the output from a given boards fen() method from one where it's blacks turn,
+            to one where it's whites turn.  This involves rotating the board along the x axis and switching the
+            color of the pieces
+            """
+            split_fen = fen.split()
+            if split_fen[1] == "w":
+                return fen
+
+            split_fen[0] = "/".join(list(reversed([row.swapcase() for row in split_fen[0].split("/")])))
+            split_fen[1] = "w"
+            split_fen[2] = "".join(
+                map(lambda x: x if (x in split_fen[2].swapcase()) else '', ['K', 'Q', 'k', 'q', '-']))
+            if split_fen[3] != '-':
+                split_fen[3] = split_fen[3][0] + str(9 - int(split_fen[3][1]))
+
+            return ",".join(split_fen)
 
 
-    start_time = time.time()
+        fens = map(line_to_fen_fn, lines)
+
+        all_white_fens = map(make_fen_white, fens)
+
+        boards = list(map(create_board_state_from_fen, all_white_fens))
+
+        moves = list(map(lambda x : np.array([move for move in generate_legal_moves(x, BB_ALL, BB_ALL)]), boards))
+        lengths = np.cumsum(list(map(len, moves)))
+
+
+        children = np.concatenate(list(map(lambda b, m : np.array([copy_push(b, move) for move in m]), boards, moves)))
+        # flat_scalar_children = jitclass_to_numpy_scalar_array(np.concatenate(children))
+
+
+
+        the_results = np.split(node_batch_eval_fn(children), lengths[:-1])
+        the_moves = map(lambda x: move_to_str_dict[x.from_square, x.to_square], np.concatenate(moves))
+
+        formatted_output = map(database_board_representation, boards)
+
+
+        return list(map(create_serialized_example, formatted_output, np.split(list(the_moves), lengths[:-1]), the_results))
+
+
     writer = tf.python_io.TFRecordWriter(output_filename)
     lines = []
-    batch_size = 1000
-    for index, line in enumerate(open(board_database_filename, 'r')):
-        if index % print_interval == 0 and index != 0:
-            print(index, "boards processed in", time.time() - start_time, "seconds")
-            start_time = time.time()
-        lines.append(line)
-        if index % batch_size == 0:
-            for string in map(line_to_serialized_example, lines):
-                writer.write(string)
-            lines = []
+    batch_size = 200
+    start_time = time.time()
+    futures = []
+    with ThreadPoolExecutor(num_workers) as executor:
+        for index, line in enumerate(open(board_database_filename, 'r')):
+            lines.append(line)
+            if index % batch_size == 0 and index != 0:
+                futures.append(executor.submit(lines_to_serialized_example, lines))
+                lines = []
+
+        print("Tasks have been submitted in time:", time.time() - start_time)
+        start_time = time.time()
+        for index, cur_future in enumerate(as_completed(futures)):
+            for cur_str in cur_future.result():
+                writer.write(cur_str)
+
+            if index % print_interval == 0 and index != 0:
+                print(index*batch_size, "boards processed, the last", print_interval*batch_size,"in time:", time.time() - start_time, "seconds")
+                start_time = time.time()
 
     writer.close()
+
+
 
 
 
@@ -527,9 +548,10 @@ create_database_from_pgn(
 print("Time taken to create databases:", time.time() - start_time)
 
 
-# Create the file containing the move scoring data (as a TFRecords database).  This will likely be combined with
-# the evaluation board generation to prevent any overlap in boards between the datasets.
+
 start_time = time.time()
+#Create the file used to create the move scoring databse. This will likely be combined with the
+# evaluation board data generation to prevent any overlap in boards between the datasets.
 create_database_from_pgn(
     [pgn_file_paths[-1]],
     to_collect_filters=[
@@ -549,20 +571,27 @@ print("Time taken to create databases:", time.time() - start_time)
 
 
 
+predictor, closer = evaluation_ann_main([True])
 
-ann_evaluator = ANNEvaluator(None,model_name="evaluation_ann")
+def chestimator_eval_fn(node_array):
+    return predictor(for_all_white_jitclass_array_to_basic_input_for_anns(node_array))
+
+
 
 start_time = time.time()
+
+# Create the file containing the move scoring data (as a TFRecords database).
 generate_database_with_child_values_tf_records(
-    board_database_filename="/srv/databases/chess_engine/testing/pre_commit_testing_boards.txt",
-    node_batch_eval_fn=lambda x : ann_evaluator.for_numba_score_batch(x),
-    output_filename="/srv/databases/chess_engine/testing/pre_commit_testing_move_gen_database.tfrecords",
+    board_database_filename="/srv/databases/chess_engine/move_gen/training_boards_split_9.txt",
+    node_batch_eval_fn=chestimator_eval_fn,
+    output_filename="/srv/databases/chess_engine/new_move_gen_new_mapping/testing_stuff_split_9.tfrecords",
     line_to_fen_fn=current_line_to_fen,
-    print_interval=10000)
+    print_interval=100,
+    num_workers=5)
 
 
 
 print("Time taken to create child_value_database:", time.time() - start_time)
-
+closer()
 
 
