@@ -115,21 +115,19 @@ board_state_spec["occupied_w"] = uint64
 board_state_spec["occupied_b"] = uint64
 board_state_spec["occupied"] = uint64
 
-board_state_spec["promoted"] = uint64
 board_state_spec["turn"] = boolean
 board_state_spec["castling_rights"] = uint64
 board_state_spec["ep_square"] = optional(uint8)
 
-board_state_spec["halfmove_clock"] = uint16
-board_state_spec["fullmove_number"] = uint16
+board_state_spec["halfmove_clock"] = uint8
 
 board_state_spec["cur_hash"] = uint64
 
 
 @jitclass(board_state_spec)
 class BoardState:
-    def __init__(self, pawns, knights, bishops, rooks, queens, kings, occupied_w, occupied_b, occupied, promoted, turn,
-                 castling_rights, ep_square, halfmove_clock, fullmove_number, cur_hash):
+    def __init__(self, pawns, knights, bishops, rooks, queens, kings, occupied_w, occupied_b, occupied, turn,
+                 castling_rights, ep_square, halfmove_clock, cur_hash):
         self.pawns = pawns
         self.knights = knights
         self.bishops = bishops
@@ -141,13 +139,11 @@ class BoardState:
         self.occupied_b = occupied_b
         self.occupied = occupied
 
-        self.promoted = promoted
-
         self.turn = turn
         self.castling_rights = castling_rights
         self.ep_square = ep_square
         self.halfmove_clock = halfmove_clock
-        self.fullmove_number = fullmove_number
+
         self.cur_hash = cur_hash
 
 @njit
@@ -169,12 +165,10 @@ def copy_board_state(board_state):
                       board_state.occupied_w,
                       board_state.occupied_b,
                       board_state.occupied,
-                      board_state.promoted,
                       board_state.turn,
                       board_state.castling_rights,
                       board_state.ep_square,
                       board_state.halfmove_clock,
-                      board_state.fullmove_number,
                       board_state.cur_hash)
 
 
@@ -298,7 +292,7 @@ def vectorized_flip_vertically(bb):
 def msb(n):
     r = 0
     n = n >> 1
-    while n:  # >>= 1:
+    while n:
         r += 1
         n = n >> 1
     return r
@@ -315,36 +309,49 @@ def scan_reversed(bb):
 
 
 
+k1 = np.uint64(0x5555555555555555)
+k2 = np.uint64(0x3333333333333333)
+k4 = np.uint64(0x0f0f0f0f0f0f0f0f)
+kf = np.uint64(0x0101010101010101)
+
 @njit(uint8(uint64))
 def popcount(n):
-    n = (n & 0x5555555555555555) + ((n & 0xAAAAAAAAAAAAAAAA) >> 1)
-    n = (n & 0x3333333333333333) + ((n & 0xCCCCCCCCCCCCCCCC) >> 2)
-    n = (n & 0x0F0F0F0F0F0F0F0F) + ((n & 0xF0F0F0F0F0F0F0F0) >> 4)
-    n = (n & 0x00FF00FF00FF00FF) + ((n & 0xFF00FF00FF00FF00) >> 8)
-    n = (n & 0x0000FFFF0000FFFF) + ((n & 0xFFFF0000FFFF0000) >> 16)
-    n = (n & 0x00000000FFFFFFFF) + ((n & 0xFFFFFFFF00000000) >> 32)  # This last & isn't strictly necessary.
+    n = n - (n >> 1) & k1
+    n = (n & k2) + ((n >> 2) & k2)
+    n = (n + (n >> 4)) & k4
+    n = (n * kf) >> 56
     return n
 
 
 @vectorize([uint8(uint64)], nopython=True)
 def popcount_vectorized(n):
-    n = (n & 0x5555555555555555) + ((n & 0xAAAAAAAAAAAAAAAA) >> 1)
-    n = (n & 0x3333333333333333) + ((n & 0xCCCCCCCCCCCCCCCC) >> 2)
-    n = (n & 0x0F0F0F0F0F0F0F0F) + ((n & 0xF0F0F0F0F0F0F0F0) >> 4)
-    n = (n & 0x00FF00FF00FF00FF) + ((n & 0xFF00FF00FF00FF00) >> 8)
-    n = (n & 0x0000FFFF0000FFFF) + ((n & 0xFFFF0000FFFF0000) >> 16)
-    n = (n & 0x00000000FFFFFFFF) + ((n & 0xFFFFFFFF00000000) >> 32)  # This last & isn't strictly necessary.
+    n = n - (n >> 1) & k1
+    n = (n & k2) + ((n >> 2) & k2)
+    n = (n + (n >> 4)) & k4
+    n = (n * kf) >> 56
     return n
+
+
+# popcount_lookup_table = np.array([np.sum(np.unpackbits(np.frombuffer(np.uint16(j), np.uint8))) for j in range(2**16)], dtype=np.uint8)
+#
+# @vectorize([uint8(uint64)], nopython=True)
+# def popcount_lookup_table(n):
+#     return np.sum(popcount_lookup_table[np.frombuffer(np.array(n),np.uint16)])
+#
+#
+# #I'm pretty sure that np.unpackbits isn't supported by Numba and thus this can't be JIT compiled
+# def popcount_unpack_bits(n):
+#     return np.sum(np.unpackbits(np.frombuffer(n, dtype=np.uint8)))
 
 
 @njit(uint8(uint8))
 def square_file(square):
-    return square & np.uint8(7)
+    return square & 7
 
 
 @njit(uint8(uint8))
 def square_rank(square):
-    return square >> np.uint8(3)
+    return square >> 3
 
 
 @njit(uint64(uint64))
@@ -354,22 +361,22 @@ def shift_down(b):
 
 @njit(uint64(uint64))
 def shift_up(b):
-    return (b << 8) & BB_ALL  # Why is it anding with 1?
+    return b << 8
 
 
 @njit(uint64(uint64))
 def shift_right(b):
-    return (b << 1) & ~BB_FILE_A & BB_ALL
+    return b << 1
 
 
 @njit(uint64(uint64))
 def shift_left(b):
-    return (b >> 1) & ~BB_FILE_H
+    return b >> 1
 
 
 @njit
 def any(iterable):
-    for element in iterable:
+    for _ in iterable:
         return True
     return False
 
@@ -392,14 +399,11 @@ def _clear_board(board_state):
     board_state.queens = BB_VOID
     board_state.kings = BB_VOID
 
-    board_state.promoted = BB_VOID
-
     board_state.occupied_w = BB_VOID
     board_state.occupied_b = BB_VOID
     board_state.occupied = BB_VOID
     board_state.castling_rights = BB_VOID
-    # board_state.halfmove_clock = np.uint16(0)
-    # board_state.fullmove_number = np.uint16(1)
+    # board_state.halfmove_clock = np.uint8(0)
     return board_state
 
 
@@ -415,12 +419,10 @@ def create_initial_board_state():
                       BB_RANK_1 | BB_RANK_2,
                       BB_RANK_7 | BB_RANK_8,
                       BB_RANK_1 | BB_RANK_2 | BB_RANK_7 | BB_RANK_8,
-                      BB_VOID,
                       np.bool_(True),
                       BB_CORNERS,
                       None,
                       np.uint16(0),
-                      np.uint16(1),
                       INITIAL_BOARD_HASH)
 
 
@@ -484,14 +486,12 @@ def _remove_piece_at(board_state, square):
     board_state.occupied_w &= ~mask
     board_state.occupied_b &= ~mask
 
-    board_state.promoted &= ~mask
-
     return piece_type
 
 
 
-@njit(void(BoardState.class_type.instance_type, uint8, uint8, boolean, boolean))
-def _set_piece_at(board_state, square, piece_type, color, promoted):
+@njit(void(BoardState.class_type.instance_type, uint8, uint8, boolean))
+def _set_piece_at(board_state, square, piece_type, color):
     _remove_piece_at(board_state, square)
 
     mask = BB_SQUARES[square]
@@ -515,9 +515,6 @@ def _set_piece_at(board_state, square, piece_type, color, promoted):
         board_state.occupied_w ^= mask
     else:
         board_state.occupied_b ^= mask
-
-    if promoted:
-        board_state.promoted ^= mask
 
 def piece_at(board_state, square):
     piece_type = piece_type_at(board_state, square)
@@ -595,10 +592,8 @@ def create_board_state_from_board_fen(fen):
             square_index += int(c)
         elif not str_to_piece_vals.get(c) is None:
             piece_type, piece_color = str_to_piece_vals.get(c)
-            _set_piece_at(board_state, SQUARES_180[square_index], piece_type, piece_color, False)  ###DEAL WITH PROMOTED BETTER
+            _set_piece_at(board_state, SQUARES_180[square_index], piece_type, piece_color)
             square_index += 1
-        elif c == "~":
-            board_state.promoted |= BB_SQUARES[SQUARES_180[square_index - 1]]
 
     return board_state
 
@@ -657,8 +652,7 @@ def create_board_state_from_fen(fen):
         board_state.ep_square = np.uint8(chess.SQUARE_NAMES.index(parts[3]))
 
     # Set the mover counters.
-    board_state.halfmove_clock = np.uint16(parts[4])
-    board_state.fullmove_number = np.uint16(parts[5])
+    board_state.halfmove_clock = np.uint8(parts[4])
 
     board_state.cur_hash = np.uint64(zobrist_hash(chess.Board(fen)))
 
@@ -777,22 +771,10 @@ def push_with_hash_update(board_state, move):
     # Increment move counters.
     board_state.halfmove_clock += 1
     if board_state.turn == TURN_BLACK:
-        board_state.fullmove_number += 1
         pivot = 0
     else:
         pivot = 1
 
-    # # On a null move simply swap turns and reset the en passant square.
-    # if not move:
-    #     board_state.turn = not board_state.turn
-    #     return
-
-    # # Drops.
-    # if move.drop:
-    #     # self._set_piece_at(move.to_square, move.drop, board_state.turn)
-    #     _set_piece_at(board_state, move.to_square, move.drop, board_state.turn)
-    #     board_state.turn = not board_state.turn
-    #     return
 
     # Zero the half move clock.
     if is_zeroing(board_state, move):
@@ -800,8 +782,6 @@ def push_with_hash_update(board_state, move):
 
     from_bb = BB_SQUARES[move.from_square]
     to_bb = BB_SQUARES[move.to_square]
-
-    promoted = board_state.promoted & from_bb
 
     piece_type = _remove_piece_at(board_state, move.from_square)
 
@@ -829,8 +809,7 @@ def push_with_hash_update(board_state, move):
             board_state.cur_hash ^= RANDOM_ARRAY[768 + 2]
 
 
-    # If king is moving and I'm not sure what "not promoted" does
-    if piece_type == KING and promoted == 0:
+    if piece_type == KING:
         castle_deltas = board_state.castling_rights
         if board_state.turn == TURN_WHITE:
             board_state.castling_rights &= ~BB_RANK_1
@@ -848,28 +827,6 @@ def push_with_hash_update(board_state, move):
                     board_state.cur_hash ^= RANDOM_ARRAY[768 + 3]
                 if castle_deltas & BB_H8:
                     board_state.cur_hash ^= RANDOM_ARRAY[768 + 2]
-
-    # I THINK I CAN ELIMINATE ALL OF THIS BECAUSE KINGS CAN'T BE CAPTURED
-    elif captured_piece_type == KING and not board_state.promoted & to_bb:
-        if board_state.turn == TURN_WHITE and square_rank(move.to_square) == 7:
-            castle_deltas = board_state.castling_rights
-            board_state.castling_rights &= ~BB_RANK_8
-            castle_deltas ^= board_state.castling_rights
-            if castle_deltas:
-                if castle_deltas & BB_A8:
-                    board_state.cur_hash ^= RANDOM_ARRAY[768 + 3]
-                if castle_deltas & BB_H8:
-                    board_state.cur_hash ^= RANDOM_ARRAY[768 + 2]
-
-        elif board_state.turn == TURN_BLACK and square_rank(move.to_square) == 0:
-            castle_deltas = board_state.castling_rights
-            board_state.castling_rights &= ~BB_RANK_1
-            castle_deltas ^= board_state.castling_rights
-            if castle_deltas:
-                if castle_deltas & BB_A1:
-                    board_state.cur_hash ^= RANDOM_ARRAY[768 + 1]
-                if castle_deltas & BB_H1:
-                    board_state.cur_hash ^= RANDOM_ARRAY[768]
 
 
     if piece_type == PAWN:
@@ -910,7 +867,6 @@ def push_with_hash_update(board_state, move):
 
     # Promotion.
     if move.promotion != 0:
-        promoted = True
         piece_type = move.promotion
 
     # Castling.
@@ -919,39 +875,35 @@ def push_with_hash_update(board_state, move):
     else:
         castling = piece_type == KING and board_state.occupied_b & to_bb
     if castling:
-        a_side = square_file(move.to_square) < square_file(move.from_square)
-
         _remove_piece_at(board_state, move.from_square)
-
-        ############I DON'T THINK THIS WILL EVER DO ANYTHING (IF LEGAL MOVE)
         _remove_piece_at(board_state, move.to_square)
 
 
-        if a_side:
+        if square_file(move.to_square) < square_file(move.from_square):
             if board_state.turn == TURN_WHITE:
-                _set_piece_at(board_state, C1, KING, board_state.turn, False)
-                _set_piece_at(board_state, D1, ROOK, board_state.turn, False)
+                _set_piece_at(board_state, C1, KING, board_state.turn)
+                _set_piece_at(board_state, D1, ROOK, board_state.turn)
 
                 board_state.cur_hash ^= RANDOM_ARRAY[((ROOK - 1) * 2 + pivot) * 64 + A1] ^ \
                                         RANDOM_ARRAY[((KING - 1) * 2 + pivot) * 64 + C1] ^ \
                                         RANDOM_ARRAY[((ROOK - 1) * 2 + pivot) * 64 + D1]
             else:
-                _set_piece_at(board_state, C8, KING, board_state.turn, False)
-                _set_piece_at(board_state, D8, ROOK, board_state.turn, False)
+                _set_piece_at(board_state, C8, KING, board_state.turn)
+                _set_piece_at(board_state, D8, ROOK, board_state.turn)
 
                 board_state.cur_hash ^= RANDOM_ARRAY[((ROOK - 1) * 2 + pivot) * 64 + A8] ^ \
                                         RANDOM_ARRAY[((KING - 1) * 2 + pivot) * 64 + C8] ^ \
                                         RANDOM_ARRAY[((ROOK - 1) * 2 + pivot) * 64 + D8]
         else:
             if board_state.turn == TURN_WHITE:
-                _set_piece_at(board_state, G1, KING, board_state.turn, False)
-                _set_piece_at(board_state, F1, ROOK, board_state.turn, False)
+                _set_piece_at(board_state, G1, KING, board_state.turn)
+                _set_piece_at(board_state, F1, ROOK, board_state.turn)
                 board_state.cur_hash ^= RANDOM_ARRAY[((ROOK - 1) * 2 + pivot) * 64 + H1] ^ \
                                         RANDOM_ARRAY[((KING - 1) * 2 + pivot) * 64 + G1] ^ \
                                         RANDOM_ARRAY[((ROOK - 1) * 2 + pivot) * 64 + F1]
             else:
-                _set_piece_at(board_state, G8, KING, board_state.turn, False)
-                _set_piece_at(board_state, F8, ROOK, board_state.turn, False)
+                _set_piece_at(board_state, G8, KING, board_state.turn)
+                _set_piece_at(board_state, F8, ROOK, board_state.turn)
 
                 board_state.cur_hash ^= RANDOM_ARRAY[((ROOK - 1) * 2 + pivot) * 64 + H8] ^ \
                                         RANDOM_ARRAY[((KING - 1) * 2 + pivot) * 64 + G8] ^ \
@@ -959,7 +911,7 @@ def push_with_hash_update(board_state, move):
 
     # Put piece on target square.
     if not castling and piece_type != 0:
-        _set_piece_at(board_state, move.to_square, piece_type, board_state.turn, promoted)
+        _set_piece_at(board_state, move.to_square, piece_type, board_state.turn)
 
         # Put the moving piece in the new location in the hash
         board_state.cur_hash ^= RANDOM_ARRAY[((piece_type - 1) * 2 + pivot) * 64 + move.to_square]
@@ -1174,10 +1126,10 @@ def _from_chess960(board_state, from_square, to_square):  # , promotion=None):
 def generate_castling_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
     if board_state.turn:
         backrank = BB_RANK_1 if board_state.turn == TURN_WHITE else BB_RANK_8
-        king = board_state.occupied_w & board_state.kings & ~board_state.promoted & backrank & from_mask
+        king = board_state.occupied_w & board_state.kings & backrank & from_mask
     else:
         backrank = BB_RANK_1 if board_state.turn == TURN_WHITE else BB_RANK_8
-        king = board_state.occupied_b & board_state.kings & ~board_state.promoted & backrank & from_mask
+        king = board_state.occupied_b & board_state.kings & backrank & from_mask
 
     king = king & -king
 
@@ -1194,12 +1146,10 @@ def generate_castling_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
     for candidate in scan_reversed(board_state.castling_rights & backrank & to_mask):
         rook = BB_SQUARES[candidate]
 
-        a_side = rook < king
-
         empty_for_rook = np.uint64(0)
         empty_for_king = np.uint64(0)
 
-        if a_side:
+        if rook < king:
             king_to = msb(bb_c)
             if not rook & bb_d:
                 empty_for_rook = BB_BETWEEN[candidate][msb(bb_d)] | bb_d
@@ -1543,7 +1493,7 @@ def generate_move_to_enumeration_dict():
     board_state = create_board_state_from_fen('8/8/8/8/8/8/8/8 w - - 0 1')
     for square in SQUARES[:len(SQUARES)//2]:
         for piece in (KNIGHT, QUEEN):
-            _set_piece_at(board_state, square, piece, TURN_WHITE, False)
+            _set_piece_at(board_state, square, piece, TURN_WHITE)
             for move in generate_legal_moves(board_state,BB_ALL, BB_ALL):
                 if possible_moves.get((move.from_square, move.to_square)) is None:
                     possible_moves[move.from_square, move.to_square] = len(possible_moves)

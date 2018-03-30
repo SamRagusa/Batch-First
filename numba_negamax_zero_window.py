@@ -58,12 +58,10 @@ numpy_board_state_dtype = np.dtype([("pawns", np.uint64),
                                     ("occupied_w", np.uint64),
                                     ("occupied_b", np.uint64),
                                     ("occupied", np.uint64),
-                                    ("promoted", np.uint64),
                                     ("turn", np.bool),
                                     ("castling_rights", np.uint64),
                                     ("ep_square", np.uint8),
-                                    ("halfmove_clock", np.uint16),
-                                    ("fullmove_number", np.uint16),
+                                    ("halfmove_clock", np.uint8),
                                     ("cur_hash", np.uint64)])
 
 numba_numpy_board_type = nb.from_dtype(numpy_board_state_dtype)
@@ -81,19 +79,17 @@ def numpy_scalar_to_jitclass(scalar):
                       scalar["occupied_w"],
                       scalar["occupied_b"],
                       scalar["occupied"],
-                      scalar["promoted"],
                       scalar["turn"],
                       scalar["castling_rights"],
                       temp_ep_value,
                       scalar["halfmove_clock"],
-                      scalar["fullmove_number"],
                       scalar["cur_hash"])
 # @njit
 def jitclass_to_numpy_scalar_array(objects):
     return np.array([(object.pawns, object.knights, object.bishops, object.rooks, object.queens, object.kings,
-                      object.occupied_w, object.occupied_b, object.occupied, object.promoted,
+                      object.occupied_w, object.occupied_b, object.occupied,
                       object.turn, object.castling_rights, 255 if object.ep_square is None else object.ep_square,
-                      object.halfmove_clock, object.fullmove_number,
+                      object.halfmove_clock,
                       object.cur_hash) for object in objects], dtype=numpy_board_state_dtype)
 
 
@@ -460,10 +456,46 @@ def newest_start_move_scoring(node_array, testing=False):
     t.start()
     return t
 
+@njit(boolean(BoardState.class_type.instance_type))
+def has_insufficient_material(board_state):
+    # Enough material to mate.
+    if board_state.pawns or board_state.rooks or board_state.queens:
+        return False
 
+    # A single knight or a single bishop.
+    if popcount(board_state.occupied) <= 3:
+        return True
+
+    # More than a single knight.
+    if board_state.knights:
+        return False
+
+    # All bishops on the same color.
+    if board_state.bishops & BB_DARK_SQUARES == 0:
+        return True
+    elif board_state.bishops & BB_LIGHT_SQUARES == 0:
+        return True
+    else:
+        return False
 
 @njit(nogil=True)#(boolean(GameNode.class_type.instance_type, optional(hash_table_numba_dtype[:,:])),nogil=True)
 def check_and_update_valid_moves(game_node, hash_table):
+    """
+    CURRENTLY CHECKING:
+    1) Draw by the 50-move rule
+    2) Draw by insufficient material
+    3) Draw by stalemate
+    4) Win/loss by checkmate
+    5) Termination by information contained in the TT
+    """
+
+    if game_node.board_state.halfmove_clock >= 50:
+        game_node.best_value = TIE_RESULT_SCORE
+        return True
+    if has_insufficient_material(game_node.board_state):
+        game_node.best_value = TIE_RESULT_SCORE
+        return True
+
     if not hash_table is None:
         if terminated_from_tt(game_node, hash_table):
             return True
@@ -503,6 +535,46 @@ def get_indices_of_terminating_children(node_array, hash_table):
 
 
 
+
+
+def single_thread_get_indices_of_terminating_children(node_array, hash_table):
+    """
+    CURRENTLY CHECKING:
+    1) Draw by the 50-move rule
+    2) Draw by insufficient material
+    3) Draw by stalemate
+    4) Win/loss by checkmate
+    5) Termination by information contained in the TT
+    """
+
+    terminating = np.zeros(len(node_array),dtype=np.bool)
+    for j, game_node in enumerate(node_array):
+
+
+        if game_node.board_state.halfmove_clock >= 50:
+            game_node.best_value = TIE_RESULT_SCORE
+            terminating[j] = True
+        elif has_insufficient_material(game_node.board_state):
+            game_node.best_value = TIE_RESULT_SCORE
+            terminating[j] = True
+
+        elif not hash_table is None and terminated_from_tt(game_node, hash_table):
+            terminating[j] = True
+        else:
+            legal_move_struct_array = create_legal_move_struct(game_node.board_state, BB_ALL, BB_ALL)
+            if not legal_move_struct_array is None:
+                game_node.unexplored_moves = legal_move_struct_array
+                game_node.children_left = len(legal_move_struct_array)
+            else:
+                if is_in_check(game_node.board_state):
+                    if game_node.board_state.turn == TURN_WHITE:
+                        game_node.best_value = LOSS_RESULT_SCORE
+                    else:
+                        game_node.best_value = WIN_RESULT_SCORE
+                else:
+                    game_node.best_value = TIE_RESULT_SCORE
+                terminating[j] = True
+    return terminating
 
 
 
@@ -557,7 +629,9 @@ def do_iteration(batch, hash_table, testing=False):
         children_created = create_child_array(depth_not_zero_nodes)
 
         # for every child which is not terminating from something set it's move list to the full set of legal moves possible
-        terminating_children_indices = get_indices_of_terminating_children(children_created, hash_table)
+        # terminating_children_indices = get_indices_of_terminating_children(children_created, hash_table)
+        terminating_children_indices = single_thread_get_indices_of_terminating_children(children_created, hash_table)
+
 
         not_terminating_children = children_created[np.logical_not(terminating_children_indices)]
 
