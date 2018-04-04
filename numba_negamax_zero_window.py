@@ -175,19 +175,7 @@ class GameNode:
 gamenode_type.define(GameNode.class_type.instance_type)
 
 
-@njit(GameNode.class_type.instance_type(uint8, float32))
-def create_root_game_node(depth, seperator):
-    return GameNode(create_initial_board_state(),
-                    None,
-                    depth,
-                    seperator,
-                    MIN_FLOAT32_VAL,
-                    np.empty(0, dtype=numpy_move_dtype),
-                    None,
-                    None,
-                    None,
-                    False,
-                    np.uint8(0))
+
 
 
 def create_game_node_from_fen(fen, depth, seperator):
@@ -204,6 +192,11 @@ def create_game_node_from_fen(fen, depth, seperator):
                     np.uint8(0))
 
 
+def create_root_game_node(depth, seperator):
+    return create_game_node_from_fen(INITIAL_BOARD_FEN, depth, seperator)
+
+
+
 def get_empty_hash_table():
     """
     Uses global variable SIZE_EXPONENT_OF_TWO for it's size.
@@ -213,6 +206,9 @@ def get_empty_hash_table():
 
 @njit
 def set_node(hash_table, board_hash, depth, upper_bound=MAX_FLOAT32_VAL, lower_bound=MIN_FLOAT32_VAL):
+    """
+    Puts the given information about a node into the hash table.
+    """
     index = board_hash & ONES_IN_RELEVANT_BITS  #THIS IS BEING DONE TWICE
     hash_table[index]["entry_hash"] = board_hash
     hash_table[index]["depth"] = depth
@@ -249,20 +245,21 @@ def terminated_from_tt(game_node, hash_table):
 def add_one_board_to_tt(game_node, hash_table):
     """
     TO-DO:
-    1) Build/test better replacement scheme (currently always replacing)
+    1) Build/test a better replacement scheme (currently always replacing)
     """
-    # temporary_hash = np.uint64(game_node.board_state.cur_hash) #This won't be needed when this function is compiled in nopython
     node_entry = hash_table[game_node.board_state.cur_hash & ONES_IN_RELEVANT_BITS]
     if node_entry["depth"] != 255:
         if node_entry["entry_hash"] == game_node.board_state.cur_hash:
             if node_entry["depth"] == game_node.depth:
-                if game_node.best_value > node_entry["lower_bound"]:################# THIS SEEMS LIKE IT COULD CAUSE AN ISSUE COMBINED WITH THE NEXT IF STATEMENT, BY SETTING upper_bound == lower_bound###################
-                    node_entry["lower_bound"] = game_node.best_value
-                if game_node.best_value < node_entry["upper_bound"]:#############################################################I'M PRETTY SURE THIS SHOULD BE ELIF#########################################################################################
+                if game_node.best_value >= game_node.separator:
+                    if game_node.best_value > node_entry["lower_bound"]:
+                        node_entry["lower_bound"] = game_node.best_value
+                elif game_node.best_value < node_entry["upper_bound"]:
                     node_entry["upper_bound"] = game_node.best_value
-            elif node_entry["depth"]  > game_node.depth:
+
+            elif node_entry["depth"] < game_node.depth:
                 #Overwrite the data currently stored in the hash table
-                if game_node.best_value >= game_node.separator:  ################THIS MIGHT WANA BE > INSTEAD OF >=#############
+                if game_node.best_value >= game_node.separator:
                     set_node(hash_table, game_node.board_state.cur_hash, game_node.depth,lower_bound=game_node.best_value)   ###########THIS IS WRITING THE HASH EVEN THOUGH IT HAS NOT CHANGED########
                 else:
                     set_node(hash_table, game_node.board_state.cur_hash, game_node.depth,upper_bound=game_node.best_value)
@@ -270,13 +267,13 @@ def add_one_board_to_tt(game_node, hash_table):
         else:
             #Using the always replace scheme for simplicity and easy implementation (likely only for now)
             # print("A hash table entry exists with a different hash than wanting to be inserted!")
-            if game_node.best_value >= game_node.separator:  ################THIS MIGHT WANA BE > INSTEAD OF >=#############
+            if game_node.best_value >= game_node.separator:
                 set_node(hash_table, game_node.board_state.cur_hash, game_node.depth, lower_bound=game_node.best_value)
             else:
                 set_node(hash_table, game_node.board_state.cur_hash, game_node.depth, upper_bound=game_node.best_value)
     else:
 
-        if game_node.best_value >= game_node.separator:################THIS MIGHT WANA BE > INSTEAD OF >=#############
+        if game_node.best_value >= game_node.separator:
             set_node(hash_table, game_node.board_state.cur_hash, game_node.depth, lower_bound=game_node.best_value)
         else:
             set_node(hash_table, game_node.board_state.cur_hash, game_node.depth, upper_bound=game_node.best_value)
@@ -329,7 +326,7 @@ def zero_window_update_node_from_value(node, value, hash_table):
 
 
 
-@njit(void(GameNode.class_type.instance_type))
+@njit#(void(GameNode.class_type.instance_type))
 def set_up_next_best_move(node):
     next_move_index = np.argmax(node.unexplored_move_scores)
 
@@ -406,10 +403,7 @@ def all_white_start_node_evaluations(node_array):
         results = PREDICTOR(ann_inputs)
 
         for j, result in enumerate(results):
-            if node_array[j].board_state.turn == TURN_WHITE:
-                node_array[j].best_value = result
-            else:
-                node_array[j].best_value = - result
+            node_array[j].best_value = - result
 
 
     t = threading.Thread(target=evaluate_and_set)
@@ -420,7 +414,7 @@ def all_white_start_node_evaluations(node_array):
 
 @njit
 def jitted_set_move_scores_and_next_move(node, scores):
-    node.unexplored_move_scores = -scores
+    node.unexplored_move_scores =  scores
     set_up_next_best_move(node)
 
 
@@ -444,12 +438,7 @@ def newest_start_move_scoring(node_array, testing=False):
                                  for_result_getter)
 
         for node, scores in  zip(node_array, np.split(results,np.cumsum(size_array))):
-            # if node.board_state.turn == TURN_WHITE:
-            #     node.unexplored_move_scores = scores
-            # else:
             jitted_set_move_scores_and_next_move(node, scores)
-            # node.unexplored_move_scores = scores
-            # set_up_next_best_move(node)
 
 
     t  = threading.Thread(target=set_move_scores)
@@ -492,6 +481,7 @@ def check_and_update_valid_moves(game_node, hash_table):
     if game_node.board_state.halfmove_clock >= 50:
         game_node.best_value = TIE_RESULT_SCORE
         return True
+
     if has_insufficient_material(game_node.board_state):
         game_node.best_value = TIE_RESULT_SCORE
         return True
@@ -506,10 +496,7 @@ def check_and_update_valid_moves(game_node, hash_table):
         game_node.children_left = len(legal_move_struct_array)
     else:
         if is_in_check(game_node.board_state):
-            if game_node.board_state.turn == TURN_WHITE:
-                game_node.best_value = LOSS_RESULT_SCORE
-            else:
-                game_node.best_value = WIN_RESULT_SCORE
+            game_node.best_value = LOSS_RESULT_SCORE
         else:
             game_node.best_value = TIE_RESULT_SCORE
         return True
@@ -567,10 +554,7 @@ def single_thread_get_indices_of_terminating_children(node_array, hash_table):
                 game_node.children_left = len(legal_move_struct_array)
             else:
                 if is_in_check(game_node.board_state):
-                    if game_node.board_state.turn == TURN_WHITE:
-                        game_node.best_value = LOSS_RESULT_SCORE
-                    else:
-                        game_node.best_value = WIN_RESULT_SCORE
+                    game_node.best_value = LOSS_RESULT_SCORE
                 else:
                     game_node.best_value = TIE_RESULT_SCORE
                 terminating[j] = True
@@ -813,10 +797,43 @@ def set_up_root_search_tree_node(fen, depth, seperator):
     return root_node
 
 
+def mtd_f(fen, depth, first_guess, min_window_to_confirm, guess_increment=.5, search_batch_size=1000, bins_to_use=None, hash_table=None):
+    if hash_table is None:
+        hash_table = get_empty_hash_table()
+
+    if bins_to_use is None:
+        bins_to_use = np.arange(15, -15, -.025)
 
 
+    counter = 0
+    cur_guess = first_guess
+    upper_bound = MAX_FLOAT32_VAL
+    lower_bound = MIN_FLOAT32_VAL
+    while upper_bound -  min_window_to_confirm > lower_bound:
 
+        if lower_bound == MIN_FLOAT32_VAL:
+            if upper_bound != MAX_FLOAT32_VAL:
+                beta = upper_bound - guess_increment
+            else:
+                beta = cur_guess
+        elif upper_bound == MAX_FLOAT32_VAL:
+            beta = lower_bound + guess_increment
+        else:
+            beta = lower_bound + (upper_bound - lower_bound) / 2
 
+        #This would ideally share the same tree, but updated for the new seperation value
+        cur_root_node = set_up_root_search_tree_node(fen, depth, beta - FLOAT32_EPS)
+
+        cur_guess = do_alpha_beta_search_with_bins(cur_root_node, search_batch_size, bins_to_use, hash_table=hash_table)
+        if cur_guess < beta:
+            upper_bound = cur_guess
+        else:
+            lower_bound = cur_guess
+
+        # print("Finished iteration %d with lower and upper bounds (%f,%f)" % (counter+1, lower_bound, upper_bound))
+        counter += 1
+
+    return cur_guess
 
 
 
@@ -828,11 +845,15 @@ if __name__ == "__main__":
     # perft_results = jitted_perft_test(create_board_state_from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"), 4)
     # print("Depth 4 perft test results:", perft_results, "in time", time.time()-starting_time, "\n")
 
-    FEN_TO_TEST = "rn1qk2r/p1p1bppp/bp2pn2/3p4/2PP4/1P3NP1/P2BPPBP/RN1QK2R w KQkq - 4 8"  # "rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"
+    FEN_TO_TEST = "r2q1rk1/pbpnbppp/1p2pn2/3pN3/2PP4/1PN3P1/P2BPPBP/R2Q1RK1 w - - 10 11"#"  # "rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"
     DEPTH_OF_SEARCH = 4
     MAX_BATCH_LIST = [250,500, 1000, 2000]# [j**2 for j in range(40,0,-2)] + [5000]
-    SEPERATING_VALUE = -8
-    BINS_TO_USE = np.arange(15, -15, -.1)#np.arange(15, -15, -.025)
+    SEPERATING_VALUE = -4
+    print(SEPERATING_VALUE )
+    BINS_TO_USE = np.arange(20, -20, -.01)#np.arange(15, -15, -.025)
+
+    print(mtd_f(FEN_TO_TEST, DEPTH_OF_SEARCH, SEPERATING_VALUE, .01))
+
 
     starting_time = time.time()
     for j in MAX_BATCH_LIST:
