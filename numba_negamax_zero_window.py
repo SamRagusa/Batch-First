@@ -560,7 +560,27 @@ def single_thread_get_indices_of_terminating_children(node_array, hash_table):
                 terminating[j] = True
     return terminating
 
+@njit
+def depth_zero_should_terminate(game_node, hash_table):
+    if game_node.board_state.halfmove_clock >= 50:
+        game_node.best_value = TIE_RESULT_SCORE
+        return True
+    elif has_insufficient_material(game_node.board_state):
+        game_node.best_value = TIE_RESULT_SCORE
+        return True
+    elif terminated_from_tt(game_node, hash_table):
+        return True
+    elif not has_legal_move(game_node.board_state, BB_ALL, BB_ALL):
+        if is_in_check(game_node.board_state):
+            game_node.best_value = LOSS_RESULT_SCORE
+        else:
+            game_node.best_value = TIE_RESULT_SCORE
+        return True
 
+    return False
+
+def depth_zero_should_terminate_array(game_nodes, hash_table):
+    return np.array(list(map(lambda x: depth_zero_should_terminate(x, hash_table), game_nodes)), dtype=np.bool)
 
 
 # @jit(void(GameNode.class_type.instance_type), nopython=True)
@@ -585,11 +605,8 @@ def single_thread_get_indices_of_terminating_children(node_array, hash_table):
 
 def update_tree_from_terminating_nodes(node_array, hash_table):
     for j in range(len(node_array)):
-        if not node_array[j].parent is None:
-            add_one_board_to_tt(node_array[j], hash_table)
-            zero_window_update_node_from_value(node_array[j].parent, - node_array[j].best_value, hash_table)
-        else:
-            print("WE HAVE A ROOT NODE TERMINATING AND SHOULD PROBABLY DO SOMETHING ABOUT IT")
+        add_one_board_to_tt(node_array[j], hash_table)
+        zero_window_update_node_from_value(node_array[j].parent, - node_array[j].best_value, hash_table)
 
 
 def do_iteration(batch, hash_table, testing=False):
@@ -655,6 +672,65 @@ def do_iteration(batch, hash_table, testing=False):
         return np.empty(0)
 
 
+
+
+
+def new_do_iteration(batch, hash_table, testing=False):
+    """
+    TO-DO:
+    1) Check hash table for zero depth nodes:
+
+    """
+
+    children = create_child_array(batch)
+
+
+    depth_zero_children_mask = np.array([True if child.depth == 0 else False for child in children], dtype=np.bool)
+
+    depth_zero_children = children[depth_zero_children_mask]
+    depth_not_zero_children = children[np.logical_not(depth_zero_children_mask)]
+
+    depth_zero_not_scored_mask = np.logical_not(depth_zero_should_terminate_array(depth_zero_children, hash_table))
+
+    if np.any(depth_zero_not_scored_mask):
+        evaluation_thread = all_white_start_node_evaluations(depth_zero_children[depth_zero_not_scored_mask])
+    else:
+        evaluation_thread = None
+
+    non_zero_depth_child_term_indices = single_thread_get_indices_of_terminating_children(depth_not_zero_children, hash_table)
+    non_zero_depth_child_not_term_indices = np.logical_not(non_zero_depth_child_term_indices)
+
+    if np.any(non_zero_depth_child_not_term_indices):
+        move_thread = newest_start_move_scoring(depth_not_zero_children[non_zero_depth_child_not_term_indices], testing)
+    else:
+        move_thread = None
+
+    have_children_left_indices = np.array([True if node.has_uncreated_child() else False for node in batch], dtype=np.bool)
+
+
+    if not evaluation_thread is None:
+        evaluation_thread.join()
+
+
+    update_tree_from_terminating_nodes(
+        np.concatenate((
+            depth_zero_children,
+            depth_not_zero_children[non_zero_depth_child_term_indices])),
+        hash_table)
+
+
+    if not move_thread is None:
+        move_thread.join()
+
+    return np.concatenate((
+        batch[have_children_left_indices],
+        depth_not_zero_children[non_zero_depth_child_not_term_indices]))
+
+
+
+
+
+
 def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, hash_table=None, print_info=False, full_testing=False):
     open_node_holder = PriorityBins(bins_to_use, max_batch_size, num_workers_to_use=12, search_extra_ratio=1.2, testing=full_testing) #This will likely be put outside of this function long term
 
@@ -679,7 +755,7 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
                 if root_game_node.terminated or root_game_node.best_value > root_game_node.separator or root_game_node.children_left == 0:
                     print("ROOT NODE WAS TERMINATED OR SHOULD BE TERMINATED AT START OF ITERATION.")
 
-        to_insert = do_iteration(next_batch, hash_table, full_testing)
+        to_insert = new_do_iteration(next_batch, hash_table, full_testing)
 
 
         if print_info or full_testing:
@@ -830,7 +906,7 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, guess_increment=.5, se
         else:
             lower_bound = cur_guess
 
-        # print("Finished iteration %d with lower and upper bounds (%f,%f)" % (counter+1, lower_bound, upper_bound))
+        print("Finished iteration %d with lower and upper bounds (%f,%f)" % (counter+1, lower_bound, upper_bound))
         counter += 1
 
     return cur_guess
@@ -852,7 +928,8 @@ if __name__ == "__main__":
     print(SEPERATING_VALUE )
     BINS_TO_USE = np.arange(20, -20, -.01)#np.arange(15, -15, -.025)
 
-    print(mtd_f(FEN_TO_TEST, DEPTH_OF_SEARCH, SEPERATING_VALUE, .01))
+    starting_time = time.time()
+    print(mtd_f(FEN_TO_TEST, DEPTH_OF_SEARCH, SEPERATING_VALUE, .01), "found by mtd(f) in time", time.time()-starting_time)
 
 
     starting_time = time.time()

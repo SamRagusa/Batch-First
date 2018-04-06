@@ -1312,6 +1312,27 @@ def create_legal_move_struct(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
         return move_array[:move_counter]
 
 
+@njit(nogil=True)
+def has_legal_move(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
+    if board_state.turn == TURN_WHITE:
+        king = msb(board_state.kings & board_state.occupied_w)
+    else:
+        king = msb(board_state.kings & board_state.occupied_b)
+    blockers = _slider_blockers(board_state, king)
+    checkers = _attackers_mask(board_state, not board_state.turn, king, board_state.occupied)
+
+    # If in check
+    if checkers:  #If no moves are found it needs to be passed along that the board is in check, so it doesn't need to be computed again directly afterwards
+        for move in _generate_evasions(board_state, king, checkers, from_mask, to_mask):
+            if _is_safe(board_state, king, blockers, move):
+                return True
+    else:  #If no moves are found it needs to be passed along that the board is not in check, so it doesn't need to be computed again directly afterwards
+        for move in generate_pseudo_legal_moves(board_state, from_mask, to_mask):
+            if _is_safe(board_state, king, blockers, move):
+                return True
+
+    return False
+
 
 def generate_move_to_enumeration_dict():
     """

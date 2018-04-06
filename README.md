@@ -1,21 +1,20 @@
 # Batch First
 In the Wu-Tang Clan song [Da Mystery Of Chessboxin'](https://youtu.be/pJk0p-98Xzc "YouTube Link"), you can find the following quote:
 
-"The game of chess, is like a sword fight.  You must think first, before you move.  Toad style is immensely strong, and immune to nearly any weapon.  When it's properly used, it's almost invincible."
+> The game of chess, is like a sword fight.  You must think first, before you move.  Toad style is immensely strong, and immune to nearly any weapon.  When it's properly used, it's almost invincible.
 
 The Batch First engine will embody these ideas.
 
 # Current Methods
 - Using a **convolutional neural network architecture inspired by the movement of chess pieces** for both board evaluation and move scoring
-- Implementing a best-first negamax algorithm to utilize batching for neural network inference on GPU, and to better utilize multiple CPU cores.  I'm calling it **Batch First Search** 
-- Using Numba to compile all python code used for move generation to machine code with the LLVM compiler
-- Using TensorFlow Serving for neural network inference
+- Implementing a **zero-window k-best-first negamax search** algorithm to utilize batching for neural network inference run asynchronously on GPU, as well as better utilize multiple CPU cores
+- Using Numba to compile all Python code used for move generation to machine code with the LLVM compiler
+- Using a framework similar to MTD(f) to converge towards a boards negamax value
 
-# Things I'm Working On
-- Converting the array oriented parts of the negamax algorithm to implementations which use multiple CPU cores and SIMD instructions (mainly through Numba's Vectorize)
+# Things Being Working On
+- Converting the array oriented parts of the negamax algorithm to implementations which better utilize SIMD instructions (mainly through Numba's Vectorize)
 - JIT compiling (with Numba) the entirety of the negamax algorithm implementation
-- The tree search algorithm which will call the zero-window negamax search (e.g. MTD(f) or Best Node Search)
-- A formal description of the engine.  This will either be a full paper, or a detailed explanation of the core components (e.g. a proof of correctness for the Batch First Search algorithm, and reasoning behind the neural network architectures used)
+- A semi-formal explanation of the engine's core components (e.g. a simple description of the negamax algorithm, and reasoning behind the neural network architecture used)
 
 # Dependencies
 The versions listed are the versions I'm currently using, but are not necessarily the only versions which will work.
