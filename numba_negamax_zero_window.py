@@ -1,7 +1,8 @@
 import numba as nb
-
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from chess import uci
+import random as rand
 
 from numba import float32
 
@@ -21,6 +22,7 @@ if __name__ == "__main__":
 
 
 
+
 MIN_FLOAT32_VAL = np.finfo(np.float32).min
 MAX_FLOAT32_VAL = np.finfo(np.float32).max
 FLOAT32_EPS = np.finfo(np.float32).eps
@@ -31,8 +33,33 @@ WIN_RESULT_SCORE = ALMOST_MAX_FLOAT_32_VAL
 LOSS_RESULT_SCORE = ALMOST_MIN_FLOAT_32_VAL
 TIE_RESULT_SCORE = np.float32(0)
 
+#This value is used for indicating that a given node has/had a legal move in the transposition table that it will/would
+#expand prior to it's full move generation and scoring.
+NEXT_MOVE_IS_FROM_TT_VAL = np.uint8(254)
 
-hash_table_numpy_dtype = np.dtype([("entry_hash", np.uint64), ("depth", np.uint8), ("upper_bound", np.float32), ("lower_bound", np.float32)])
+#This value is used for indicating that a move in a transposition table entry is not being stored.
+NO_TT_MOVE_VALUE = np.uint8(255)
+
+#This value is used for indicating that no entry in the transposition table exists for that hash.  It is stored as the
+#entries depth.
+NO_TT_ENTRY_VALUE = np.uint8(255)
+
+#This value is the value used to assigned a node who's next move was found in the TT to the desired bin.
+TT_MOVE_SCORE_VALUE = ALMOST_MAX_FLOAT_32_VAL
+
+
+
+
+
+
+hash_table_numpy_dtype = np.dtype([("entry_hash", np.uint64),
+                                   ("depth", np.uint8),
+                                   ("upper_bound", np.float32),
+                                   ("lower_bound", np.float32),
+                                   ("stored_from_square", np.uint8),
+                                   ("stored_to_square", np.uint8),
+                                   ("stored_promotion", np.uint8)])
+
 hash_table_numba_dtype = nb.from_dtype(hash_table_numpy_dtype)
 
 
@@ -58,7 +85,7 @@ numpy_board_state_dtype = np.dtype([("pawns", np.uint64),
                                     ("occupied_w", np.uint64),
                                     ("occupied_b", np.uint64),
                                     ("occupied", np.uint64),
-                                    ("turn", np.bool),
+                                    ("turn", np.bool_),
                                     ("castling_rights", np.uint64),
                                     ("ep_square", np.uint8),
                                     ("halfmove_clock", np.uint8),
@@ -103,12 +130,11 @@ gamenode_spec = OrderedDict()
 
 gamenode_spec["board_state"] = BoardState.class_type.instance_type#numba_numpy_board_type
 
-# gamenode_spec["alpha"] = float32
-# gamenode_spec["beta"] = float32
 gamenode_spec["separator"] = float32
 gamenode_spec["depth"] = uint8
 
 gamenode_spec["parent"] = optional(gamenode_type)
+gamenode_spec["prev_move"] = optional(Move.class_type.instance_type)
 
 gamenode_spec["best_value"] = float32
 
@@ -128,15 +154,14 @@ gamenode_spec["children_left"] = uint8
 
 @jitclass(gamenode_spec)
 class GameNode:
-    def __init__(self, board_state, parent, depth, separator, best_value, unexplored_moves, unexplored_move_scores, next_move_score, next_move, terminated, children_left):
+    def __init__(self, board_state, parent, prev_move, depth, separator, best_value, unexplored_moves, unexplored_move_scores, next_move_score, next_move, terminated, children_left):
         self.board_state = board_state
 
         # Eventually this will likely be some sort of list, so that updating multiple parents is possible
         # when handling transpositions.
         self.parent = parent
+        self.prev_move = prev_move
 
-        # self.alpha = alpha
-        # self.beta = beta
         self.separator = separator
         self.depth = depth
 
@@ -152,27 +177,39 @@ class GameNode:
 
         self.children_left = children_left
 
-    def zero_window_create_child_from_move(self, move):
-        return GameNode(
-            copy_push(self.board_state, move),
-            self,
-            self.depth - 1,
-            -self.separator,
-            MIN_FLOAT32_VAL,
-            np.empty(0, dtype=numpy_move_dtype),
-            None,
-            None,
-            None,
-            False,
-            np.uint8(0))
 
-    def has_uncreated_child(self):
-        if self.next_move_score is None:
-            return False
-        return True
 
 
 gamenode_type.define(GameNode.class_type.instance_type)
+
+
+
+
+@njit(GameNode.class_type.instance_type(GameNode.class_type.instance_type, Move.class_type.instance_type))
+def zero_window_create_child_from_move(game_node, move):
+    return GameNode(
+        copy_push(game_node.board_state, move),
+        game_node,
+        move,
+        game_node.depth - 1,
+        -game_node.separator,
+        MIN_FLOAT32_VAL,
+        None,
+        None,
+        None,
+        None,
+        False,
+        np.uint8(0))
+
+
+@njit(boolean(GameNode.class_type.instance_type))
+def has_uncreated_child(game_node):
+    if game_node.next_move_score is None:
+        return False
+    return True
+
+
+
 
 
 
@@ -181,10 +218,11 @@ gamenode_type.define(GameNode.class_type.instance_type)
 def create_game_node_from_fen(fen, depth, seperator):
     return GameNode(create_board_state_from_fen(fen),
                     None,
+                    None,
                     depth,
                     seperator,
                     MIN_FLOAT32_VAL,
-                    np.empty(0, dtype=numpy_move_dtype),
+                    None,
                     None,
                     None,
                     None,
@@ -201,11 +239,20 @@ def get_empty_hash_table():
     """
     Uses global variable SIZE_EXPONENT_OF_TWO for it's size.
     """
-    return np.array([(np.uint64(0), np.uint8(255), MAX_FLOAT32_VAL, MIN_FLOAT32_VAL) for j in range(2 ** SIZE_EXPONENT_OF_TWO)],dtype=hash_table_numpy_dtype)
+
+    return np.array(
+        [(np.uint64(0),
+          NO_TT_ENTRY_VALUE,
+          MAX_FLOAT32_VAL,
+          MIN_FLOAT32_VAL,
+          NO_TT_MOVE_VALUE,
+          NO_TT_MOVE_VALUE,
+          NO_TT_MOVE_VALUE) for _ in range(2 ** SIZE_EXPONENT_OF_TWO)],
+        dtype=hash_table_numpy_dtype)
 
 
-@njit
-def set_node(hash_table, board_hash, depth, upper_bound=MAX_FLOAT32_VAL, lower_bound=MIN_FLOAT32_VAL):
+@njit#(void(hash_table_numba_dtype[:], uint64, uint8, float32, float32))
+def set_tt_node(hash_table, board_hash, depth, upper_bound=MAX_FLOAT32_VAL, lower_bound=MIN_FLOAT32_VAL):
     """
     Puts the given information about a node into the hash table.
     """
@@ -214,6 +261,15 @@ def set_node(hash_table, board_hash, depth, upper_bound=MAX_FLOAT32_VAL, lower_b
     hash_table[index]["depth"] = depth
     hash_table[index]["upper_bound"] = upper_bound
     hash_table[index]["lower_bound"] = lower_bound
+
+
+@njit#(void(hash_table_numba_dtype[:], uint64, Move.class_type.instance_type))
+def set_tt_move(hash_table, tt_index, following_move):
+    hash_table[tt_index]["stored_from_square"] = following_move.from_square
+    hash_table[tt_index]["stored_to_square"] = following_move.to_square
+    hash_table[tt_index]["stored_promotion"] = following_move.promotion
+
+
 
 
 @njit#((GameNode.class_type.instance_type, optional(hash_table_numba_dtype[:,:])))
@@ -226,7 +282,7 @@ def terminated_from_tt(game_node, hash_table):
     1) This logic has not been heavily thought out, I've been focused on nodes per second as of now.
     """
     hash_entry = hash_table[game_node.board_state.cur_hash & ONES_IN_RELEVANT_BITS]
-    if hash_entry["depth"] != 255 and hash_entry["entry_hash"] == game_node.board_state.cur_hash:
+    if hash_entry["depth"] != NO_TT_ENTRY_VALUE and hash_entry["entry_hash"] == game_node.board_state.cur_hash:
         if hash_entry["depth"] >= game_node.depth:
             if hash_entry["lower_bound"] >= game_node.separator: #This may want to be >
                 game_node.best_value = hash_entry["lower_bound"]
@@ -236,19 +292,24 @@ def terminated_from_tt(game_node, hash_table):
                     game_node.best_value = hash_entry["lower_bound"]
 
                 if hash_entry["upper_bound"] < game_node.separator:  #This may want to be <=
-                    game_node.best_value = hash_entry["upper_bound"] #I'm not confident about this
-                    return True #########JUST ADDED THIS
+                    # game_node.best_value = hash_entry["upper_bound"] #I'm not confident about this
+                    game_node.best_value = hash_entry["lower_bound"] #I'm not confident about this
+                    return True
     return False
+
 
 
 @njit
 def add_one_board_to_tt(game_node, hash_table):
     """
+    IMPORTANT NOTES:
+    1) THIS CURRENTLY CAUSES ISSUES
+
     TO-DO:
     1) Build/test a better replacement scheme (currently always replacing)
     """
     node_entry = hash_table[game_node.board_state.cur_hash & ONES_IN_RELEVANT_BITS]
-    if node_entry["depth"] != 255:
+    if node_entry["depth"] != NO_TT_ENTRY_VALUE:
         if node_entry["entry_hash"] == game_node.board_state.cur_hash:
             if node_entry["depth"] == game_node.depth:
                 if game_node.best_value >= game_node.separator:
@@ -256,28 +317,76 @@ def add_one_board_to_tt(game_node, hash_table):
                         node_entry["lower_bound"] = game_node.best_value
                 elif game_node.best_value < node_entry["upper_bound"]:
                     node_entry["upper_bound"] = game_node.best_value
-
             elif node_entry["depth"] < game_node.depth:
                 #Overwrite the data currently stored in the hash table
                 if game_node.best_value >= game_node.separator:
-                    set_node(hash_table, game_node.board_state.cur_hash, game_node.depth,lower_bound=game_node.best_value)   ###########THIS IS WRITING THE HASH EVEN THOUGH IT HAS NOT CHANGED########
-                else:
-                    set_node(hash_table, game_node.board_state.cur_hash, game_node.depth,upper_bound=game_node.best_value)
-            #Don't change anything if it's depth is less than the depth in the TT
+                    set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth,upper_bound=MAX_FLOAT32_VAL, lower_bound=game_node.best_value)   ###########THIS IS WRITING THE HASH EVEN THOUGH IT HAS NOT CHANGED########
+                # else:
+                #     set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth,upper_bound=game_node.best_value)
+
+            # Don't change anything if it's depth is less than the depth in the TT
         else:
             #Using the always replace scheme for simplicity and easy implementation (likely only for now)
             # print("A hash table entry exists with a different hash than wanting to be inserted!")
             if game_node.best_value >= game_node.separator:
-                set_node(hash_table, game_node.board_state.cur_hash, game_node.depth, lower_bound=game_node.best_value)
+                set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, lower_bound=game_node.best_value)
             else:
-                set_node(hash_table, game_node.board_state.cur_hash, game_node.depth, upper_bound=game_node.best_value)
+                set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, upper_bound=game_node.best_value)
     else:
 
         if game_node.best_value >= game_node.separator:
-            set_node(hash_table, game_node.board_state.cur_hash, game_node.depth, lower_bound=game_node.best_value)
+            set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, lower_bound=game_node.best_value)
         else:
-            set_node(hash_table, game_node.board_state.cur_hash, game_node.depth, upper_bound=game_node.best_value)
+            set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, upper_bound=game_node.best_value)
 
+
+
+@njit
+def add_board_and_move_to_tt(game_node, following_move, hash_table):
+    """
+    This function is the same as add_one_board_to_tt except that it also stores a given move (when needed).
+
+    IMPORTANT NOTES:
+    1) THIS CURRENTLY CAUSES ISSUES
+    2) Though this may be a tiny bit faster to have separate from add_one_board_to_tt, they should be combined.
+    The reason it's currently not is because Numba has rejected all my attempts to compile a combined function.
+    """
+    tt_index = game_node.board_state.cur_hash & ONES_IN_RELEVANT_BITS
+    node_entry = hash_table[tt_index]
+    if node_entry["depth"] != NO_TT_ENTRY_VALUE:
+        if node_entry["entry_hash"] == game_node.board_state.cur_hash:
+            if node_entry["depth"] == game_node.depth:
+                if game_node.best_value >= game_node.separator:
+                    if game_node.best_value > node_entry["lower_bound"]:
+                        node_entry["lower_bound"] = game_node.best_value
+                        set_tt_move(hash_table, tt_index, following_move)
+
+
+                elif game_node.best_value < node_entry["upper_bound"]:
+                    node_entry["upper_bound"] = game_node.best_value
+
+            elif node_entry["depth"] < game_node.depth:
+                #Overwrite the data currently stored in the hash table
+                if game_node.best_value >= game_node.separator:
+                    set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, lower_bound=game_node.best_value) #####This is writing the hash even though it doesn't need to
+                    set_tt_move(hash_table, tt_index, following_move)
+                # else:
+                #     set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth,upper_bound=game_node.best_value)
+
+            #Don't change anything if it's depth is less than the depth in the TT
+        else:
+            #Using the always replace scheme for simplicity and easy implementation (likely only for now)
+            if game_node.best_value >= game_node.separator:
+                set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, lower_bound=game_node.best_value)
+                set_tt_move(hash_table, tt_index, following_move)
+            else:
+                set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, upper_bound=game_node.best_value)
+    else:
+        if game_node.best_value >= game_node.separator:
+            set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, lower_bound=game_node.best_value)
+            set_tt_move(hash_table, tt_index, following_move)
+        else:
+            set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, upper_bound=game_node.best_value)
 
 
 
@@ -292,20 +401,23 @@ def should_terminate(game_node):
     return False
 
 
-# @jit((GameNode.class_type.instance_type, float32),nopython=True)
-# @njit
-def zero_window_update_node_from_value(node, value, hash_table):
+def zero_window_update_node_from_value(node, value, following_move, hash_table):
     if not node is None:
-        if not node.terminated:  #This may be preventing more accurate predictions from zero-window search
+        if not node.terminated:  #This may be preventing more accurate predictions when two+ nodes which would terminate a single node in one iteration are updated out of order
             node.children_left -= 1
+            # node.children_left = np.uint8(np.int8(node.children_left) - 1)
             node.best_value = max(value, node.best_value)
-
             if node.best_value >= node.separator or node.children_left == 0:
                 node.terminated = True
-                add_one_board_to_tt(node, hash_table)
-                if not node.parent is None:  #This is being checked at the start of the call also and thus should be removed
-                    temp_parent = node.parent
-                    zero_window_update_node_from_value(temp_parent, -node.best_value, hash_table)
+                add_board_and_move_to_tt(node, following_move, hash_table)
+                # add_one_board_to_tt(node, hash_table)
+
+                # This is being checked at the start of the call also and thus should be removedMoved several dependencies to newer versions
+                if not node.parent is None:
+                    zero_window_update_node_from_value(node.parent, -node.best_value, node.prev_move, hash_table)
+
+
+
 
 
 # @njit
@@ -326,7 +438,7 @@ def zero_window_update_node_from_value(node, value, hash_table):
 
 
 
-@njit#(void(GameNode.class_type.instance_type))
+@njit(void(GameNode.class_type.instance_type))
 def set_up_next_best_move(node):
     next_move_index = np.argmax(node.unexplored_move_scores)
 
@@ -342,17 +454,20 @@ def set_up_next_best_move(node):
         node.next_move_score = node.unexplored_move_scores[next_move_index]
         node.unexplored_move_scores[next_move_index] = MIN_FLOAT32_VAL
     else:
-        node.next_move = None
+        # node.next_move = None
         node.next_move_score = None
 
 
 @njit(GameNode.class_type.instance_type(GameNode.class_type.instance_type))
 def spawn_child_from_node(node):
-    to_return = node.zero_window_create_child_from_move(node.next_move)
+    to_return = zero_window_create_child_from_move(node, node.next_move)
 
-    set_up_next_best_move(node)
+    #If the move used to spawn the child wasn't a move found in the TT move
+    if node.children_left != NEXT_MOVE_IS_FROM_TT_VAL:
+        set_up_next_best_move(node)
 
     return to_return
+
 
 
 def create_child_array(node_array):
@@ -382,7 +497,7 @@ def for_all_white_jitclass_to_array_for_ann(board):
 
 def for_all_white_jitclass_array_to_basic_input_for_anns(board_array):
     to_return = np.empty(shape=[len(board_array),11], dtype=np.uint64)
-    black_turn = np.zeros(shape=len(board_array), dtype=np.bool)
+    black_turn = np.zeros(shape=len(board_array), dtype=np.bool_)
     for j, board in enumerate(board_array):
 
         to_return[j] = for_all_white_jitclass_to_array_for_ann(board)
@@ -418,7 +533,7 @@ def jitted_set_move_scores_and_next_move(node, scores):
     set_up_next_best_move(node)
 
 
-def newest_start_move_scoring(node_array, testing=False):
+def start_move_scoring(node_array):
     ann_inputs = for_all_white_jitclass_array_to_basic_input_for_anns(np.array([node.board_state for node in node_array],dtype=np.object))
 
     #This is taking up a lot of time, a change of the GameNode class to a numpy scalar is something I've been thinking
@@ -445,6 +560,7 @@ def newest_start_move_scoring(node_array, testing=False):
     t.start()
     return t
 
+
 @njit(boolean(BoardState.class_type.instance_type))
 def has_insufficient_material(board_state):
     # Enough material to mate.
@@ -467,65 +583,101 @@ def has_insufficient_material(board_state):
     else:
         return False
 
-@njit(nogil=True)#(boolean(GameNode.class_type.instance_type, optional(hash_table_numba_dtype[:,:])),nogil=True)
-def check_and_update_valid_moves(game_node, hash_table):
+
+# @njit(nogil=True)#(boolean(GameNode.class_type.instance_type, optional(hash_table_numba_dtype[:,:])),nogil=True)
+# def check_and_update_valid_moves(game_node, hash_table):
+#     """
+#     CURRENTLY CHECKING:
+#     1) Draw by the 50-move rule
+#     2) Draw by insufficient material
+#     3) Draw by stalemate
+#     4) Win/loss by checkmate
+#     5) Termination by information contained in the TT
+#     """
+#
+#     if game_node.board_state.halfmove_clock >= 50:
+#         game_node.best_value = TIE_RESULT_SCORE
+#         return True
+#
+#     if has_insufficient_material(game_node.board_state):
+#         game_node.best_value = TIE_RESULT_SCORE
+#         return True
+#
+#     if not hash_table is None:
+#         if terminated_from_tt(game_node, hash_table):
+#             return True
+#
+#     legal_move_struct_array = create_legal_move_struct(game_node.board_state, BB_ALL, BB_ALL)
+#     if not legal_move_struct_array is None:
+#         game_node.unexplored_moves = legal_move_struct_array
+#         game_node.children_left = len(legal_move_struct_array)
+#     else:
+#         if is_in_check(game_node.board_state):
+#             game_node.best_value = LOSS_RESULT_SCORE
+#         else:
+#             game_node.best_value = TIE_RESULT_SCORE
+#         return True
+#     return False
+#
+#
+# def get_indices_of_terminating_children(node_array, hash_table):
+#     """
+#     Currently using ThreadPoolExecutor to do this on multiple cores, after using Numba to release the GIL.
+#     This will soon be completely vectorized.
+#     """
+#     MAX_WORKERS = 6 #This number is picked arbitrarily, setting this equal to 12 (how many cores I have available) does not improve speed
+#
+#     def loop_wrapper(inner_node_array):
+#         terminating = np.zeros(shape=len(inner_node_array), dtype=np.bool_)
+#         for j in range(len(inner_node_array)):
+#             terminating[j] = check_and_update_valid_moves(inner_node_array[j], hash_table)
+#         return terminating
+#
+#     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+#         return np.concatenate(list(executor.map(loop_wrapper,np.array_split(node_array, MAX_WORKERS))))
+
+
+
+
+
+
+@njit(boolean(GameNode.class_type.instance_type, hash_table_numba_dtype[:]))
+def has_no_legal_tt_move(game_node, hash_table):
     """
-    CURRENTLY CHECKING:
-    1) Draw by the 50-move rule
-    2) Draw by insufficient material
-    3) Draw by stalemate
-    4) Win/loss by checkmate
-    5) Termination by information contained in the TT
+    Checks if a move is being stored in the transposition table for the given node, and if there is, that the
+    move is legal.  If it does find a legal move, it stores the move as the node's next move, sets the
+    node's next move score to a constant value, and sets it's children_left to a specified constant to indicate there
+    was a legal move found in the tt.  It then returns False if a move is found, or True if not.
     """
+    node_entry = hash_table[game_node.board_state.cur_hash & ONES_IN_RELEVANT_BITS]
+    if node_entry["depth"] != NO_TT_ENTRY_VALUE:
+        if node_entry["entry_hash"] == game_node.board_state.cur_hash:
+            if node_entry["stored_from_square"] != NO_TT_MOVE_VALUE:
+                tt_move = Move(node_entry["stored_from_square"],
+                               node_entry["stored_to_square"],
+                               node_entry["stored_promotion"])
 
-    if game_node.board_state.halfmove_clock >= 50:
-        game_node.best_value = TIE_RESULT_SCORE
-        return True
+                if is_legal_move(game_node.board_state, tt_move):
+                    game_node.next_move = tt_move
 
-    if has_insufficient_material(game_node.board_state):
-        game_node.best_value = TIE_RESULT_SCORE
-        return True
+                    game_node.next_move_score = TT_MOVE_SCORE_VALUE
 
-    if not hash_table is None:
-        if terminated_from_tt(game_node, hash_table):
-            return True
-
-    legal_move_struct_array = create_legal_move_struct(game_node.board_state, BB_ALL, BB_ALL)
-    if not legal_move_struct_array is None:
-        game_node.unexplored_moves = legal_move_struct_array
-        game_node.children_left = len(legal_move_struct_array)
-    else:
-        if is_in_check(game_node.board_state):
-            game_node.best_value = LOSS_RESULT_SCORE
-        else:
-            game_node.best_value = TIE_RESULT_SCORE
-        return True
-    return False
-
-
-def get_indices_of_terminating_children(node_array, hash_table):
-    """
-    Currently using ThreadPoolExecutor to do this on multiple cores, after using Numba to release the GIL.
-    This will soon be completely vectorized.
-    """
-    MAX_WORKERS = 6 #This number is picked arbitrarily, setting this equal to 12 (how many cores I have available) does not improve speed
-
-    def loop_wrapper(inner_node_array):
-        terminating = np.zeros(shape=len(inner_node_array), dtype=np.bool)
-        for j in range(len(inner_node_array)):
-            terminating[j] = check_and_update_valid_moves(inner_node_array[j], hash_table)
-        return terminating
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        return np.concatenate(list(executor.map(loop_wrapper,np.array_split(node_array, MAX_WORKERS))))
-
-
-
-
+                    # Indicate that the node has chosen a TT move, and hasn't done a full move generation/scoring
+                    game_node.children_left = NEXT_MOVE_IS_FROM_TT_VAL
+                    return False
+    return True
 
 
 def single_thread_get_indices_of_terminating_children(node_array, hash_table):
     """
+    Gets a mask for the given array to determine which of the given nodes should be terminated (for any of the
+    reasons listed below).  If any nodes should terminate, their best_value is set to the value they would terminate
+    with, and if not, their legal moves are generated and set.  In the case that a node should not terminate,
+    and there is a legal move for the node in the transposition table, it will not generate the legal moves
+    for the node, instead it will do what is described in the comments of the function has_no_legal_tt_move
+    (store the one move and indicate it hasn't generated all the moves yet).
+
+
     CURRENTLY CHECKING:
     1) Draw by the 50-move rule
     2) Draw by insufficient material
@@ -534,7 +686,7 @@ def single_thread_get_indices_of_terminating_children(node_array, hash_table):
     5) Termination by information contained in the TT
     """
 
-    terminating = np.zeros(len(node_array),dtype=np.bool)
+    terminating = np.zeros(len(node_array),dtype=np.bool_)
     for j, game_node in enumerate(node_array):
 
 
@@ -547,7 +699,7 @@ def single_thread_get_indices_of_terminating_children(node_array, hash_table):
 
         elif not hash_table is None and terminated_from_tt(game_node, hash_table):
             terminating[j] = True
-        else:
+        elif has_no_legal_tt_move(game_node, hash_table):
             legal_move_struct_array = create_legal_move_struct(game_node.board_state, BB_ALL, BB_ALL)
             if not legal_move_struct_array is None:
                 game_node.unexplored_moves = legal_move_struct_array
@@ -558,10 +710,16 @@ def single_thread_get_indices_of_terminating_children(node_array, hash_table):
                 else:
                     game_node.best_value = TIE_RESULT_SCORE
                 terminating[j] = True
+
     return terminating
 
 @njit
 def depth_zero_should_terminate(game_node, hash_table):
+    """
+    Tests a given depth zero node for termination, based on the same factors as listed in the comment of the
+    single_thread_get_indices_of_terminating_children function.  If the node is terminating, then this function
+    will set the value it's terminating with to the node's best_value.
+    """
     if game_node.board_state.halfmove_clock >= 50:
         game_node.best_value = TIE_RESULT_SCORE
         return True
@@ -570,7 +728,7 @@ def depth_zero_should_terminate(game_node, hash_table):
         return True
     elif terminated_from_tt(game_node, hash_table):
         return True
-    elif not has_legal_move(game_node.board_state, BB_ALL, BB_ALL):
+    elif not has_legal_move(game_node.board_state):
         if is_in_check(game_node.board_state):
             game_node.best_value = LOSS_RESULT_SCORE
         else:
@@ -579,8 +737,9 @@ def depth_zero_should_terminate(game_node, hash_table):
 
     return False
 
+
 def depth_zero_should_terminate_array(game_nodes, hash_table):
-    return np.array(list(map(lambda x: depth_zero_should_terminate(x, hash_table), game_nodes)), dtype=np.bool)
+    return np.array(list(map(lambda x: depth_zero_should_terminate(x, hash_table), game_nodes)), dtype=np.bool_)
 
 
 # @jit(void(GameNode.class_type.instance_type), nopython=True)
@@ -602,90 +761,51 @@ def depth_zero_should_terminate_array(game_nodes, hash_table):
 #         set_up_next_best_move(node_array[j])
 
 
-
 def update_tree_from_terminating_nodes(node_array, hash_table):
     for j in range(len(node_array)):
+
+        #Since no node being given to this function will have terminated from a child, none of them will have moves to store
         add_one_board_to_tt(node_array[j], hash_table)
-        zero_window_update_node_from_value(node_array[j].parent, - node_array[j].best_value, hash_table)
+
+        zero_window_update_node_from_value(node_array[j].parent, - node_array[j].best_value, node_array[j].prev_move, hash_table)
+
+
+@njit(boolean(GameNode.class_type.instance_type))
+def generate_moves_for_tt_move_node(game_node):
+    """
+    Generates the legal moves for a GameNode object when a legal move for the node was found in
+    the transposition table (TT), and then was expanded in the same iteration as this function is being run.
+    So it generates all of the legal moves except for the move which was already found in the TT.
+    It then sets the GameNode's children_left to the actual number of children left,
+    as opposed to the indicator value NEXT_MOVE_IS_FROM_TT_VAL which it previously was.
+    This function returns True if it discovers more children to explore, and False if not.
+    """
+
+    game_node.unexplored_moves = create_legal_move_struct_without_move(game_node.board_state, game_node.next_move, BB_ALL, BB_ALL)
+
+    if game_node.unexplored_moves is None:
+        game_node.children_left = 1
+        return False
+    else:
+        game_node.children_left = 1 + len(game_node.unexplored_moves)
+        return True
+
+
+def generate_moves_for_array_of_tt_move_nodes(node_array):
+    """
+    Returns a mask of the indices of node_array where more moves were found
+    """
+    return np.array([generate_moves_for_tt_move_node(node) for node in node_array], dtype=np.bool_)
+
+
+
+
 
 
 def do_iteration(batch, hash_table, testing=False):
-    """
-    TO-DO:
-    1) Check hash table for zero depth nodes:
-
-    """
-    depth_zero_indices = np.array(
-        [True if batch[j].depth == 0 else False for j in range(len(batch))])
-    depth_not_zero_indices = np.logical_not(depth_zero_indices)
-
-    depth_zero_nodes = batch[depth_zero_indices]
-    depth_not_zero_nodes = batch[depth_not_zero_indices]
-
-    if len(depth_zero_nodes) != 0:
-        evaluation_thread = all_white_start_node_evaluations(depth_zero_nodes)
-
-    if len(depth_not_zero_nodes) != 0:
-
-        children_created = create_child_array(depth_not_zero_nodes)
-
-        # for every child which is not terminating from something set it's move list to the full set of legal moves possible
-        # terminating_children_indices = get_indices_of_terminating_children(children_created, hash_table)
-        terminating_children_indices = single_thread_get_indices_of_terminating_children(children_created, hash_table)
-
-
-        not_terminating_children = children_created[np.logical_not(terminating_children_indices)]
-
-        if len(not_terminating_children) != 0:
-            # move_thread = newer_start_move_scoring(not_terminating_children, testing)
-            move_thread = newest_start_move_scoring(not_terminating_children, testing)
-
-        have_children_left_indices = np.array(
-            [True if depth_not_zero_nodes[j].has_uncreated_child() else False for j in
-             range(len(depth_not_zero_nodes))])
-
-        depth_not_zero_with_more_kids_nodes = depth_not_zero_nodes[have_children_left_indices]
-
-        if testing:
-            for j in range(len(depth_not_zero_with_more_kids_nodes)):
-                if depth_not_zero_with_more_kids_nodes[j].next_move is None or depth_not_zero_with_more_kids_nodes[j].next_move_score is None:
-                    print("A NODE WITH NO KIDS IS BEING TREATED AS IF IT HAD MORE CHILDREN!")
-
-        if len(depth_zero_nodes) != 0:
-            evaluation_thread.join()
-
-        NODES_TO_UPDATE_TREE_WITH = np.concatenate((depth_zero_nodes, children_created[terminating_children_indices]))
-        update_tree_from_terminating_nodes(NODES_TO_UPDATE_TREE_WITH, hash_table)
-
-
-        if len(not_terminating_children) != 0:
-            move_thread.join()
-        # set_up_scored_move_generation(not_terminating_children)
-
-
-        return np.concatenate((depth_not_zero_with_more_kids_nodes, not_terminating_children))
-    else:
-        if len(depth_zero_nodes) != 0:
-            evaluation_thread.join()
-
-        update_tree_from_terminating_nodes(depth_zero_nodes, hash_table)
-        return np.empty(0)
-
-
-
-
-
-def new_do_iteration(batch, hash_table, testing=False):
-    """
-    TO-DO:
-    1) Check hash table for zero depth nodes:
-
-    """
-
     children = create_child_array(batch)
 
-
-    depth_zero_children_mask = np.array([True if child.depth == 0 else False for child in children], dtype=np.bool)
+    depth_zero_children_mask = np.array([True if child.depth == 0 else False for child in children], dtype=np.bool_)
 
     depth_zero_children = children[depth_zero_children_mask]
     depth_not_zero_children = children[np.logical_not(depth_zero_children_mask)]
@@ -697,15 +817,39 @@ def new_do_iteration(batch, hash_table, testing=False):
     else:
         evaluation_thread = None
 
+
+    child_was_from_tt_move_mask = np.array(
+        [True if node.children_left==NEXT_MOVE_IS_FROM_TT_VAL else False for node in batch],
+        dtype=np.bool_)
+
+    #(This should likely be put directly into it's only use below to prevent storing it in memory)
+    tt_move_nodes_with_more_kids_indices = generate_moves_for_array_of_tt_move_nodes(batch[child_was_from_tt_move_mask])
+
+
     non_zero_depth_child_term_indices = single_thread_get_indices_of_terminating_children(depth_not_zero_children, hash_table)
     non_zero_depth_child_not_term_indices = np.logical_not(non_zero_depth_child_term_indices)
 
-    if np.any(non_zero_depth_child_not_term_indices):
-        move_thread = newest_start_move_scoring(depth_not_zero_children[non_zero_depth_child_not_term_indices], testing)
+
+
+    found_no_move_in_tt_indices = np.logical_and(
+        non_zero_depth_child_not_term_indices,
+        np.array(
+            [True if node.children_left!=NEXT_MOVE_IS_FROM_TT_VAL else False for node in depth_not_zero_children],
+            dtype=np.bool_))
+
+
+    TO_SCORE_MOVES_NODES = np.concatenate((
+        depth_not_zero_children[found_no_move_in_tt_indices],
+        batch[child_was_from_tt_move_mask][tt_move_nodes_with_more_kids_indices]))
+
+
+    if len(TO_SCORE_MOVES_NODES) != 0:
+        move_thread = start_move_scoring(TO_SCORE_MOVES_NODES)
     else:
         move_thread = None
 
-    have_children_left_indices = np.array([True if node.has_uncreated_child() else False for node in batch], dtype=np.bool)
+
+    have_children_left_indices = np.array([True if has_uncreated_child(node) else False for node in batch], dtype=np.bool_)
 
 
     if not evaluation_thread is None:
@@ -755,7 +899,7 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
                 if root_game_node.terminated or root_game_node.best_value > root_game_node.separator or root_game_node.children_left == 0:
                     print("ROOT NODE WAS TERMINATED OR SHOULD BE TERMINATED AT START OF ITERATION.")
 
-        to_insert = new_do_iteration(next_batch, hash_table, full_testing)
+        to_insert = do_iteration(next_batch, hash_table, full_testing)
 
 
         if print_info or full_testing:
@@ -765,6 +909,8 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
                 for j in range(len(to_insert)):
                     if to_insert[j] is None:
                         print("Found none in array being inserted into global nodes!")
+                    if to_insert[j].depth == 0:
+                        print("Found a node with depth zero being inserted into global nodes!")
 
 
 
@@ -801,10 +947,12 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
                         print("Found node which should terminate in the newly created next_batch!")
 
     if print_info or full_testing:
-        print("Number of iterations taken", iteration_counter, "in total time", time.time() - starting_time)
-        print("Average time per iteration:", (time.time() - start_time) / iteration_counter)
+        time_taken_without_tt = time.time() - start_time
+        print("Total time taken not including table_creation:", time_taken_without_tt)
+        print("Number of iterations taken", iteration_counter, "in total time", time_taken_without_tt)
+        print("Average time per iteration:", time_taken_without_tt / iteration_counter)
         print("Total nodes computed:", total_nodes_computed)
-        print("Nodes evaluated per second:", total_nodes_computed/(time.time()-start_time))
+        print("Nodes evaluated per second:", total_nodes_computed/time_taken_without_tt)
         print("Total nodes given to linked list for insert", given_for_insert)
 
     return root_game_node.best_value
@@ -851,7 +999,7 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
 #
 #     best_value = MIN_FLOAT32_VAL
 #     for move in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
-#         v = - basic_do_alpha_beta(game_node.zero_window_create_child_from_move(move), -beta, -alpha, -color)
+#         v = - basic_do_alpha_beta(zero_window_create_child_from_move(game_node, move), -beta, -alpha, -color)
 #         best_value = max(best_value, v)
 #         alpha = max(alpha, v)
 #         if alpha >= beta:
@@ -868,12 +1016,12 @@ def set_up_root_search_tree_node(fen, depth, seperator):
     root_node.unexplored_moves = create_legal_move_struct(root_node.board_state, BB_ALL, BB_ALL)
     root_node.children_left = len(root_node.unexplored_moves)
     root_node_as_array = np.array([root_node])
-    thread = newest_start_move_scoring(root_node_as_array)
+    thread = start_move_scoring(root_node_as_array)
     thread.join()
     return root_node
 
 
-def mtd_f(fen, depth, first_guess, min_window_to_confirm, guess_increment=.5, search_batch_size=1000, bins_to_use=None, hash_table=None):
+def mtd_f(fen, depth, first_guess, min_window_to_confirm, guess_increment=.5, search_batch_size=1000, bins_to_use=None, hash_table=None, print_info=False):
     if hash_table is None:
         hash_table = get_empty_hash_table()
 
@@ -900,16 +1048,52 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, guess_increment=.5, se
         #This would ideally share the same tree, but updated for the new seperation value
         cur_root_node = set_up_root_search_tree_node(fen, depth, beta - FLOAT32_EPS)
 
-        cur_guess = do_alpha_beta_search_with_bins(cur_root_node, search_batch_size, bins_to_use, hash_table=hash_table)
+
+        cur_guess = do_alpha_beta_search_with_bins(cur_root_node, search_batch_size, bins_to_use, hash_table=hash_table, print_info=depth==5)
         if cur_guess < beta:
             upper_bound = cur_guess
         else:
             lower_bound = cur_guess
 
-        print("Finished iteration %d with lower and upper bounds (%f,%f)" % (counter+1, lower_bound, upper_bound))
+        if print_info:
+            print("Finished iteration %d with lower and upper bounds (%f,%f)" % (counter+1, lower_bound, upper_bound))
+
         counter += 1
 
-    return cur_guess
+    root_tt_entry = hash_table[np.uint64(cur_root_node.board_state.cur_hash) & ONES_IN_RELEVANT_BITS]
+    tt_move = chess.Move(root_tt_entry["stored_from_square"],
+                   root_tt_entry["stored_to_square"],
+                   root_tt_entry["stored_promotion"])
+
+    return cur_guess, tt_move, hash_table
+
+
+
+def iterative_deepening_mtd_f(fen, depths_to_search, batch_sizes, min_windows_to_confirm, first_guess=0, guess_increments=None, bin_sets=None, hash_table=None):
+    if hash_table is None:
+        starting_time = time.time()
+        hash_table = get_empty_hash_table()
+        # print("Hash table created in time:", time.time() - starting_time)
+
+    if bin_sets is None:
+        bin_sets = (np.arange(15, -15, -.025) for _ in range(len(depths_to_search)))
+
+    if guess_increments is None:
+        guess_increments = [1]*len(depths_to_search)
+
+    for depth, batch_size, window, increment, bins in zip(depths_to_search, batch_sizes, min_windows_to_confirm, guess_increments, bin_sets):
+        first_guess, tt_move, hash_table = mtd_f(fen,
+                                                 depth,
+                                                 first_guess,
+                                                 window,
+                                                 guess_increment=increment,
+                                                 search_batch_size=batch_size,
+                                                 bins_to_use=bins,
+                                                 hash_table=hash_table)
+
+    return first_guess
+
+
 
 
 
@@ -921,12 +1105,15 @@ if __name__ == "__main__":
     # perft_results = jitted_perft_test(create_board_state_from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"), 4)
     # print("Depth 4 perft test results:", perft_results, "in time", time.time()-starting_time, "\n")
 
-    FEN_TO_TEST = "r2q1rk1/pbpnbppp/1p2pn2/3pN3/2PP4/1PN3P1/P2BPPBP/R2Q1RK1 w - - 10 11"#"  # "rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"
+    FEN_TO_TEST = "r2q1rk1/pbpnbppp/1p2pn2/3pN3/2PP4/1PN3P1/P2BPPBP/R2Q1RK1 w - - 10 11"#"rn1q1rk1/pbp1bppp/1p2pn2/3pN3/2PP4/1P4P1/P2BPPBP/RN1Q1RK1 w - - 8 10"#"  # "rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"
     DEPTH_OF_SEARCH = 4
-    MAX_BATCH_LIST = [250,500, 1000, 2000]# [j**2 for j in range(40,0,-2)] + [5000]
-    SEPERATING_VALUE = -4
-    print(SEPERATING_VALUE )
-    BINS_TO_USE = np.arange(20, -20, -.01)#np.arange(15, -15, -.025)
+    MAX_BATCH_LIST =  10*[250,500, 1000, 2000]# [j**2 for j in range(40,0,-2)] + [5000]
+    SEPERATING_VALUE = 0
+    print("SPERATING VALUE:", SEPERATING_VALUE)
+    BINS_TO_USE = np.arange(20, -20, -.025)#np.arange(15, -15, -.01)
+
+    start_time = time.time()
+    print(mtd_f(FEN_TO_TEST,DEPTH_OF_SEARCH,0,.001, search_batch_size=10000)[0],"found by mtd(f)", time.time() - start_time)
 
     starting_time = time.time()
     print(mtd_f(FEN_TO_TEST, DEPTH_OF_SEARCH, SEPERATING_VALUE, .01), "found by mtd(f) in time", time.time()-starting_time)

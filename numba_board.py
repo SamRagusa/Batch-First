@@ -197,7 +197,14 @@ class Move:
         self.promotion = promotion
 
 
-
+@njit(boolean(Move.class_type.instance_type, Move.class_type.instance_type))
+def move_objects_equal(move1, move2):
+    """
+    Checks if the two given move objects are equal.
+    """
+    if move1.from_square == move2.from_square and move1.to_square == move2.to_square and move1.promotion == move2.promotion:
+        return True
+    return False
 
 
 COLORS = [WHITE, BLACK] = [1, 0]
@@ -940,7 +947,7 @@ def _castling_uncovers_rank_attack(board_state, rook_bb, king_to):
     return RANK_ATTACK_ARRAY[king_to][khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, rank_pieces, 0)] & sliders
 
 
-@njit((BoardState.class_type.instance_type, uint8, uint8))
+@njit(Move.class_type.instance_type(BoardState.class_type.instance_type, uint8, uint8))
 def _from_chess960(board_state, from_square, to_square):  # , promotion=None):
     # if not chess960 and drop is None:
     if from_square == E1 and board_state.kings & BB_E1:
@@ -970,7 +977,7 @@ def generate_castling_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
 
     king = king & -king
 
-    ###################REALLY SHOULD CHANGE THIS STUFF BECAUSE IT'S CHECKING FOR THINGS LIKE IF THERE IS A KING AT ALL ON THE BOARD
+    ###################(on second thought this comment might be wrong when doing things like checking for legality of moves) REALLY SHOULD CHANGE THIS STUFF BECAUSE IT'S CHECKING FOR THINGS LIKE IF THERE IS A KING AT ALL ON THE BOARD
     if not king or _attacked_for_king(board_state, king, board_state.occupied):
         return
 
@@ -1264,11 +1271,11 @@ def generate_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
     blockers = _slider_blockers(board_state, king)
     checkers = _attackers_mask(board_state, not board_state.turn, king, board_state.occupied)
     #If in check
-    if checkers:
+    if checkers:#If no moves are found it needs to be passed along that the board is in check, so it doesn't need to be computed again directly afterwards
         for move in _generate_evasions(board_state, king, checkers, from_mask, to_mask):
             if _is_safe(board_state, king, blockers, move):
                 yield move
-    else:
+    else:#If no moves are found it needs to be passed along that the board is not in check, so it doesn't need to be computed again directly afterwards
         for move in generate_pseudo_legal_moves(board_state, from_mask, to_mask):
             if _is_safe(board_state, king, blockers, move):
                 yield move
@@ -1277,6 +1284,34 @@ def generate_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
 
 @njit(nogil=True)#((BoardState.class_type.instance_type, uint64, uint64), nogil=True)
 def create_legal_move_struct(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
+    """
+    Creates a NumPy structued array of the legal moves for the given BoardState object.  If no moves exist,
+    it will return None.
+    """
+
+    move_counter = 0
+    for move in generate_legal_moves(board_state, from_mask, to_mask):
+        if move_counter == 0:
+            move_array = np.zeros_like(EMPTY_MOVE_ARRAY)
+        move_array[move_counter].to_square = move.to_square
+        move_array[move_counter].from_square = move.from_square
+        move_array[move_counter].promotion = move.promotion
+        move_counter += 1
+
+    if move_counter == 0:
+        return None
+    else:
+        return move_array[:move_counter]
+
+
+
+@njit(nogil=True)#((BoardState.class_type.instance_type, uint64, uint64), nogil=True)
+def create_legal_move_struct_without_move(board_state, move_not_to_make, from_mask=BB_ALL, to_mask=BB_ALL):
+    """
+    Does the same as create_legal_move_struct, except that it prevents a specified move from being created.
+    This function was created differently than create_legal_move_struct so that it could prevent some calls
+    to _is_safe.
+    """
     if board_state.turn == TURN_WHITE:
         king = msb(board_state.kings & board_state.occupied_w)
     else:
@@ -1285,11 +1320,11 @@ def create_legal_move_struct(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
     checkers = _attackers_mask(board_state, not board_state.turn, king, board_state.occupied)
 
     move_counter = 0
+
     # If in check
     if checkers:  #If no moves are found it needs to be passed along that the board is in check, so it doesn't need to be computed again directly afterwards
         for move in _generate_evasions(board_state, king, checkers, from_mask, to_mask):
-            # if move_counter =
-            if _is_safe(board_state, king, blockers, move):
+            if not move_objects_equal(move, move_not_to_make) and _is_safe(board_state, king, blockers, move):
                 if move_counter == 0:
                     move_array = np.zeros_like(EMPTY_MOVE_ARRAY)
                 move_array[move_counter].to_square = move.to_square
@@ -1298,7 +1333,7 @@ def create_legal_move_struct(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
                 move_counter += 1
     else:  #If no moves are found it needs to be passed along that the board is not in check, so it doesn't need to be computed again directly afterwards
         for move in generate_pseudo_legal_moves(board_state, from_mask, to_mask):
-            if _is_safe(board_state, king, blockers, move):
+            if not move_objects_equal(move, move_not_to_make) and _is_safe(board_state, king, blockers, move):
                 if move_counter == 0:
                     move_array = np.zeros_like(EMPTY_MOVE_ARRAY)
                 move_array[move_counter].to_square = move.to_square
@@ -1312,26 +1347,115 @@ def create_legal_move_struct(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
         return move_array[:move_counter]
 
 
-@njit(nogil=True)
-def has_legal_move(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
+@njit(boolean(BoardState.class_type.instance_type), nogil=True)
+def has_legal_move(board_state):
+    """
+    Checks if there exists a legal move
+    """
+    return any(generate_legal_moves(board_state, BB_ALL, BB_ALL))
+
+
+
+@njit(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
+def is_into_check(board_state, move):
+    """
+    Checks if the given move would leave the king in check or put it into
+    check. The move must be at least pseudo legal.  This function was adapted from the Python-Chess version of it.
+    """
+
     if board_state.turn == TURN_WHITE:
-        king = msb(board_state.kings & board_state.occupied_w)
+        king = msb(board_state.occupied_w & board_state.kings)
     else:
-        king = msb(board_state.kings & board_state.occupied_b)
-    blockers = _slider_blockers(board_state, king)
+        king = msb(board_state.occupied_b & board_state.kings)
+
+    if king is None:
+        return False
+
     checkers = _attackers_mask(board_state, not board_state.turn, king, board_state.occupied)
-
-    # If in check
-    if checkers:  #If no moves are found it needs to be passed along that the board is in check, so it doesn't need to be computed again directly afterwards
-        for move in _generate_evasions(board_state, king, checkers, from_mask, to_mask):
-            if _is_safe(board_state, king, blockers, move):
-                return True
-    else:  #If no moves are found it needs to be passed along that the board is not in check, so it doesn't need to be computed again directly afterwards
-        for move in generate_pseudo_legal_moves(board_state, from_mask, to_mask):
-            if _is_safe(board_state, king, blockers, move):
+    if checkers:
+        # If already in check, look if it is an evasion.
+        for temp_move in _generate_evasions(board_state, king, checkers, BB_SQUARES[move.from_square], BB_SQUARES[move.to_square]):
+            if move_objects_equal(move, temp_move):
                 return True
 
-    return False
+    return not _is_safe(board_state, king, _slider_blockers(board_state, king), move)
+
+
+
+@njit(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
+def is_pseudo_legal(board_state, move):
+    """
+    Checks if a given move is pseudo legal.  This function was adapted from the Python-Chess version.
+    """
+    # Source square must not be vacant.
+    piece = piece_type_at(board_state, move.from_square)
+    if not piece:
+        return False
+
+    # Get square masks.
+    from_mask = BB_SQUARES[move.from_square]
+    to_mask = BB_SQUARES[move.to_square]
+
+    # Check turn.
+    if board_state.turn == TURN_WHITE:
+        if not board_state.occupied_w & from_mask:
+            return False
+    else:
+        if not board_state.occupied_b & from_mask:
+            return False
+
+    # Only pawns can promote and only on the backrank.
+    if move.promotion:
+        if piece != PAWN:
+            return False
+
+        if board_state.turn == TURN_WHITE and square_rank(move.to_square) != 7:
+            return False
+        elif board_state.turn == TURN_BLACK and square_rank(move.to_square) != 0:
+            return False
+
+    # Handle castling.
+    if piece == KING:
+        ####This should not be taking in BB_ALL and instead take in from_mask and to_mask,
+        # but I haven't tested or looked into if that correct yet, and I want to get this commit out so for now
+        # this slightly slower version will work wine
+        for temp_move in generate_castling_moves(board_state, BB_ALL, BB_ALL):
+            if move_objects_equal(move, temp_move):
+                return True
+
+    # Destination square can not be occupied.
+    if board_state.turn == TURN_WHITE:
+        if board_state.occupied_w & to_mask:
+            return False
+    else:
+        if board_state.occupied_b & to_mask:
+            return False
+
+    # Handle pawn moves.
+    if piece == PAWN:
+        for temp_move in generate_pseudo_legal_moves(board_state, from_mask, to_mask):
+            if move_objects_equal(move, temp_move):
+                return True
+        return False
+
+    # Handle all other pieces.
+    return bool(attacks_mask(board_state, move.from_square) & to_mask)
+
+
+
+
+
+@njit(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
+def is_legal_move(board_state, move):
+    """
+    Checks if a given move is legal for the given board.
+    """
+    return is_pseudo_legal(board_state, move) and not is_into_check(board_state, move)
+
+
+
+
+
 
 
 def generate_move_to_enumeration_dict():
