@@ -10,6 +10,73 @@ from tensorflow.python.training import training
 from tensorflow.python.client import timeline
 
 
+def get_board_data(kings,queens,rooks,bishops,knights,pawns,castling_rights,ep_bitboards,occupied_w,occupied_b):#,occupied):
+    non_castling_rooks = tf.bitwise.bitwise_xor(rooks, castling_rights)
+
+    color_based_occupied = tf.stack([occupied_w, occupied_b], axis=1)
+    info_about_pieces = tf.stack([kings, queens, non_castling_rooks, bishops, knights, pawns, castling_rights], axis=1)
+
+    expanded_dim_color_occupied = tf.expand_dims(color_based_occupied, axis=2)
+    expanded_dim_piece_info = tf.expand_dims(info_about_pieces, axis=1)
+
+    color_specific_piece_info = tf.bitwise.bitwise_and(expanded_dim_color_occupied, expanded_dim_piece_info)
+
+    reshaped_color_specific_info = tf.reshape(color_specific_piece_info, [-1, 14])
+
+    expanded_dim_ep = tf.expand_dims(ep_bitboards, axis=1)
+
+    the_ints = tf.concat([
+        expanded_dim_ep,
+        reshaped_color_specific_info], axis=1)
+
+    the_bytes = tf.cast(tf.bitcast(the_ints, tf.uint8), dtype=tf.int32)
+
+    float_bool_masks = tf.constant(
+        [np.unpackbits(num).tolist() for num in np.arange(2 ** 8, dtype=np.uint8)],
+        dtype=tf.float32)
+
+    data = tf.gather(float_bool_masks, the_bytes)
+    properly_arranged_data = tf.transpose(data, perm=[0, 2, 3, 1])
+
+    return properly_arranged_data
+
+
+def get_board_data_with_unoccupied(kings,queens,rooks,bishops,knights,pawns,castling_rights,ep_bitboards,occupied_w,occupied_b,occupied):
+    not_occupied = tf.bitwise.invert(occupied)
+    not_occupied_or_ep = tf.bitwise.bitwise_xor(not_occupied, ep_bitboards)
+    non_castling_rooks = tf.bitwise.bitwise_xor(rooks, castling_rights)
+
+    color_based_occupied = tf.stack([occupied_w, occupied_b], axis=1)
+    info_about_pieces = tf.stack([kings, queens, non_castling_rooks, bishops, knights, pawns, castling_rights], axis=1)
+
+    expanded_dim_color_occupied = tf.expand_dims(color_based_occupied, axis=2)
+    expanded_dim_piece_info = tf.expand_dims(info_about_pieces, axis=1)
+
+    color_specific_piece_info = tf.bitwise.bitwise_and(expanded_dim_color_occupied, expanded_dim_piece_info)
+
+    reshaped_color_specific_info = tf.reshape(color_specific_piece_info, [-1, 14])
+
+    expanded_dim_ep = tf.expand_dims(ep_bitboards, axis=1)
+    expanded_dim_not_occupied_or_ep = tf.expand_dims(not_occupied_or_ep, axis=1)
+
+    the_ints = tf.concat([expanded_dim_not_occupied_or_ep,
+                          expanded_dim_ep,
+                          reshaped_color_specific_info], axis=1)
+
+    the_bytes = tf.cast(tf.bitcast(the_ints, tf.uint8), dtype=tf.int32)
+
+    float_bool_masks = tf.constant(
+        [np.unpackbits(num).tolist() for num in np.arange(2 ** 8, dtype=np.uint8)],
+        dtype=tf.float32)
+
+    data = tf.gather(float_bool_masks, the_bytes)
+
+    properly_arranged_data = tf.transpose(data, perm=[0, 2, 3, 1])
+
+    return properly_arranged_data
+
+
+
 
 
 
@@ -17,127 +84,6 @@ from tensorflow.python.client import timeline
 class ChEstimator(Estimator):
 
     def create_predictor(self,
-                        predict_keys=None,
-                        hooks=None,
-                        checkpoint_path=None,
-                        use_full_gpu=False):
-
-
-        run_metadata = tf.RunMetadata()
-        hooks = _check_hooks_type(hooks)
-        # Check that model has been trained.
-        if not checkpoint_path:
-            checkpoint_path = saver.latest_checkpoint(self._model_dir)
-        if not checkpoint_path:
-            raise ValueError('Could not find trained model in model_dir: {}.'.format(
-                self._model_dir))
-
-        with ops.Graph().as_default():
-
-            kings = tf.placeholder(tf.int64, shape=[None], name="kings_placeholder")
-            queens = tf.placeholder(tf.int64, shape=[None], name="queens_placeholder")
-            rooks = tf.placeholder(tf.int64, shape=[None], name="rooks_placeholder")
-            bishops = tf.placeholder(tf.int64, shape=[None], name="bishops_placeholder")
-            knights = tf.placeholder(tf.int64, shape=[None], name="knights_placeholder")
-            pawns = tf.placeholder(tf.int64, shape=[None], name="pawns_placeholder")
-            castling_rights = tf.placeholder(tf.int64, shape=[None], name="castling_rights_placeholder")
-            ep_square = tf.placeholder(tf.int32, shape=[None], name="ep_square_placeholder")  # Should double check this isn't interpreting uint8 values as negative int32 values
-            occupied_w = tf.placeholder(tf.int64, shape=[None], name="occupied_w_placeholder")
-            occupied_b = tf.placeholder(tf.int64, shape=[None], name="occupied_b_placeholder")
-            occupied = tf.placeholder(tf.int64, shape=[None], name="occupied_placeholder")
-            turn_white = tf.placeholder(tf.bool, shape=[None], name="turn_placeholder")
-
-            #This is overlycomplicated in regards to typing, but doesn't effect runtime speed
-            bb_squares = tf.constant(np.array([np.uint64(1 << sq) for sq in range(64)]+ [0 for _ in range(64, 256)],
-                                              dtype=np.uint64).astype(np.int64), tf.int64)
-
-            ep_bitboards = tf.gather(bb_squares, ep_square)
-
-            first_players_occupied = tf.where(turn_white, occupied_w, occupied_b)
-            second_players_occupied = tf.where(turn_white, occupied_b, occupied_w)
-
-            # This could likely be done in a more simple, faster way
-            # broadcast the players occupied to be one tensor, and [kings,queens,...] to another and do one
-            # bitwise and
-            the_ints = tf.stack([
-                tf.bitwise.invert(occupied),
-                ep_bitboards,
-                tf.bitwise.bitwise_and(first_players_occupied, kings),  # Likely can do without AND operation
-                tf.bitwise.bitwise_and(first_players_occupied, queens),
-                tf.bitwise.bitwise_and(first_players_occupied, rooks),
-                tf.bitwise.bitwise_and(first_players_occupied, bishops),
-                tf.bitwise.bitwise_and(first_players_occupied, knights),
-                tf.bitwise.bitwise_and(first_players_occupied, pawns),
-                tf.bitwise.bitwise_and(first_players_occupied, castling_rights),# Very likely should do this differently (to avoid 8 indices in tf.gather and instead use 1)
-                tf.bitwise.bitwise_and(second_players_occupied, kings),  # Likely can do without AND operation
-                tf.bitwise.bitwise_and(second_players_occupied, queens),
-                tf.bitwise.bitwise_and(second_players_occupied, rooks),
-                tf.bitwise.bitwise_and(second_players_occupied, bishops),
-                tf.bitwise.bitwise_and(second_players_occupied, knights),
-                tf.bitwise.bitwise_and(second_players_occupied, pawns),
-                tf.bitwise.bitwise_and(second_players_occupied, castling_rights),# Very likely should do this differently (to avoid 8 indices in tf.gather and instead use 1)
-            ], axis=1)
-
-            the_bytes = tf.cast(tf.bitcast(the_ints, tf.uint8), dtype=tf.int32)
-
-            #I haven't switched this to the dynamic partition/stich method used for move scoring because for some reason
-            #I'm unable to use the GPU Kernel for dynamic partition right now, and thus it's very slow.  Long term this will be switched
-            reversed_bytes = tf.reverse(the_bytes, axis=[2])
-
-            properly_arranged_bytes = tf.where(turn_white, the_bytes, reversed_bytes)
-
-            float_bool_masks = tf.constant(
-                [np.unpackbits(num).tolist() for num in np.arange(2 ** 8, dtype=np.uint8)],
-                dtype=tf.float32)
-
-            data = tf.gather(float_bool_masks, properly_arranged_bytes)
-
-            properly_arranged_data = tf.transpose(data, perm=[0, 2, 3, 1])
-
-            estimator_spec = self._call_model_fn({"feature":properly_arranged_data}, None, model_fn_lib.ModeKeys.PREDICT, None)
-            predictions = self._extract_keys(estimator_spec.predictions, predict_keys)[predict_keys]
-
-            squeezed_predictions = tf.squeeze(predictions, axis=1)
-
-            mon_sess = training.MonitoredSession(
-                    session_creator=training.ChiefSessionCreator(
-                        checkpoint_filename_with_path=checkpoint_path,
-                        scaffold=estimator_spec.scaffold,
-                        # config=self._session_config),
-                        config=self._session_config if use_full_gpu else tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.5))),
-                    hooks=hooks)
-
-            def predict(the_kings, the_queens, the_rooks, the_bishops, the_knights, the_pawns, the_castling_rights, the_ep_square, the_occupied_w, the_occupied_b, the_occupied, the_turn):
-                if mon_sess.should_stop():
-                    raise StopIteration
-
-                return mon_sess.run(squeezed_predictions,
-                             {kings : the_kings,
-                              queens : the_queens,
-                              rooks : the_rooks,
-                              bishops : the_bishops,
-                              knights : the_knights,
-                              pawns : the_pawns,
-                              castling_rights : the_castling_rights,
-                              ep_square : the_ep_square,
-                              occupied_w : the_occupied_w,
-                              occupied_b : the_occupied_b,
-                              occupied : the_occupied,
-                              turn_white : the_turn},
-                             options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE),
-                             run_metadata=run_metadata)
-
-
-            def finish():
-                fetched_timeline = timeline.Timeline(run_metadata.step_stats)
-                chrome_trace = fetched_timeline.generate_chrome_trace_format()
-                with open('timeline_eval.json', 'w') as f:
-                    f.write(chrome_trace)
-                mon_sess.close()
-
-            return predict, finish
-
-    def all_white_create_predictor(self,
                          predict_keys=None,
                          hooks=None,
                          checkpoint_path=None,
@@ -165,50 +111,16 @@ class ChEstimator(Estimator):
             ep_bitboards = tf.placeholder(tf.int64, shape=[None], name="ep_bitboards_placeholder")
             occupied_w = tf.placeholder(tf.int64, shape=[None], name="occupied_w_placeholder")
             occupied_b = tf.placeholder(tf.int64, shape=[None], name="occupied_b_placeholder")
-            occupied = tf.placeholder(tf.int64, shape=[None], name="occupied_placeholder")
+            # occupied = tf.placeholder(tf.int64, shape=[None], name="occupied_placeholder")
 
 
-
-            # This could likely be done in a more simple, faster way
-            # broadcast the players occupied to be one tensor, and [kings,queens,...] to another and do one
-            # bitwise and
-            the_ints = tf.stack([
-                tf.bitwise.invert(occupied), #This should be done on CPU
-                ep_bitboards,
-                tf.bitwise.bitwise_and(occupied_w, kings),  # Likely can do without AND operation
-                tf.bitwise.bitwise_and(occupied_w, queens),
-                tf.bitwise.bitwise_and(occupied_w, rooks),
-                tf.bitwise.bitwise_and(occupied_w, bishops),
-                tf.bitwise.bitwise_and(occupied_w, knights),
-                tf.bitwise.bitwise_and(occupied_w, pawns),
-                tf.bitwise.bitwise_and(occupied_w, castling_rights),
-                # Very likely should do this differently (to avoid 8 indices in tf.gather and instead use 1)
-                tf.bitwise.bitwise_and(occupied_b, kings),  # Likely can do without AND operation
-                tf.bitwise.bitwise_and(occupied_b, queens),
-                tf.bitwise.bitwise_and(occupied_b, rooks),
-                tf.bitwise.bitwise_and(occupied_b, bishops),
-                tf.bitwise.bitwise_and(occupied_b, knights),
-                tf.bitwise.bitwise_and(occupied_b, pawns),
-                tf.bitwise.bitwise_and(occupied_b, castling_rights),
-                # Very likely should do this differently (to avoid 8 indices in tf.gather and instead use 1)
-            ], axis=1)
-
-            the_bytes = tf.cast(tf.bitcast(the_ints, tf.uint8), dtype=tf.int32)
-
-
-            float_bool_masks = tf.constant(
-                [np.unpackbits(num).tolist() for num in np.arange(2 ** 8, dtype=np.uint8)],
-                dtype=tf.float32)
-
-            data = tf.gather(float_bool_masks, the_bytes)
-
-            properly_arranged_data = tf.transpose(data, perm=[0, 2, 3, 1])
+            properly_arranged_data = get_board_data(kings, queens, rooks, bishops, knights, pawns, castling_rights, ep_bitboards, occupied_w, occupied_b)#, occupied)
 
             estimator_spec = self._call_model_fn({"feature": properly_arranged_data}, None,
                                                  model_fn_lib.ModeKeys.PREDICT, None)
             predictions = self._extract_keys(estimator_spec.predictions, predict_keys)[predict_keys]
 
-            squeezed_predictions = tf.squeeze(predictions, axis=1)#This needs to be removed long term
+            squeezed_predictions = tf.squeeze(predictions, axis=1)
 
             mon_sess = training.MonitoredSession(
                 session_creator=training.ChiefSessionCreator(
@@ -216,10 +128,10 @@ class ChEstimator(Estimator):
                     scaffold=estimator_spec.scaffold,
                     # config=self._session_config),
                     config=self._session_config if use_full_gpu else tf.ConfigProto(
-                        gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.45))),
+                        gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.4))),
                 hooks=hooks)
 
-            def new_predict(bb_array):
+            def predictor(bb_array):
                 if mon_sess.should_stop():
                     raise StopIteration
 
@@ -234,9 +146,10 @@ class ChEstimator(Estimator):
                                      ep_bitboards: bb_array[7],
                                      occupied_w: bb_array[8],
                                      occupied_b: bb_array[9],
-                                     occupied: bb_array[10]},)
-                                    # options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE),
-                                    # run_metadata=run_metadata)
+                                     })#occupied: bb_array[10]}, )
+                # options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE),
+                # run_metadata=run_metadata)
+
 
 
             def finish():
@@ -246,20 +159,22 @@ class ChEstimator(Estimator):
                     f.write(chrome_trace)
                 mon_sess.close()
 
-            return new_predict, finish
+            return predictor, finish
 
 
 
 
 class MoveChEstimator(Estimator):
 
-    def create_predictor(self,
-                predict_keys=None,
-                hooks=None,
-                checkpoint_path=None):
+
+    def create_move_predictor(self,
+                              predict_keys=None,
+                              hooks=None,
+                              checkpoint_path=None):
 
         run_metadata = tf.RunMetadata()
         hooks = _check_hooks_type(hooks)
+
         # Check that model has been trained.
         if not checkpoint_path:
             checkpoint_path = saver.latest_checkpoint(self._model_dir)
@@ -274,67 +189,13 @@ class MoveChEstimator(Estimator):
         knights = tf.placeholder(tf.int64, shape=[None], name="knights_placeholder")
         pawns = tf.placeholder(tf.int64, shape=[None], name="pawns_placeholder")
         castling_rights = tf.placeholder(tf.int64, shape=[None], name="castling_rights_placeholder")
-        ep_square = tf.placeholder(tf.int32, shape=[None], name="ep_square_placeholder")  # NEED TO MAKE SURE THIS DOESN'T CONVERT SOME uint8 NUMBERS TO NEGATIVE int32 NUMBERS
+        ep_bitboards = tf.placeholder(tf.int64, shape=[None],name="ep_bitboards_placeholder")
         occupied_w = tf.placeholder(tf.int64, shape=[None], name="occupied_w_placeholder")
         occupied_b = tf.placeholder(tf.int64, shape=[None], name="occupied_b_placeholder")
-        occupied = tf.placeholder(tf.int64, shape=[None], name="occupied_placeholder")
-        turn_white = tf.placeholder(tf.bool, shape=[None], name="turn_placeholder")
+        # occupied = tf.placeholder(tf.int64, shape=[None], name="occupied_placeholder")
         moves = tf.placeholder(tf.int32, shape=[None, 2], name="moves_placeholder")
 
-        # This is overlycomplicated in regards to typing, but doesn't effect runtime speed
-        bb_squares = tf.constant(np.array([np.uint64(1 << sq) for sq in range(64)] + [0 for _ in range(64, 256)],
-                                          dtype=np.uint64).astype(np.int64), tf.int64)
-
-        ep_bitboards = tf.gather(bb_squares, ep_square)
-
-        # first_players_occupied = tf.where(turn_white, occupied_b,occupied_w)  # THIS IS PURPOSELY FLIPPED!!!!!!!!!!!!!
-        first_players_occupied = tf.where(turn_white, occupied_w,occupied_b)
-        # second_players_occupied = tf.where(turn_white,occupied_w,occupied_b)#THIS IS PURPOSELY FLIPPED!!!!!!!!!!!!!!!!
-        second_players_occupied = tf.where(turn_white, occupied_b,occupied_w)
-
-        # This could likely be done using much less operations
-        the_ints = tf.stack([
-            tf.bitwise.invert(occupied),
-            ep_bitboards,
-            tf.bitwise.bitwise_and(first_players_occupied, kings),  # Can do without AND operation
-            tf.bitwise.bitwise_and(first_players_occupied, queens),
-            tf.bitwise.bitwise_and(first_players_occupied, rooks),
-            tf.bitwise.bitwise_and(first_players_occupied, bishops),
-            tf.bitwise.bitwise_and(first_players_occupied, knights),
-            tf.bitwise.bitwise_and(first_players_occupied, pawns),
-            tf.bitwise.bitwise_and(first_players_occupied, castling_rights),# Very likely should do this differently (to avoid 8 indices in tf.gather and instead use 1)
-            tf.bitwise.bitwise_and(second_players_occupied, kings),  # Can do without AND operation
-            tf.bitwise.bitwise_and(second_players_occupied, queens),
-            tf.bitwise.bitwise_and(second_players_occupied, rooks),
-            tf.bitwise.bitwise_and(second_players_occupied, bishops),
-            tf.bitwise.bitwise_and(second_players_occupied, knights),
-            tf.bitwise.bitwise_and(second_players_occupied, pawns),
-            tf.bitwise.bitwise_and(second_players_occupied, castling_rights),# Very likely should do this differently (to avoid 8 indices in tf.gather and instead use 1)
-        ], axis=1)
-
-        the_bytes = tf.cast(tf.bitcast(the_ints, tf.uint8), dtype=tf.int32)
-
-        int_turn_white = tf.cast(turn_white, tf.int32)
-
-        to_reverse, to_not_reverse = tf.dynamic_partition(the_bytes, int_turn_white, 2)
-
-        reversed_bytes = tf.reverse(to_reverse, axis=[2])
-
-        bytes_shape = tf.shape(the_bytes)
-
-        indices_to_reassemble = tf.dynamic_partition(tf.range(bytes_shape[0]), int_turn_white, 2)
-
-
-        properly_arranged_bytes = tf.dynamic_stitch(indices_to_reassemble, [reversed_bytes, to_not_reverse])
-
-        float_bool_masks = tf.constant(
-            [np.unpackbits(num).tolist() for num in np.arange(2 ** 8, dtype=np.uint8)],
-            dtype=tf.float32)
-
-        data = tf.gather(float_bool_masks, properly_arranged_bytes)
-
-        properly_arranged_data = tf.transpose(data, perm=[0, 2, 3, 1])
-
+        properly_arranged_data = get_board_data(kings,queens,rooks,bishops,knights,pawns,castling_rights,ep_bitboards,occupied_w,occupied_b)#,occupied)
 
         estimator_spec = self._call_model_fn({"data":properly_arranged_data}, None, model_fn_lib.ModeKeys.PREDICT, None)
 
@@ -351,118 +212,10 @@ class MoveChEstimator(Estimator):
                     config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.5))),
                 hooks=hooks)
 
-        def predict(the_kings, the_queens, the_rooks, the_bishops, the_knights, the_pawns, the_castling_rights, the_ep_square, the_occupied_w, the_occupied_b, the_occupied, the_turn, the_moves):
+        def predictor(bb_array, the_moves):
             if mon_sess.should_stop():
                 raise StopIteration
 
-            return mon_sess.run(legal_move_scores,
-                         {kings : the_kings,
-                          queens : the_queens,
-                          rooks : the_rooks,
-                          bishops : the_bishops,
-                          knights : the_knights,
-                          pawns : the_pawns,
-                          castling_rights : the_castling_rights,
-                          ep_square : the_ep_square,
-                          occupied_w : the_occupied_w,
-                          occupied_b : the_occupied_b,
-                          occupied : the_occupied,
-                          turn_white : the_turn,
-                          moves : the_moves},
-                         options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE),
-                         run_metadata=run_metadata)
-
-
-        def finish():
-            fetched_timeline = timeline.Timeline(run_metadata.step_stats)
-            chrome_trace = fetched_timeline.generate_chrome_trace_format()
-
-            with open('timeline_move_scoring.json', 'w') as f:
-                f.write(chrome_trace)
-
-            mon_sess.close()
-
-        return predict, finish
-
-
-    def white_move_create_predictor(self,
-                predict_keys=None,
-                hooks=None,
-                checkpoint_path=None):
-
-        run_metadata = tf.RunMetadata()
-        hooks = _check_hooks_type(hooks)
-
-        # Check that model has been trained.
-        if not checkpoint_path:
-            checkpoint_path = saver.latest_checkpoint(self._model_dir)
-        if not checkpoint_path:
-            raise ValueError('Could not find trained model in model_dir: {}.'.format(
-                self._model_dir))
-
-        kings = tf.placeholder(tf.int64, shape=[None], name="kings_placeholder")
-        queens = tf.placeholder(tf.int64, shape=[None], name="queens_placeholder")
-        rooks = tf.placeholder(tf.int64, shape=[None], name="rooks_placeholder")
-        bishops = tf.placeholder(tf.int64, shape=[None], name="bishops_placeholder")
-        knights = tf.placeholder(tf.int64, shape=[None], name="knights_placeholder")
-        pawns = tf.placeholder(tf.int64, shape=[None], name="pawns_placeholder")
-        castling_rights = tf.placeholder(tf.int64, shape=[None], name="castling_rights_placeholder")
-        ep_bitboards = tf.placeholder(tf.int64, shape=[None],name="ep_bitboards_placeholder")  # Should double check this isn't interpreting uint8 values as negative int32 values
-        occupied_w = tf.placeholder(tf.int64, shape=[None], name="occupied_w_placeholder")
-        occupied_b = tf.placeholder(tf.int64, shape=[None], name="occupied_b_placeholder")
-        occupied = tf.placeholder(tf.int64, shape=[None], name="occupied_placeholder")
-        moves = tf.placeholder(tf.int32, shape=[None, 2], name="moves_placeholder")
-
-        # This could likely be done using much less operations
-        the_ints = tf.stack([
-            tf.bitwise.invert(occupied),
-            ep_bitboards,
-            tf.bitwise.bitwise_and(occupied_w, kings),  # Can do without AND operation
-            tf.bitwise.bitwise_and(occupied_w, queens),
-            tf.bitwise.bitwise_and(occupied_w, rooks),
-            tf.bitwise.bitwise_and(occupied_w, bishops),
-            tf.bitwise.bitwise_and(occupied_w, knights),
-            tf.bitwise.bitwise_and(occupied_w, pawns),
-            tf.bitwise.bitwise_and(occupied_w, castling_rights),# Very likely should do this differently (to avoid 8 indices in tf.gather and instead use 1)
-            tf.bitwise.bitwise_and(occupied_b, kings),  # Can do without AND operation
-            tf.bitwise.bitwise_and(occupied_b, queens),
-            tf.bitwise.bitwise_and(occupied_b, rooks),
-            tf.bitwise.bitwise_and(occupied_b, bishops),
-            tf.bitwise.bitwise_and(occupied_b, knights),
-            tf.bitwise.bitwise_and(occupied_b, pawns),
-            tf.bitwise.bitwise_and(occupied_b, castling_rights),# Very likely should do this differently (to avoid 8 indices in tf.gather and instead use 1)
-        ], axis=1)
-
-        the_bytes = tf.cast(tf.bitcast(the_ints, tf.uint8), dtype=tf.int32)
-
-
-        float_bool_masks = tf.constant(
-            [np.unpackbits(num).tolist() for num in np.arange(2 ** 8, dtype=np.uint8)],
-            dtype=tf.float32)
-
-        data = tf.gather(float_bool_masks, the_bytes)
-
-        properly_arranged_data = tf.transpose(data, perm=[0, 2, 3, 1])
-
-
-        estimator_spec = self._call_model_fn({"data":properly_arranged_data}, None, model_fn_lib.ModeKeys.PREDICT, None)
-
-        predictions = self._extract_keys(estimator_spec.predictions, predict_keys)[predict_keys]
-
-        legal_move_scores = tf.gather_nd(predictions, moves)
-
-
-        mon_sess = training.MonitoredSession(
-                session_creator=training.ChiefSessionCreator(
-                    checkpoint_filename_with_path=checkpoint_path,
-                    scaffold=estimator_spec.scaffold,
-                    # config=self._session_config),
-                    config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.45))),
-                hooks=hooks)
-
-        def new_predict(bb_array, the_moves):
-            if mon_sess.should_stop():
-                raise StopIteration
 
             return mon_sess.run(legal_move_scores,
                                 {kings: bb_array[0],
@@ -475,10 +228,12 @@ class MoveChEstimator(Estimator):
                                  ep_bitboards: bb_array[7],
                                  occupied_w: bb_array[8],
                                  occupied_b: bb_array[9],
-                                 occupied: bb_array[10],
-                                moves : the_moves},)
+                                 #occupied: bb_array[10],
+                                moves : the_moves})
                                 # options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE),
                                 # run_metadata=run_metadata)
+
+
 
         def finish():
             fetched_timeline = timeline.Timeline(run_metadata.step_stats)
@@ -489,4 +244,7 @@ class MoveChEstimator(Estimator):
 
             mon_sess.close()
 
-        return new_predict, finish
+        return predictor, finish
+
+
+

@@ -3,12 +3,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from chess import uci
 import random as rand
+import pickle
+from scipy import stats
 
 from numba import float32
 
 from numba_board import *
 
-# from temp_board_eval_client import ANNEvaluator
 from global_open_priority_nodes import PriorityBins
 
 from evaluation_ann import main as evaluation_ann_main
@@ -22,15 +23,32 @@ if __name__ == "__main__":
 
 
 
-
 MIN_FLOAT32_VAL = np.finfo(np.float32).min
 MAX_FLOAT32_VAL = np.finfo(np.float32).max
-FLOAT32_EPS = np.finfo(np.float32).eps
-ALMOST_MIN_FLOAT_32_VAL = MIN_FLOAT32_VAL + FLOAT32_EPS
-ALMOST_MAX_FLOAT_32_VAL = MAX_FLOAT32_VAL - FLOAT32_EPS
+FLOAT32_EPS = 1e30*np.finfo(np.float32).eps   #This is used as a fix to prevent MIN_FLOAT32_VAL + FLOAT32_EPS == MIN_FLOAT32_VAL (or same with max values)
+ALMOST_MIN_FLOAT_32_VAL = MIN_FLOAT32_VAL/10
+ALMOST_MAX_FLOAT_32_VAL = MAX_FLOAT32_VAL/10
+
 
 WIN_RESULT_SCORE = ALMOST_MAX_FLOAT_32_VAL
 LOSS_RESULT_SCORE = ALMOST_MIN_FLOAT_32_VAL
+
+@njit
+def test_constants_are_different_jitted():
+    """
+    Tests that values being used as win and loss scores are not equal to the values decided to be unreachable when
+    with a nopython function.
+    """
+    if MIN_FLOAT32_VAL == ALMOST_MIN_FLOAT_32_VAL:
+        print("MIN FLOAT VALUE IS EQUAL TO ALMOST MIN VALUE IN JIT TEST!")
+
+    if MAX_FLOAT32_VAL == ALMOST_MAX_FLOAT_32_VAL:
+        print("MAX FLOAT VALUE IS EQUAL TO ALMOST MAX VALUE IN JIT TEST!")
+
+test_constants_are_different_jitted()
+
+
+
 TIE_RESULT_SCORE = np.float32(0)
 
 #This value is used for indicating that a given node has/had a legal move in the transposition table that it will/would
@@ -64,7 +82,7 @@ hash_table_numba_dtype = nb.from_dtype(hash_table_numpy_dtype)
 
 
 
-SIZE_EXPONENT_OF_TWO = 20 #This needs to be more precicely picked.
+SIZE_EXPONENT_OF_TWO = 24 #This needs to be picked precicely.
 ONES_IN_RELEVANT_BITS = np.uint64(2**(SIZE_EXPONENT_OF_TWO)-1)
 
 
@@ -251,6 +269,23 @@ def get_empty_hash_table():
         dtype=hash_table_numpy_dtype)
 
 
+def get_empty_hash_table():
+    """
+    Uses global variable SIZE_EXPONENT_OF_TWO for it's size.
+    """
+
+    return np.array(
+        [(np.uint64(0),
+          NO_TT_ENTRY_VALUE,
+          MAX_FLOAT32_VAL,
+          MIN_FLOAT32_VAL,
+          NO_TT_MOVE_VALUE,
+          NO_TT_MOVE_VALUE,
+          NO_TT_MOVE_VALUE) for _ in range(2 ** SIZE_EXPONENT_OF_TWO)],
+        dtype=hash_table_numpy_dtype)
+
+
+
 @njit#(void(hash_table_numba_dtype[:], uint64, uint8, float32, float32))
 def set_tt_node(hash_table, board_hash, depth, upper_bound=MAX_FLOAT32_VAL, lower_bound=MIN_FLOAT32_VAL):
     """
@@ -269,7 +304,11 @@ def set_tt_move(hash_table, tt_index, following_move):
     hash_table[tt_index]["stored_to_square"] = following_move.to_square
     hash_table[tt_index]["stored_promotion"] = following_move.promotion
 
-
+@njit#(void(hash_table_numba_dtype[:], uint64))
+def wipe_tt_move(hash_table, tt_index):
+    hash_table[tt_index]["stored_from_square"] = NO_TT_MOVE_VALUE
+    hash_table[tt_index]["stored_to_square"] = NO_TT_MOVE_VALUE
+    hash_table[tt_index]["stored_promotion"] = NO_TT_MOVE_VALUE
 
 
 @njit#((GameNode.class_type.instance_type, optional(hash_table_numba_dtype[:,:])))
@@ -292,8 +331,8 @@ def terminated_from_tt(game_node, hash_table):
                     game_node.best_value = hash_entry["lower_bound"]
 
                 if hash_entry["upper_bound"] < game_node.separator:  #This may want to be <=
-                    # game_node.best_value = hash_entry["upper_bound"] #I'm not confident about this
-                    game_node.best_value = hash_entry["lower_bound"] #I'm not confident about this
+                    game_node.best_value = hash_entry["upper_bound"] #I'm not confident about this
+                    # game_node.best_value = hash_entry["lower_bound"] #I'm not confident about this
                     return True
     return False
 
@@ -308,36 +347,37 @@ def add_one_board_to_tt(game_node, hash_table):
     TO-DO:
     1) Build/test a better replacement scheme (currently always replacing)
     """
-    node_entry = hash_table[game_node.board_state.cur_hash & ONES_IN_RELEVANT_BITS]
-    if node_entry["depth"] != NO_TT_ENTRY_VALUE:
-        if node_entry["entry_hash"] == game_node.board_state.cur_hash:
-            if node_entry["depth"] == game_node.depth:
-                if game_node.best_value >= game_node.separator:
-                    if game_node.best_value > node_entry["lower_bound"]:
-                        node_entry["lower_bound"] = game_node.best_value
-                elif game_node.best_value < node_entry["upper_bound"]:
-                    node_entry["upper_bound"] = game_node.best_value
-            elif node_entry["depth"] < game_node.depth:
-                #Overwrite the data currently stored in the hash table
-                if game_node.best_value >= game_node.separator:
-                    set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth,upper_bound=MAX_FLOAT32_VAL, lower_bound=game_node.best_value)   ###########THIS IS WRITING THE HASH EVEN THOUGH IT HAS NOT CHANGED########
-                # else:
-                #     set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth,upper_bound=game_node.best_value)
-
-            # Don't change anything if it's depth is less than the depth in the TT
-        else:
-            #Using the always replace scheme for simplicity and easy implementation (likely only for now)
-            # print("A hash table entry exists with a different hash than wanting to be inserted!")
-            if game_node.best_value >= game_node.separator:
-                set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, lower_bound=game_node.best_value)
-            else:
-                set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, upper_bound=game_node.best_value)
-    else:
-
-        if game_node.best_value >= game_node.separator:
-            set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, lower_bound=game_node.best_value)
-        else:
-            set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, upper_bound=game_node.best_value)
+    return
+    # node_entry = hash_table[game_node.board_state.cur_hash & ONES_IN_RELEVANT_BITS]
+    # if node_entry["depth"] != NO_TT_ENTRY_VALUE:
+    #     if node_entry["entry_hash"] == game_node.board_state.cur_hash:
+    #         if node_entry["depth"] == game_node.depth:
+    #             if game_node.best_value >= game_node.separator:
+    #                 if game_node.best_value > node_entry["lower_bound"]:
+    #                     node_entry["lower_bound"] = game_node.best_value
+    #             elif game_node.best_value < node_entry["upper_bound"]:
+    #                 node_entry["upper_bound"] = game_node.best_value
+    #         elif node_entry["depth"] < game_node.depth:
+    #             #Overwrite the data currently stored in the hash table
+    #             if game_node.best_value >= game_node.separator:
+    #                 set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth,upper_bound=MAX_FLOAT32_VAL, lower_bound=game_node.best_value)   ###########THIS IS WRITING THE HASH EVEN THOUGH IT HAS NOT CHANGED########
+    #             # else:
+    #             #     set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth,upper_bound=game_node.best_value)
+    #
+    #         # Don't change anything if it's depth is less than the depth in the TT
+    #     else:
+    #         #Using the always replace scheme for simplicity and easy implementation (likely only for now)
+    #         # print("A hash table entry exists with a different hash than wanting to be inserted!")
+    #         if game_node.best_value >= game_node.separator:
+    #             set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, lower_bound=game_node.best_value)
+    #         else:
+    #             set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, upper_bound=game_node.best_value)
+    # else:
+    #
+    #     if game_node.best_value >= game_node.separator:
+    #         set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, lower_bound=game_node.best_value)
+    #     else:
+    #         set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, upper_bound=game_node.best_value)
 
 
 
@@ -373,6 +413,8 @@ def add_board_and_move_to_tt(game_node, following_move, hash_table):
                 # else:
                 #     set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth,upper_bound=game_node.best_value)
 
+                # set_tt_move(hash_table, tt_index, following_move)
+
             #Don't change anything if it's depth is less than the depth in the TT
         else:
             #Using the always replace scheme for simplicity and easy implementation (likely only for now)
@@ -381,6 +423,7 @@ def add_board_and_move_to_tt(game_node, following_move, hash_table):
                 set_tt_move(hash_table, tt_index, following_move)
             else:
                 set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, upper_bound=game_node.best_value)
+                wipe_tt_move(hash_table, tt_index)
     else:
         if game_node.best_value >= game_node.separator:
             set_tt_node(hash_table, game_node.board_state.cur_hash, game_node.depth, lower_bound=game_node.best_value)
@@ -416,25 +459,6 @@ def zero_window_update_node_from_value(node, value, following_move, hash_table):
                 if not node.parent is None:
                     zero_window_update_node_from_value(node.parent, -node.best_value, node.prev_move, hash_table)
 
-
-
-
-
-# @njit
-# def simple_board_state_evaluation_for_white(board_state):
-#     score = np.float32(0)
-#     for piece_val, piece_bb in zip(np.array([.1, .3, .45, .6, .9], dtype=np.float32), [board_state.pawns,board_state.knights , board_state.bishops, board_state.rooks, board_state.queens]):
-#         score += piece_val * (np.float32(popcount(piece_bb & board_state.occupied_w)) - np.float32(popcount(piece_bb & board_state.occupied_b)))
-#
-#     return score
-
-
-# @njit(float32(GameNode.class_type.instance_type))
-# def evaluate_game_node(game_node):
-#     """
-#     A super simple evaluation function for a game_node.
-#     """
-#     return simple_board_state_evaluation_for_white(game_node.board_state)
 
 
 
@@ -478,11 +502,12 @@ def create_child_array(node_array):
     array_to_return = np.empty_like(node_array)
     for j in range(len(node_array)):
         array_to_return[j] = spawn_child_from_node(node_array[j])
+
     return array_to_return
 
 
 
-
+@njit
 def for_all_white_jitclass_to_array_for_ann(board):
     if board.turn == TURN_WHITE:
         return [board.kings, board.queens, board.rooks, board.bishops, board.knights, board.pawns,
@@ -527,6 +552,8 @@ def all_white_start_node_evaluations(node_array):
     return t
 
 
+
+
 @njit
 def jitted_set_move_scores_and_next_move(node, scores):
     node.unexplored_move_scores =  scores
@@ -552,8 +579,13 @@ def start_move_scoring(node_array):
         results = MOVE_PREDICTOR(ann_inputs,
                                  for_result_getter)
 
-        for node, scores in  zip(node_array, np.split(results,np.cumsum(size_array))):
-            jitted_set_move_scores_and_next_move(node, scores)
+        # for node, scores in  zip(node_array, np.split(results,np.cumsum(size_array))):
+        #     jitted_set_move_scores_and_next_move(node, scores)
+
+        cum_sum = np.cumsum(size_array)
+
+        for node, start_index, end_index in  zip(node_array, cum_sum - size_array ,cum_sum):
+            jitted_set_move_scores_and_next_move(node, results[start_index:end_index])
 
 
     t  = threading.Thread(target=set_move_scores)
@@ -561,7 +593,7 @@ def start_move_scoring(node_array):
     return t
 
 
-@njit(boolean(BoardState.class_type.instance_type))
+@njit#(boolean(BoardState.class_type.instance_type))
 def has_insufficient_material(board_state):
     # Enough material to mate.
     if board_state.pawns or board_state.rooks or board_state.queens:
@@ -582,61 +614,6 @@ def has_insufficient_material(board_state):
         return True
     else:
         return False
-
-
-# @njit(nogil=True)#(boolean(GameNode.class_type.instance_type, optional(hash_table_numba_dtype[:,:])),nogil=True)
-# def check_and_update_valid_moves(game_node, hash_table):
-#     """
-#     CURRENTLY CHECKING:
-#     1) Draw by the 50-move rule
-#     2) Draw by insufficient material
-#     3) Draw by stalemate
-#     4) Win/loss by checkmate
-#     5) Termination by information contained in the TT
-#     """
-#
-#     if game_node.board_state.halfmove_clock >= 50:
-#         game_node.best_value = TIE_RESULT_SCORE
-#         return True
-#
-#     if has_insufficient_material(game_node.board_state):
-#         game_node.best_value = TIE_RESULT_SCORE
-#         return True
-#
-#     if not hash_table is None:
-#         if terminated_from_tt(game_node, hash_table):
-#             return True
-#
-#     legal_move_struct_array = create_legal_move_struct(game_node.board_state, BB_ALL, BB_ALL)
-#     if not legal_move_struct_array is None:
-#         game_node.unexplored_moves = legal_move_struct_array
-#         game_node.children_left = len(legal_move_struct_array)
-#     else:
-#         if is_in_check(game_node.board_state):
-#             game_node.best_value = LOSS_RESULT_SCORE
-#         else:
-#             game_node.best_value = TIE_RESULT_SCORE
-#         return True
-#     return False
-#
-#
-# def get_indices_of_terminating_children(node_array, hash_table):
-#     """
-#     Currently using ThreadPoolExecutor to do this on multiple cores, after using Numba to release the GIL.
-#     This will soon be completely vectorized.
-#     """
-#     MAX_WORKERS = 6 #This number is picked arbitrarily, setting this equal to 12 (how many cores I have available) does not improve speed
-#
-#     def loop_wrapper(inner_node_array):
-#         terminating = np.zeros(shape=len(inner_node_array), dtype=np.bool_)
-#         for j in range(len(inner_node_array)):
-#             terminating[j] = check_and_update_valid_moves(inner_node_array[j], hash_table)
-#         return terminating
-#
-#     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-#         return np.concatenate(list(executor.map(loop_wrapper,np.array_split(node_array, MAX_WORKERS))))
-
-
 
 
 
@@ -742,23 +719,16 @@ def depth_zero_should_terminate_array(game_nodes, hash_table):
     return np.array(list(map(lambda x: depth_zero_should_terminate(x, hash_table), game_nodes)), dtype=np.bool_)
 
 
-# @jit(void(GameNode.class_type.instance_type), nopython=True)
-# def set_move_scores_to_random_values(node):
-#     node.unexplored_move_scores = np.random.randn(len(node.unexplored_moves)).astype(np.float32)
 
+def testing_update_tree_from_terminating_nodes(node_array, hash_table):
+    values_relative_to_root = np.array([node.best_value if node.board_state.turn else - node.best_value for node in node_array])
+    sorted_node_array = node_array[np.argsort(values_relative_to_root)]
+    for j in range(len(sorted_node_array)):
 
-# @jit(void(GameNode.class_type.instance_type), nopython=True)
-# def set_move_scores_to_inverse_depth_multiplied_by_randoms(node):
-#     scores = 1/(np.float32(node.depth)+1)*np.random.rand(len(node.unexplored_moves))
-#     node.unexplored_move_scores = scores.astype(dtype=np.float32)
+        #Since no node being given to this function will have terminated from a child, none of them will have moves to store
+        # add_one_board_to_tt(sorted_node_array[j], hash_table)
 
-
-# def set_up_scored_move_generation(node_array):
-#     for j in range(len(node_array)):
-#         # set_move_scores_to_random_values(node_array[j])
-#         set_move_scores_to_inverse_depth_multiplied_by_randoms(node_array[j])
-#
-#         set_up_next_best_move(node_array[j])
+        zero_window_update_node_from_value(sorted_node_array[j].parent, - sorted_node_array[j].best_value, sorted_node_array[j].prev_move, hash_table)
 
 
 def update_tree_from_terminating_nodes(node_array, hash_table):
@@ -856,7 +826,8 @@ def do_iteration(batch, hash_table, testing=False):
         evaluation_thread.join()
 
 
-    update_tree_from_terminating_nodes(
+    # update_tree_from_terminating_nodes(
+    testing_update_tree_from_terminating_nodes(
         np.concatenate((
             depth_zero_children,
             depth_not_zero_children[non_zero_depth_child_term_indices])),
@@ -876,7 +847,7 @@ def do_iteration(batch, hash_table, testing=False):
 
 
 def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, hash_table=None, print_info=False, full_testing=False):
-    open_node_holder = PriorityBins(bins_to_use, max_batch_size, num_workers_to_use=12, search_extra_ratio=1.2, testing=full_testing) #This will likely be put outside of this function long term
+    open_node_holder = PriorityBins(bins_to_use, max_batch_size, testing=full_testing)
 
     if hash_table is None:
         hash_table = get_empty_hash_table()
@@ -917,22 +888,11 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
         if print_info or full_testing:
             print("Iteration", iteration_counter, "completed producing", len(to_insert), "nodes to insert.")
 
-        try_num_getting_batch = 1
-        while True:
-        #     print(len(open_node_holder))
-            next_batch = open_node_holder.insert_batch_and_get_next_batch(to_insert, custom_max_nodes=max_batch_size*try_num_getting_batch)
 
-            to_insert = np.array([])
-            if len(next_batch) != 0 or (len(next_batch) == 0 and len(open_node_holder) == 0):
-                break
-            else:
-                try_num_getting_batch += 1
-
-
-        # if len(to_insert) != 0 or not open_node_holder.is_empty():
-        #     next_batch = open_node_holder.new_insert_batch_and_get_next_batch(to_insert)
-        # else:
-        #     next_batch = []
+        if len(to_insert) != 0 or not open_node_holder.is_empty():
+            next_batch = open_node_holder.insert_nodes_and_get_next_batch(to_insert)
+        else:
+            break
 
         if print_info or full_testing:
             iteration_counter += 1
@@ -958,54 +918,20 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
     return root_game_node.best_value
 
 
-# @njit(float32(GameNode.class_type.instance_type, float32, float32, nb.int8))
-# def basic_do_alpha_beta(game_node, alpha, beta, color):
-#     """
-#     A simple alpha-beta algorithm to test my code.
-#
-#     NOTES:
-#     1) This is PAINFULLY slow
-#     """
-#     has_move = False
-#     for _ in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
-#         has_move = True
-#         break
-#
-#     if not has_move:
-#         if is_in_check(game_node.board_state):
-#             if color == 1:
-#                 return MAX_FLOAT32_VAL
-#             return MIN_FLOAT32_VAL
-#         return 0
-#
-#     if game_node.depth == 0:
-#         return color *  PREDICTOR([np.int64(np.uint64(game_node.board_state.kings))],
-#                                   [np.int64(np.uint64(game_node.board_state.queens))],
-#                                   [np.int64(np.uint64(game_node.board_state.rooks))],
-#                                   [np.int64(np.uint64(game_node.board_state.bishops))],
-#                                   [np.int64(np.uint64(game_node.board_state.knights))],
-#                                   [np.int64(np.uint64(game_node.board_state.pawns))],
-#                                   [np.int64(np.uint64(game_node.board_state.castling_rights))],
-#                                   [np.int64(np.uint64(game_node.board_state.ep_square)) if not game_node.board_state.ep_square is None else 255],
-#                                   [np.int64(np.uint64(game_node.board_state.occupied_w))],
-#                                   [np.int64(np.uint64(game_node.board_state.occupied_b))],
-#                                   [np.int64(np.uint64(game_node.board_state.occupied))],
-#                                   [game_node.board_state.turn])
-#
-#
-#
-#         # start_node_evaluations(np.array([game_node])).join()
-#         # return color *  game_node.best_value
-#
-#     best_value = MIN_FLOAT32_VAL
-#     for move in generate_legal_moves(game_node.board_state, BB_ALL, BB_ALL):
-#         v = - basic_do_alpha_beta(zero_window_create_child_from_move(game_node, move), -beta, -alpha, -color)
-#         best_value = max(best_value, v)
-#         alpha = max(alpha, v)
-#         if alpha >= beta:
-#             break
-#
-#     return best_value
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1021,9 +947,11 @@ def set_up_root_search_tree_node(fen, depth, seperator):
     return root_node
 
 
-def mtd_f(fen, depth, first_guess, min_window_to_confirm, guess_increment=.5, search_batch_size=1000, bins_to_use=None, hash_table=None, print_info=False):
+def mtd_f(fen, depth, first_guess, min_window_to_confirm, guess_increment=.5, search_batch_size=1000, bins_to_use=None, hash_table=None, print_info=True):
     if hash_table is None:
+        hash_table_start_time = time.time()
         hash_table = get_empty_hash_table()
+        print("hash table created in time", time.time() - hash_table_start_time)
 
     if bins_to_use is None:
         bins_to_use = np.arange(15, -15, -.025)
@@ -1046,8 +974,10 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, guess_increment=.5, se
             beta = lower_bound + (upper_bound - lower_bound) / 2
 
         #This would ideally share the same tree, but updated for the new seperation value
-        cur_root_node = set_up_root_search_tree_node(fen, depth, beta - FLOAT32_EPS)
+        cur_root_node = set_up_root_search_tree_node(fen, depth, beta - np.finfo(np.float32).eps)#FLOAT32_EPS)
 
+        if print_info:
+            print("Current sepearator:", beta- np.finfo(np.float32).eps)
 
         cur_guess = do_alpha_beta_search_with_bins(cur_root_node, search_batch_size, bins_to_use, hash_table=hash_table, print_info=depth==5)
         if cur_guess < beta:
@@ -1061,11 +991,17 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, guess_increment=.5, se
         counter += 1
 
     root_tt_entry = hash_table[np.uint64(cur_root_node.board_state.cur_hash) & ONES_IN_RELEVANT_BITS]
-    tt_move = chess.Move(root_tt_entry["stored_from_square"],
-                   root_tt_entry["stored_to_square"],
-                   root_tt_entry["stored_promotion"])
+    try:
+        print(root_tt_entry["stored_from_square"])
+        tt_move = chess.Move(root_tt_entry["stored_from_square"],
+                       root_tt_entry["stored_to_square"],
+                       root_tt_entry["stored_promotion"])
+    except IndexError as E:
+        tt_move = None
 
     return cur_guess, tt_move, hash_table
+
+
 
 
 
@@ -1090,6 +1026,8 @@ def iterative_deepening_mtd_f(fen, depths_to_search, batch_sizes, min_windows_to
                                                  search_batch_size=batch_size,
                                                  bins_to_use=bins,
                                                  hash_table=hash_table)
+    return first_guess, tt_move, hash_table
+
 
     return first_guess
 
@@ -1099,7 +1037,6 @@ def iterative_deepening_mtd_f(fen, depths_to_search, batch_sizes, min_windows_to
 
 
 if __name__ == "__main__":
-    print("Done compiling and starting run.\n")
 
     # starting_time = time.time()
     # perft_results = jitted_perft_test(create_board_state_from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"), 4)
@@ -1112,11 +1049,12 @@ if __name__ == "__main__":
     print("SPERATING VALUE:", SEPERATING_VALUE)
     BINS_TO_USE = np.arange(20, -20, -.025)#np.arange(15, -15, -.01)
 
-    start_time = time.time()
-    print(mtd_f(FEN_TO_TEST,DEPTH_OF_SEARCH,0,.001, search_batch_size=10000)[0],"found by mtd(f)", time.time() - start_time)
 
-    starting_time = time.time()
-    print(mtd_f(FEN_TO_TEST, DEPTH_OF_SEARCH, SEPERATING_VALUE, .01), "found by mtd(f) in time", time.time()-starting_time)
+
+    print(chess.Board(FEN_TO_TEST))
+    for _ in range(3):
+        start_time = time.time()
+        print(mtd_f(FEN_TO_TEST,DEPTH_OF_SEARCH,0,.001, search_batch_size=5000, print_info=True)[1],"found by mtd(f)", time.time() - start_time)
 
 
     starting_time = time.time()

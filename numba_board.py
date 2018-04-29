@@ -146,12 +146,8 @@ class BoardState:
 
         self.cur_hash = cur_hash
 
-@njit
-def get_info_for_tensorflow(board_state):
-    return np.array([board_state.occupied_w, board_state.occupied_b, board_state.kings, board_state.queens,
-                     board_state.rooks, board_state.bishops, board_state.knights, board_state.pawns,
-                     board_state.castling_rights,
-                     np.int64(0 if board_state.ep_square is None else board_state.ep_square)], dtype=np.int64)
+
+
 
 
 @njit(BoardState.class_type.instance_type(BoardState.class_type.instance_type))
@@ -292,7 +288,7 @@ def vectorized_flip_vertically(bb):
     return bb
 
 
-# THIS IS VERY SLOW AND A TEMPORARY IMPLEMENTATION
+# THIS IS VERY SLOW AND A TEMPORARY IMPLEMENTATION (feel free to replace it!)
 @njit(uint8(uint64))
 def msb(n):
     r = 0
@@ -303,7 +299,7 @@ def msb(n):
     return r
 
 
-# THIS SEEMS VERY SLOW AND A TEMPORARY IMPLEMENTATION
+# THIS SEEMS VERY SLOW AND A TEMPORARY IMPLEMENTATION (feel free to replace it!)
 @njit
 def scan_reversed(bb):
     for index in range(BB_SQUARES.shape[0]):
@@ -329,7 +325,7 @@ def popcount(n):
 
 
 @vectorize([uint8(uint64)], nopython=True)
-def popcount_vectorized(n):
+def vectorized_popcount(n):
     n = n - (n >> 1) & k1
     n = (n & k2) + ((n >> 2) & k2)
     n = (n + (n >> 4)) & k4
@@ -349,30 +345,26 @@ def popcount_vectorized(n):
 #     return np.sum(np.unpackbits(np.frombuffer(n, dtype=np.uint8)))
 
 
+
 @njit(uint8(uint8))
 def square_file(square):
     return square & 7
-
 
 @njit(uint8(uint8))
 def square_rank(square):
     return square >> 3
 
-
 @njit(uint64(uint64))
 def shift_down(b):
     return b >> 8
-
 
 @njit(uint64(uint64))
 def shift_up(b):
     return b << 8
 
-
 @njit(uint64(uint64))
 def shift_right(b):
     return b << 1
-
 
 @njit(uint64(uint64))
 def shift_left(b):
@@ -388,8 +380,6 @@ def any(iterable):
 
 
 
-
-
 @njit(Move.class_type.instance_type(uint8, uint8))
 def create_move(from_square, to_square):
     """
@@ -398,8 +388,7 @@ def create_move(from_square, to_square):
     return Move(from_square, to_square, np.uint8(0))
 
 
-
-@njit(uint8(BoardState.class_type.instance_type, uint8))
+@njit#(uint8(BoardState.class_type.instance_type, uint8))
 def piece_type_at(board_state, square):
     """
     Gets the piece type at the given square.
@@ -422,8 +411,7 @@ def piece_type_at(board_state, square):
         return KING
 
 
-
-@njit(uint8(BoardState.class_type.instance_type, uint8))
+@njit#(uint8(BoardState.class_type.instance_type, uint8))
 def _remove_piece_at(board_state, square):
     piece_type = piece_type_at(board_state, square)
     mask = BB_SQUARES[square]
@@ -451,7 +439,7 @@ def _remove_piece_at(board_state, square):
 
 
 
-@njit(void(BoardState.class_type.instance_type, uint8, uint8, boolean))
+@njit#(void(BoardState.class_type.instance_type, uint8, uint8, boolean))
 def _set_piece_at(board_state, square, piece_type, color):
     _remove_piece_at(board_state, square)
 
@@ -502,50 +490,6 @@ def create_board_state_from_fen(fen):
                       None if temp_board.ep_square is None else np.uint8(temp_board.ep_square),
                       np.uint8(temp_board.halfmove_clock),
                       np.uint64(zobrist_hash(temp_board)))
-
-
-
-def database_board_representation(board_state):
-    """
-    This method returns a string representation of the board for use during database generation.
-    """
-    builder = ["" for _ in range(64)]
-    if board_state.ep_square is None:
-        ep_square = -1
-    else:
-        ep_square = board_state.ep_square
-
-    castling_rooks = []
-    if board_state.castling_rights != 0:
-        if board_state.castling_rights & chess.BB_A1:
-            castling_rooks.append(chess.A1)
-        if board_state.castling_rights & chess.BB_H1:
-            castling_rooks.append(chess.H1)
-        if board_state.castling_rights & chess.BB_A8:
-            castling_rooks.append(chess.A8)
-        if board_state.castling_rights & chess.BB_H8:
-            castling_rooks.append(chess.H8)
-
-    for square in chess.SQUARES_180:
-        piece = piece_at(board_state, square)
-
-        if not piece:
-            if ep_square == square:
-                builder[square] = "1"
-            else:
-                builder[square] = "0"
-
-        else:
-            if square in castling_rooks:
-                if piece.color == chess.WHITE:
-                    builder[square] = 'C'
-                else:
-                    builder[square] = 'c'
-            else:
-                builder[square] = piece.symbol()
-
-    return "".join(builder)
-
 
 
 
@@ -782,7 +726,8 @@ def push_with_hash_update(board_state, move):
             if (shift_left(ep_mask) | shift_right(ep_mask)) & board_state.pawns & board_state.occupied_b:
                 board_state.cur_hash ^= RANDOM_ARRAY[772 + square_file(temp_ep_square)]
 
-    return board_state.cur_hash ^ RANDOM_ARRAY[780]
+    board_state.cur_hash ^= RANDOM_ARRAY[780]
+    return board_state.cur_hash
 
 
 @njit(BoardState.class_type.instance_type(BoardState.class_type.instance_type, Move.class_type.instance_type))
@@ -794,7 +739,7 @@ def copy_push(board_state, move):
 
 # WHY AM I TAKING OCCUPIED IN AS A PARAM INSTEAD OF JUST DOING IT ON board_state.occupied####################
 # SHOULD VERY LIKELY DO THIS NOT ALL AT ONCE, INSTEAD ONE AT A TIME BECAUSE IF ONE ATTACKER EXISTS THEN IT'S CHECK (for seeing if board is in check)
-@njit(uint64(BoardState.class_type.instance_type, boolean, uint8, uint64))
+@njit#(uint64(BoardState.class_type.instance_type, boolean, uint8, uint64))
 def _attackers_mask(board_state, color, square, occupied):
     queens_and_rooks = board_state.queens | board_state.rooks
     queens_and_bishops = board_state.queens | board_state.bishops
@@ -817,9 +762,7 @@ def _attackers_mask(board_state, color, square, occupied):
 
 
 
-
-
-@njit(uint64(BoardState.class_type.instance_type, uint8))
+@njit#(uint64(BoardState.class_type.instance_type, uint8))
 def attacks_mask(board_state, square):
     bb_square = BB_SQUARES[square]
 
@@ -873,7 +816,7 @@ def generate_pseudo_legal_ep(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
 
 
 
-@njit(uint64(BoardState.class_type.instance_type, uint8))
+@njit#(uint64(BoardState.class_type.instance_type, uint8))
 def _slider_blockers(board_state, king):
     ###################################################### THESE CAN GO IN THE BELOW snipers INITIALIZATION
     rooks_and_queens = board_state.rooks | board_state.queens
@@ -925,7 +868,7 @@ def is_castling(board_state, move):
     return False
 
 
-@njit(boolean(BoardState.class_type.instance_type, uint64, uint64))
+@njit#(boolean(BoardState.class_type.instance_type, uint64, uint64))
 def _attacked_for_king(board_state, path, occupied):
     for sq in scan_reversed(path):
         if _attackers_mask(board_state, not board_state.turn, sq, occupied):
@@ -933,7 +876,7 @@ def _attacked_for_king(board_state, path, occupied):
     return False
 
 
-@njit(uint64(BoardState.class_type.instance_type, uint64, uint8))
+@njit#(uint64(BoardState.class_type.instance_type, uint64, uint8))
 def _castling_uncovers_rank_attack(board_state, rook_bb, king_to):
     """
     Test the special case where we castle and our rook shielded us from
@@ -947,7 +890,7 @@ def _castling_uncovers_rank_attack(board_state, rook_bb, king_to):
     return RANK_ATTACK_ARRAY[king_to][khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, rank_pieces, 0)] & sliders
 
 
-@njit(Move.class_type.instance_type(BoardState.class_type.instance_type, uint8, uint8))
+@njit#(Move.class_type.instance_type(BoardState.class_type.instance_type, uint8, uint8))
 def _from_chess960(board_state, from_square, to_square):  # , promotion=None):
     # if not chess960 and drop is None:
     if from_square == E1 and board_state.kings & BB_E1:
@@ -966,7 +909,7 @@ def _from_chess960(board_state, from_square, to_square):  # , promotion=None):
     return create_move(from_square, to_square)
 
 
-@njit((BoardState.class_type.instance_type, uint64, uint64))
+@njit#((BoardState.class_type.instance_type, uint64, uint64))
 def generate_castling_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
     if board_state.turn:
         backrank = BB_RANK_1 if board_state.turn == TURN_WHITE else BB_RANK_8
@@ -1012,7 +955,6 @@ def generate_castling_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
             yield _from_chess960(board_state, msb(king), candidate)
 
     return
-
 
 
 @njit((BoardState.class_type.instance_type, uint64, uint64))
@@ -1109,9 +1051,6 @@ def generate_pseudo_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
             yield move
 
     return
-
-
-
 
 
 @njit((BoardState.class_type.instance_type, uint8, uint64, uint64, uint64))
@@ -1261,6 +1200,7 @@ def _is_safe(board_state, king, blockers, move):
                 BB_RAYS[move.from_square][move.to_square] & BB_SQUARES[king])
 
 
+
 @njit((BoardState.class_type.instance_type, uint64, uint64), nogil=True)
 def generate_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
 
@@ -1368,7 +1308,7 @@ def is_into_check(board_state, move):
     else:
         king = msb(board_state.occupied_b & board_state.kings)
 
-    if king is None:
+    if king is None:############################I THINK I CAN REMOVE THIS###################3
         return False
 
     checkers = _attackers_mask(board_state, not board_state.turn, king, board_state.occupied)
@@ -1379,6 +1319,7 @@ def is_into_check(board_state, move):
                 return True
 
     return not _is_safe(board_state, king, _slider_blockers(board_state, king), move)
+
 
 
 
@@ -1451,10 +1392,6 @@ def is_legal_move(board_state, move):
     Checks if a given move is legal for the given board.
     """
     return is_pseudo_legal(board_state, move) and not is_into_check(board_state, move)
-
-
-
-
 
 
 

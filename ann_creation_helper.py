@@ -1,9 +1,3 @@
-'''
-Created on Oct 10, 2017
-@author: SamRagusa
-'''
-
-
 import tensorflow as tf
 import numpy as np
 from tensorflow.contrib import layers
@@ -112,7 +106,7 @@ def mean_metric_creator(name):
     return mean_metric
 
 
-def cnn_model_fn(features, labels, mode, params):
+def board_eval_model_fn(features, labels, mode, params):
     """
     Generates an EstimatorSpec for the model.
     """
@@ -121,7 +115,7 @@ def cnn_model_fn(features, labels, mode, params):
         input_layer = features["feature"]
     else:
         #Reshape features from original shape of [-1, 3, 8, 8, 16]
-        input_layer = tf.reshape(features, [-1, 8, 8, 16])
+        input_layer = tf.reshape(features, [-1, 8, 8, params['num_input_filters']])
 
     cur_inception_module = input_layer
 
@@ -171,28 +165,39 @@ def cnn_model_fn(features, labels, mode, params):
     train_op = None
     ratio_old_new_sum_loss_to_negative_sum = None
 
-    # (p,q,r) = (original_position, choosen_position, random_position)
-
 
     # Calculate loss (for both TRAIN and EVAL modes)
     if mode != tf.estimator.ModeKeys.PREDICT:
-        original_pos, desired_pos, random_pos = tf.split(tf.reshape(logits, [-1, 3, 1]), [1, 1, 1], 1)
+        to_split = tf.reshape(logits, [-1, 3, 1])
+        original_pos, desired_pos, random_pos = tf.split(to_split, [1, 1, 1], 1)
 
-        # Implementing  an altered version of the loss function defined in Deep Pink
+
+        # Implementing an altered version of the loss function defined in Deep Pink
+        # There are a few other methods I've been trying out in commented out, though none seem to be as good as
+        # the one proposed in Deep Pink
         with tf.variable_scope("loss"):
-            increase_in_position_value = tf.constant(params["inc_old_move_scalar"], dtype=tf.float32)
-
-            adjusted_equality_sum = tf.scalar_mul(increase_in_position_value, original_pos) + desired_pos
+            # adjusted_equality_sum = (tf.scalar_mul(1.02,original_pos)+ desired_pos)
+            adjusted_equality_sum = (original_pos + desired_pos)
 
 
             real_greater_rand_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(desired_pos - random_pos)))
 
-            # old_new_squared_scalar_loss = tf.reduce_mean(tf.square(original_pos + desired_pos))
+            # to_compare =tf.squeeze(tf.concat([desired_pos, random_pos], 1))
+            # to_compare = tf.reshape(to_split, [-1,3])
+            # the_labels = tf.squeeze(tf.concat([tf.ones_like(desired_pos),tf.zeros_like(random_pos)], 1))
+
+            # softmax_inequality_loss = tf.losses.sigmoid_cross_entropy(the_labels, to_compare)
+
+            ## test_new_loss_component = tf.reduce_mean(-tf.log(tf.sigmoid(-(original_pos + random_pos))))
+            ## test_new_loss_component_summary = tf.summary.scalar("test_new_loss_component", test_new_loss_component)
+
+            # old_new_squared_scalar_loss = tf.reduce_mean(tf.square(adjusted_equality_sum))
             # loss = real_greater_rand_scalar_loss +  old_new_squared_scalar_loss
 
-
+            ## test_equality_loss = tf.reduce_mean(
+            #     -tf.log(tf.sigmoid(adjusted_equality_sum)) - tf.log(tf.sigmoid( -adjusted_equality_sum)))
             equality_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(adjusted_equality_sum)))
-            negative_equality_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(tf.negative(adjusted_equality_sum))))
+            negative_equality_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid( -adjusted_equality_sum)))
 
             ratio_old_new_sum_loss_to_negative_sum = tf.divide(equality_scalar_loss, negative_equality_scalar_loss)
 
@@ -202,11 +207,17 @@ def cnn_model_fn(features, labels, mode, params):
             equality_sum_loss_summary = tf.summary.scalar("mean_original_plus_desired_loss", equality_scalar_loss)
             negative_equality_sum_loss_summary = tf.summary.scalar("mean_negative_original_plus_desired", negative_equality_scalar_loss)
 
+
+            # loss = real_greater_rand_scalar_loss + test_equality_loss
             loss = real_greater_rand_scalar_loss + equality_scalar_loss + negative_equality_scalar_loss
+            # loss = real_greater_rand_scalar_loss + equality_scalar_loss + negative_equality_scalar_loss + test_new_loss_component
 
+            # loss = old_new_squared_scalar_loss + softmax_inequality_loss
+            # loss = softmax_inequality_loss
 
-            # tf.summary.scalar("old_real_squared_loss", old_new_squared_scalar_loss)
-            tf.summary.scalar("loss", loss)
+            # old_real_summary = tf.summary.scalar("old_real_squared_loss", old_new_squared_scalar_loss)
+            # softmax_summary = tf.summary.scalar("softmax_inequality_loss", softmax_inequality_loss)  #THIS SHOULD ALL ACTUALLY BE CALLED SIGMOID INEQUALITY LOSS@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+            loss_summary = tf.summary.scalar("loss", loss)
 
 
     # Configure the Training Op (for TRAIN mode)
@@ -234,28 +245,40 @@ def cnn_model_fn(features, labels, mode, params):
     the_export_outputs = {
         "serving_default" : tf.estimator.export.RegressionOutput(value=logits)}
 
-
+    unstacked_input = tf.unstack(input_layer, axis=3)
     # Create the validation metrics
     validation_metric = None
     if mode != tf.estimator.ModeKeys.PREDICT:
         real_rand_diff = desired_pos - random_pos
         old_plus_desired = original_pos + desired_pos
 
+        mean_abs_real_rand_diff = tf.reduce_mean(tf.abs(real_rand_diff))
+        mean_abs_old_plus_desired = tf.reduce_mean(tf.abs(old_plus_desired))
+
+        abs_realrand_realold_ratio = tf.reduce_mean(real_rand_diff) / mean_abs_old_plus_desired#################################################################################RENAME THIS AND IT'S COMMENT##############################################################################################################
+
 
         validation_metric = {
             "metrics/rand_vs_real_accuracy": mean_metric_creator("metrics/rand_vs_real_accuracy")(tf.cast(tf.greater(desired_pos, random_pos), tf.float32), None),
             "metrics/mean_dist_real_rand": mean_metric_creator("metrics/mean_dist_real_rand")(real_rand_diff, None),
-            "metrics/mean_abs_dist_real_rand": mean_metric_creator("metrics/mean_abs_dist_real_rand")(tf.abs(real_rand_diff), None),
+            # "metrics/mean_abs_dist_real_rand": mean_metric_creator("metrics/mean_abs_dist_real_rand")(abs_real_rand_diff, None),
+            "metrics/mean_abs_dist_real_rand": (mean_abs_real_rand_diff, tf.summary.scalar("metrics/mean_abs_dist_real_rand", mean_abs_real_rand_diff)),
             "metrics/mean_dist_old_real": mean_metric_creator("metrics/mean_dist_old_real")(old_plus_desired, None),
-            "metrics/mean_abs_dist_old_real": mean_metric_creator("metrics/mean_abs_dist_old_real")(tf.abs(old_plus_desired), None),
-            "loss/real_greater_rand_loss": (real_greater_rand_scalar_loss, real_rand_loss_summary),
+            "metrics/mean_abs_dist_old_real": (mean_abs_old_plus_desired, tf.summary.scalar("metrics/mean_abs_dist_old_real", mean_abs_old_plus_desired)),
+            "metrics/abs_realrand_realold_ratio" : (abs_realrand_realold_ratio, tf.summary.scalar("metrics/abs_realrand_realold_ratio", abs_realrand_realold_ratio)),
+
+            # "loss/test_new_loss_component" : (test_new_loss_component,test_new_loss_component_summary),
+            # "loss/real_greater_rand_loss": (real_greater_rand_scalar_loss, real_rand_loss_summary),
             "loss/mean_original_plus_desired_loss": (equality_scalar_loss, equality_sum_loss_summary),
             "loss/mean_negative_original_plus_desired": (negative_equality_scalar_loss, negative_equality_sum_loss_summary),
-            "loss/ratio_old_new_sum_loss_to_negative_sum" : (ratio_old_new_sum_loss_to_negative_sum, tf.summary.scalar("loss/ratio_old_new_sum_loss_to_negative_sum", ratio_old_new_sum_loss_to_negative_sum)),
+            # "loss/old_real_squared_loss" : (old_new_squared_scalar_loss, old_real_summary),
+            # "loss/softmax_inequality_loss":(softmax_inequality_loss, softmax_summary),
+            "loss/loss" : (loss, loss_summary),
+            # "loss/ratio_old_new_sum_loss_to_negative_sum" : (ratio_old_new_sum_loss_to_negative_sum, tf.summary.scalar("loss/ratio_old_new_sum_loss_to_negative_sum", ratio_old_new_sum_loss_to_negative_sum)),
             # "sanity_check/input_tensor_mean" : mean_metric_creator("sanity_check/input_tensor_mean")(features, None),
             "metrics/mean_old_pos": mean_metric_creator("metrics/mean_old_pos")(original_pos, None),
             "metrics/mean_new_pos": mean_metric_creator("metrics/mean_new_pos")(desired_pos, None),
-            "metrics/negative_new_to_old_ratio" : mean_metric_creator("metrics/negative_new_to_old_ratio")(tf.divide(-desired_pos, original_pos), None),
+            # "metrics/negative_new_to_old_ratio" : mean_metric_creator("metrics/negative_new_to_old_ratio")(tf.divide(-desired_pos, original_pos), None),
             "metrics/mean_random_pos": mean_metric_creator("metrics/mean_random_pos")(random_pos, None),
             "metrics/mean_abs_old_pos": mean_metric_creator("metrics/mean_abs_old_pos")(tf.abs(original_pos), None),
             "metrics/mean_abs_new_pos": mean_metric_creator("metrics/mean_abs_new_pos")(tf.abs(desired_pos), None),
@@ -268,6 +291,8 @@ def cnn_model_fn(features, labels, mode, params):
     summary_hook = tf.train.SummarySaverHook(save_steps=params['log_interval'],
                                              output_dir=params['model_dir'],
                                              summary_op=merged_summaries)
+
+
 
     # Return the EstimatorSpec object
     return tf.estimator.EstimatorSpec(
@@ -299,21 +324,28 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
 
 
     if mode == tf.estimator.ModeKeys.PREDICT:
+        print(features)
         input_layer = features["data"]
 
         # legal_move_indices = features["move_indices"]
     else:
         input_layer = features
 
+
     cur_inception_module = input_layer
+
+    activation_summaries = []
     for module_num, module_shape in enumerate(params['inception_modules']):
-        cur_inception_module, activation_summaries = build_inception_module_with_batch_norm(
-            cur_inception_module,
-            module_shape,
-            mode,
-            padding='valid',
-            num_previously_built_inception_modules=module_num,
-            make_trainable=params["trainable_cnn_modules"])
+        if callable(module_shape):
+            cur_inception_module = module_shape(cur_inception_module)
+        else:
+            cur_inception_module, activation_summaries = build_inception_module_with_batch_norm(
+                cur_inception_module,
+                module_shape,
+                mode,
+                padding='valid',
+                num_previously_built_inception_modules=module_num,
+                make_trainable=params["trainable_cnn_modules"])
 
     if isinstance(cur_inception_module, list):
         inception_module_paths_flattened = [
@@ -326,7 +358,8 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
     else:
         inception_module_outputs = cur_inception_module
 
-
+    if not params["conv_init_fn"] is None:
+        params["conv_init_fn"]()
 
     # Build the fully connected layers
     dense_layers_outputs, activation_summaries = build_fully_connected_layers_with_batch_norm(
@@ -354,6 +387,8 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
 
     # Calculate loss (for both TRAIN and EVAL modes)
     if mode != tf.estimator.ModeKeys.PREDICT:
+        #THE USE OF tf.scatter_nd FUNCTION WOULD LIKELY SIMPLIFY ALL OF THIS
+
         weight_mask = labels
 
         bool_mask = tf.cast(weight_mask, tf.bool)
@@ -363,9 +398,9 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
         important_logits = tf.boolean_mask(logits, bool_mask)
         important_labels = tf.boolean_mask(labels, bool_mask)
 
-        mean_possible_moves = tf.reduce_mean(weight_mask)
-        total_possible_moves = tf.reduce_sum(weight_mask)
 
+        total_possible_moves = tf.reduce_sum(weight_mask)
+        # mean_possible_moves = tf.reduce_mean(tf.reduce_sum(total_possible_moves, axis=1))
 
 
 
@@ -408,7 +443,8 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
 
     # Generate predictions
     predictions = {
-        "move_values": logits}
+        "move_values": logits,}
+        # "important_logits":important_logits}
 
 
     if mode != tf.estimator.ModeKeys.PREDICT:
@@ -428,8 +464,7 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
         }
 
 
-
-
+    unstacked_input = tf.unstack(input_layer, axis=3)
     # Create the validation metrics
     validation_metric = None
     if mode != tf.estimator.ModeKeys.PREDICT:
@@ -437,7 +472,7 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
             "loss/loss" : (loss, loss_scalar_summary),
             "metrics/total_moves_above_desired_moves" : (total_moves_above_desired_moves, tf.summary.scalar("metrics/total_moves_above_desired_moves", total_moves_above_desired_moves)),
             "metrics/ratio_moves_above_desired_moves": (total_moves_above_desired_moves/total_possible_moves,tf.summary.scalar("metrics/ratio_moves_above_desired_moves",total_moves_above_desired_moves/total_possible_moves)),
-            "sanity_check/mean_possible_moves" : (mean_possible_moves, tf.summary.scalar("sanity_check/mean_possible_moves", mean_possible_moves)),
+            # "sanity_check/mean_possible_moves" : (mean_possible_moves, tf.summary.scalar("sanity_check/mean_possible_moves", mean_possible_moves)),
             "sanity_check/total_possible_moves" : (total_possible_moves, tf.summary.scalar("sanity_check/total_possible_moves", total_possible_moves)),
             "metrics/mean_evaluation_value" : mean_metric_creator("metrics/mean_evaluation_value")(important_logits,None),
             "metrics/mean_expected_value" : mean_metric_creator("metrics/mean_expected_value")(important_labels,None),
@@ -467,232 +502,60 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
         eval_metric_ops=validation_metric)
 
 
-def process_line_as_2d_input_with_ep(the_str):
-    """
-    NOTES:
-    1) I likely won't be using this, opting to instead use the onehot implementation
-    """
-    with tf.name_scope("process_data_2d"):
-        #     with tf.device("/cpu:0"):
-
-        # A tensor referenced when getting indices of characters for the the_values array
-        mapping_strings = tf.constant(["0", "1", "K", "Q", "R", "B", "N", "P", "C", "k", "q", "r", "b", "n", "p", "c"])
-
-        the_values = tf.constant(
-            [[0, 0, 0, 0, 0, 0, 0, 0],  # 0
-             [0, 0, 0, 0, 0, 0, 1, 0],  # 1
-             [1, 0, 0, 0, 0, 0, 0, 0],  # K
-             [0, 1, 0, 0, 0, 0, 0, 0],  # Q
-             [0, 0, 1, 0, 0, 0, 0, 0],  # R
-             [0, 0, 0, 1, 0, 0, 0, 0],  # B
-             [0, 0, 0, 0, 1, 0, 0, 0],  # N
-             [0, 0, 0, 0, 0, 1, 0, 0],  # P
-             [0, 0, 0, 0, 0, 0, 0, 1],  # C
-             [-1, 0, 0, 0, 0, 0, 0, 0],  # k
-             [0, -1, 0, 0, 0, 0, 0, 0],  # q
-             [0, 0, -1, 0, 0, 0, 0, 0],  # r
-             [0, 0, 0, -1, 0, 0, 0, 0],  # b
-             [0, 0, 0, 0, -1, 0, 0, 0],  # n
-             [0, 0, 0, 0, 0, -1, 0, 0],  # p
-             [0, 0, 0, 0, 0, 0, 0, -1],  # c
-             ], dtype=tf.float32)
-
-        # Create the table for getting indices (for the_values) from the information about the board
-        the_table = tf.contrib.lookup.index_table_from_tensor(mapping=mapping_strings, name="index_lookup_table")
-
-        data = tf.reshape(
-            # Get the values at the given indices
-            tf.gather(
-                the_values,
-                # Get an array of indices corresponding to the array of characters
-                the_table.lookup(
-                    # Split the string into an array of characters
-                    tf.string_split(
-                        [the_str],
-                        delimiter="").values)),
-            [3, 64, 8])
-
-        return data
 
 
-def full_onehot_process_line_as_2d_input(the_str, num_samples=-1, for_serving=False):
-    with tf.name_scope("process_data_2d"):
-        #with tf.device("/cpu:0"):
-
-        # A tensor referenced when getting indices of characters for the the_values array
-        mapping_strings = tf.constant(
-            ["0", "1", "K", "Q", "R", "B", "N", "P", "C", "k", "q", "r", "b", "n", "p", "c"])
-
-        number_of_mapping_strings = 16  # len(mapping_strings)
-        the_values = tf.constant(
-            [[1 if i == j else 0 for i in range(number_of_mapping_strings)] for j in range(number_of_mapping_strings)],
-            dtype=tf.float32)
-
-        # Create the table for getting indices (for the_values) from the information about the board
-        the_table = tf.contrib.lookup.index_table_from_tensor(mapping=mapping_strings, name="index_lookup_table")
-
-        value_for_string_split = the_str if for_serving else [the_str]
-
-        data = tf.reshape(
-            # Get the values at the given indices
-            tf.gather(
-                the_values,
-                # Get an array of indices corresponding to the array of characters
-                the_table.lookup(
-                    # Split the string into an array of characters
-                    tf.string_split(
-                        value_for_string_split,
-                        delimiter="").values)),
-            [num_samples, 8,8, number_of_mapping_strings]) #THIS SHOULD REALLY BE [3x8x8,num_mapping_strings]
-
-        return data
-
-
-def acquire_data_ops(filename_queue, processing_method, record_defaults=None):
-    """
-    Get the line/lines from the files in the given filename queue,
-    read/decode them, and give them to the given method for processing
-    the information.
-    """
-    with tf.name_scope("acquire_data"):
-        # with tf.device("/cpu:0"):
-        if record_defaults is None:
-            record_defaults = [[""]]
-        reader = tf.TextLineReader()
-        key, value = reader.read(filename_queue)
-        row = tf.decode_csv(value, record_defaults=record_defaults)
-        #The 3 is because this is used for training and it trains on triplets
-        return processing_method(row[0], 3), tf.constant(True, dtype=tf.bool)
-
-
-def data_pipeline(filenames, batch_size, num_epochs=None, min_after_dequeue=10000, allow_smaller_final_batch=False):
-    """
-    Creates a pipeline for the data contained within the given files.
-    It does this using TensorFlow queues.
-
-    @return: A tuple in which the first element is a graph operation
-    which gets a random batch of the data, and the second element is
-    a graph operation to get a batch of the labels corresponding
-    to the data gotten by the first element of the tuple.
-
-    Notes:
-    1) Maybe should be using sparse tensors
-    """
-    with tf.name_scope("data_pipeline"):
-        # with tf.device("/cpu:0"):
-        capacity = min_after_dequeue + 3 * batch_size
-        filename_queue = tf.train.string_input_producer(filenames, capacity=capacity, num_epochs=num_epochs)
-        example_op, label_op = acquire_data_ops(filename_queue, full_onehot_process_line_as_2d_input)
-
-        example_batch, label_batch = tf.train.shuffle_batch(
-            [example_op, label_op],
-            batch_size=batch_size,
-            capacity=capacity,
-            min_after_dequeue=min_after_dequeue,
-            num_threads=12,
-            allow_smaller_final_batch=allow_smaller_final_batch)
-
-        return example_batch, None
-
-
-def create_tf_records_input_data_fn_with_ep(filenames, batch_size, shuffle_buffer_size=100000):
-    """
-    NOTES:
-    1) I likely won't be using this, opting to instead use the onehot implementation
-    """
+def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, include_unoccupied=True, shuffle_buffer_size=None):################MUST COMBINE THIS FUNCTIONALITY WITH THE ONE BELOW IT (just add ability to subtract one before one_hot
     def tf_records_input_data_fn():
-        dataset = tf.data.TFRecordDataset(filenames)  # , buffer_size=100000)
+        with tf.device('/cpu:0'):
 
-        the_values = tf.constant(
-            [[0, 0, 0, 0, 0, 0, 0, 0],  # 0
-             [0, 0, 0, 0, 0, 0, 1, 0],  # 1
-             [1, 0, 0, 0, 0, 0, 0, 0],  # K
-             [0, 1, 0, 0, 0, 0, 0, 0],  # Q
-             [0, 0, 1, 0, 0, 0, 0, 0],  # R
-             [0, 0, 0, 1, 0, 0, 0, 0],  # B
-             [0, 0, 0, 0, 1, 0, 0, 0],  # N
-             [0, 0, 0, 0, 0, 1, 0, 0],  # P
-             [0, 0, 0, 0, 0, 0, 0, 1],  # C
-             [-1, 0, 0, 0, 0, 0, 0, 0],  # k
-             [0, -1, 0, 0, 0, 0, 0, 0],  # q
-             [0, 0, -1, 0, 0, 0, 0, 0],  # r
-             [0, 0, 0, -1, 0, 0, 0, 0],  # b
-             [0, 0, 0, 0, -1, 0, 0, 0],  # n
-             [0, 0, 0, 0, 0, -1, 0, 0],  # p
-             [0, 0, 0, 0, 0, 0, 0, -1],  # c
-             ], dtype=tf.float32)
+            filenames = tf.data.Dataset.list_files(filename_pattern)
+            dataset = filenames.apply(
+                tf.contrib.data.parallel_interleave(
+                    lambda filename : tf.data.TFRecordDataset(filename),
+                    cycle_length=7,
+                    sloppy=True))
 
-        def parser(record):
-            keys_to_features = {
-                "boards": tf.FixedLenFeature([8 * 8 * 3], tf.int64),  # , default_value = []),
-            }
-
-            parsed = tf.parse_single_example(record, keys_to_features)
-            boards_tensor = tf.gather(the_values, parsed["boards"])
-            # boards_tensor = tf.reshape(squares_tensors, shape=[3,8,8,8])
+            def parser(record):
+                keys_to_features = {
+                    "boards": tf.FixedLenFeature([8 * 8 * 3], tf.int64)}  # , default_value = []),
 
 
-            return {"boards_tensor": boards_tensor}
+                return tf.reshape(tf.parse_single_example(record, keys_to_features)["boards"], [-1, 8,8])
 
-        def reshape_fn(batch):
-            return tf.reshape(batch["boards_tensor"], [-1, 8, 8, 8])
+            if not shuffle_buffer_size is None:
+                dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
 
-        dataset = dataset.map(parser, num_parallel_calls=100)
-        # dataset = dataset.map(lambda x : tf.gather(the_values, ))
-        dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
-        dataset = dataset.batch(batch_size)
-        dataset = dataset.map(reshape_fn, num_parallel_calls=100)
-        dataset = dataset.repeat()
 
-        iterator = dataset.make_one_shot_iterator()
+            num_things_in_parallel = 12
+            dataset = dataset.apply(tf.contrib.data.map_and_batch(map_func=parser, batch_size=batch_size, num_parallel_batches=num_things_in_parallel))
 
-        features = iterator.get_next()
+            if include_unoccupied:
+                dataset = dataset.map(lambda x: tf.one_hot(x, 16), num_parallel_calls=num_things_in_parallel)
+            else:
+                dataset = dataset.map(lambda x: tf.one_hot(x-1, 15), num_parallel_calls=num_things_in_parallel)
 
-        return features, None
+            dataset = dataset.prefetch(1)#num_things_in_parallel)#buffer_size=batch_size)
+
+            dataset = dataset.repeat()
+
+            iterator = dataset.make_one_shot_iterator()
+
+            features = iterator.get_next()
+            return features, None
 
     return tf_records_input_data_fn
 
 
-def one_hot_create_tf_records_input_data_fn(filenames, batch_size, shuffle_buffer_size=100000):
+def move_gen_one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, shuffle_buffer_size=100000, include_unoccupied=True, repeat=True, shuffle=True):
     def tf_records_input_data_fn():
-        dataset = tf.data.TFRecordDataset(filenames)  # , buffer_size=100000)
 
-        def parser(record):
-            keys_to_features = {
-                "boards": tf.FixedLenFeature([8 * 8 * 3], tf.int64),  # , default_value = []),
-            }
-
-            return tf.parse_single_example(record, keys_to_features)["boards"]
-            # boards_tensor = tf.gather(the_values, parsed["boards"])
-            # boards_tensor = tf.reshape(squares_tensors, shape=[3,8,8,8])
-            # return  {"boards_tensor" : boards_tensor}
-
-        def reshape_fn(batch):
-            # return {"boards_tensor" : tf.reshape(batch, [-1, 8,8,8])}
-            print(batch)
-            temp_value = tf.reshape(batch, [-1, 8, 8])
-            return temp_value
-
-        dataset = dataset.map(parser, num_parallel_calls=100)
-        # dataset = dataset.map(lambda x : tf.gather(the_values, ))
-        dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
-        dataset = dataset.batch(batch_size)
-        dataset = dataset.map(reshape_fn, num_parallel_calls=100)
-        dataset = dataset.map(lambda x: tf.one_hot(x, 16))
-
-        dataset = dataset.repeat()
-
-        iterator = dataset.make_one_shot_iterator()
-
-        features = iterator.get_next()
-        return features, None
-
-    return tf_records_input_data_fn
-
-
-def move_gen_one_hot_create_tf_records_input_data_fn(filenames, batch_size, shuffle_buffer_size=100000, repeat=True, shuffle=True):
-    def tf_records_input_data_fn():
-        dataset = tf.data.TFRecordDataset(filenames)
+        filenames = tf.data.Dataset.list_files(filename_pattern)
+        dataset = filenames.apply(
+            tf.contrib.data.parallel_interleave(
+                lambda filename: tf.data.TFRecordDataset(filename),
+                cycle_length=7,
+                sloppy=True,
+            ))
 
         def parser(record):
             context_features = {
@@ -713,14 +576,19 @@ def move_gen_one_hot_create_tf_records_input_data_fn(filenames, batch_size, shuf
             return reshaped_board, sparse_tensor
 
 
-        dataset = dataset.map(parser, num_parallel_calls=100)
+        dataset = dataset.map(parser, num_parallel_calls=12)
 
         if shuffle:
             dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
 
         dataset = dataset.batch(batch_size)
 
-        dataset = dataset.map(lambda x,y:(tf.one_hot(x,16),y))
+        if include_unoccupied:
+            dataset = dataset.map(lambda x,y:(tf.one_hot(x,16),y))
+        else:
+            dataset = dataset.map(lambda x,y:(tf.one_hot(x-1,15),y))
+
+        dataset = dataset.prefetch(1)
 
         if repeat:
             dataset = dataset.repeat()
@@ -734,23 +602,8 @@ def move_gen_one_hot_create_tf_records_input_data_fn(filenames, batch_size, shuf
     return tf_records_input_data_fn
 
 
-def input_data_fn(filenames, batch_size, epochs, min_after_dequeue, allow_smaller_final_batch=False):
-    """
-    A function which is called to create the data pipeline ops made by the function
-    data_pipeline.  It does this in a way such that they belong to the session managed
-    by the Estimator object that will be given this function.
-    """
-    with tf.name_scope("input_fn"):
-        batch, labels = data_pipeline(
-            filenames=filenames,
-            batch_size=batch_size,
-            num_epochs=epochs,
-            min_after_dequeue=min_after_dequeue,
-            allow_smaller_final_batch=allow_smaller_final_batch)
-        return batch, labels
 
-
-def serving_input_reciever_fn_creater(whites_turn):
+def serving_input_reciever_fn_creater(whites_turn):#########################################################################DECIDE IF THIS SHOULD BE REMOVED FOR THIS COMMIT###################################################
     """
     TO MAKE BLACKS TURN:
     1) switch color of pieces (switch occupied_w with occupied_b
@@ -909,24 +762,6 @@ def serving_input_reciever_legal_moves_fn(whites_turn):
     return serving_input_reciever_fn
 
 
-def board_as_str_serving_input_receiver_fn():
-    """
-    A function to use for input processing when serving the model from string representation of the board.
-    """
-    feature_spec = {'str': tf.FixedLenFeature([1], tf.string)}
-    serialized_tf_example = tf.placeholder(dtype=tf.string, name='input_example_tensor')
-
-    receiver_tensors = {'example' : serialized_tf_example}
-
-    features = tf.parse_example(serialized_tf_example, feature_spec)
-
-    features['str'] = tf.reshape(features['str'], [-1])
-
-    data = full_onehot_process_line_as_2d_input(features['str'], for_serving=True)
-
-    return tf.estimator.export.ServingInputReceiver(data, receiver_tensors)
-
-
 def line_counter(filename):
     """
     A function to count the number of lines in a file (kinda) efficiently.
@@ -979,7 +814,7 @@ class ValidationRunHook(tf.train.SessionRunHook):
 
 
     def after_run(self, run_context, run_values):
-        if (run_values.results - self._step_started) % self.step_increment == 0:
+        if (run_values.results - self._step_started) % self.step_increment == 0 and run_values.results != 0:
             print(self.estimator.evaluate(
                 input_fn=self._input_fn,
                 steps=self.temp_num_steps_in_epoch,
