@@ -53,7 +53,7 @@ class PriorityBins:
 
 
     def is_empty(self):
-        return np.any(self.non_empty_mask)
+        return not np.any(self.non_empty_mask)
 
 
     def largest_bin(self):
