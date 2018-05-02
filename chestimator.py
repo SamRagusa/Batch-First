@@ -128,7 +128,7 @@ class ChEstimator(Estimator):
                     scaffold=estimator_spec.scaffold,
                     # config=self._session_config),
                     config=self._session_config if use_full_gpu else tf.ConfigProto(
-                        gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.4))),
+                        gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.45))),
                 hooks=hooks)
 
             def predictor(bb_array):
@@ -166,11 +166,13 @@ class ChEstimator(Estimator):
 
 class MoveChEstimator(Estimator):
 
-
     def create_move_predictor(self,
                               predict_keys=None,
                               hooks=None,
-                              checkpoint_path=None):
+                              checkpoint_path=None,
+                              max_moves_for_a_board=100,
+                              max_batch_size=50000):
+
 
         run_metadata = tf.RunMetadata()
         hooks = _check_hooks_type(hooks)
@@ -189,33 +191,69 @@ class MoveChEstimator(Estimator):
         knights = tf.placeholder(tf.int64, shape=[None], name="knights_placeholder")
         pawns = tf.placeholder(tf.int64, shape=[None], name="pawns_placeholder")
         castling_rights = tf.placeholder(tf.int64, shape=[None], name="castling_rights_placeholder")
-        ep_bitboards = tf.placeholder(tf.int64, shape=[None],name="ep_bitboards_placeholder")
+        ep_bitboards = tf.placeholder(tf.int64, shape=[None],
+                                      name="ep_bitboards_placeholder")  # Should double check this isn't interpreting uint8 values as negative int32 values
         occupied_w = tf.placeholder(tf.int64, shape=[None], name="occupied_w_placeholder")
         occupied_b = tf.placeholder(tf.int64, shape=[None], name="occupied_b_placeholder")
         # occupied = tf.placeholder(tf.int64, shape=[None], name="occupied_placeholder")
-        moves = tf.placeholder(tf.int32, shape=[None, 2], name="moves_placeholder")
 
-        properly_arranged_data = get_board_data(kings,queens,rooks,bishops,knights,pawns,castling_rights,ep_bitboards,occupied_w,occupied_b)#,occupied)
+        move_nums = tf.placeholder(tf.int32, shape=[None], name="move_nums_placeholder")
+        moves_per_board = tf.placeholder(tf.uint8, shape=[None], name="moves_per_board_placeholder")
 
-        estimator_spec = self._call_model_fn({"data":properly_arranged_data}, None, model_fn_lib.ModeKeys.PREDICT, None)
+        # These will be used soon
+        # moves_from_square = tf.placeholder(tf.uint8, shape=[None], name="moves_from_square_placeholder")
+        # moves_to_square = tf.placeholder(tf.uint8, shape=[None], name="moves_to_square_placeholder")
+        # moves = tf.placeholder(tf.int32, shape=[None, 2], name="moves_placeholder")
+
+
+
+
+
+
+
+
+        properly_arranged_data = get_board_data(kings, queens, rooks, bishops, knights, pawns, castling_rights,
+                                                ep_bitboards, occupied_w, occupied_b)
+        # properly_arranged_data = get_board_data_with_unoccupied(kings, queens, rooks, bishops, knights, pawns, castling_rights,
+        #                                                         ep_bitboards, occupied_w, occupied_b, occupied)
+
+        estimator_spec = self._call_model_fn({"data": properly_arranged_data}, None, model_fn_lib.ModeKeys.PREDICT,
+                                             None)
 
         predictions = self._extract_keys(estimator_spec.predictions, predict_keys)[predict_keys]
 
-        legal_move_scores = tf.gather_nd(predictions, moves)
+        board_index_repeated_array = tf.transpose(
+            tf.reshape(
+                tf.tile(
+                    tf.range(max_moves_for_a_board),
+                    [max_batch_size]),
+                [max_batch_size, max_moves_for_a_board]),
+            [1, 0])
 
+
+
+
+        board_indices_for_moves = tf.boolean_mask(board_index_repeated_array, tf.sequence_mask(tf.cast(moves_per_board,tf.int32)))
+
+
+
+        the_moves = tf.stack([board_indices_for_moves, move_nums], axis=-1)
+
+
+        legal_move_scores = tf.gather_nd(predictions, the_moves)
 
         mon_sess = training.MonitoredSession(
-                session_creator=training.ChiefSessionCreator(
-                    checkpoint_filename_with_path=checkpoint_path,
-                    scaffold=estimator_spec.scaffold,
-                    # config=self._session_config),
-                    config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.5))),
-                hooks=hooks)
+            session_creator=training.ChiefSessionCreator(
+                checkpoint_filename_with_path=checkpoint_path,
+                scaffold=estimator_spec.scaffold,
+                # config=self._session_config),
+                config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.45))),
+            hooks=hooks)
 
-        def predictor(bb_array, the_moves):
+
+        def predictor(bb_array, the_moves, num_moves_per_board):
             if mon_sess.should_stop():
                 raise StopIteration
-
 
             return mon_sess.run(legal_move_scores,
                                 {kings: bb_array[0],
@@ -228,12 +266,9 @@ class MoveChEstimator(Estimator):
                                  ep_bitboards: bb_array[7],
                                  occupied_w: bb_array[8],
                                  occupied_b: bb_array[9],
-                                 #occupied: bb_array[10],
-                                moves : the_moves})
-                                # options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE),
-                                # run_metadata=run_metadata)
-
-
+                                 # occupied: bb_array[10],
+                                 move_nums: the_moves,
+                                 moves_per_board : num_moves_per_board})
 
         def finish():
             fetched_timeline = timeline.Timeline(run_metadata.step_stats)
@@ -245,6 +280,4 @@ class MoveChEstimator(Estimator):
             mon_sess.close()
 
         return predictor, finish
-
-
 

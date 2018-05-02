@@ -1,20 +1,14 @@
 import numpy as np
 from numba import njit
 
-
-@njit(nogil=True)
+@njit
 def should_not_terminate(game_node):
     cur_node = game_node
     while cur_node is not None:
-        if cur_node.terminated:
-            # This is here so that if a thread is stopped halfway through looking through a set of nodes, the next
-            # time this function is called on the same node, it will complete much faster.  It's not crucial to the algorithm.
-            game_node.terminated = True
-
+        if cur_node.board_struct[0].terminated:
             return False
         cur_node = cur_node.parent
     return True
-
 
 
 def split_by_bins(to_insert, bin_indices):
@@ -84,13 +78,15 @@ class PriorityBins:
             index_in_non_empty_bins += 1
 
 
-    def insert_nodes_and_get_next_batch(self, to_insert):
-        bin_indices = np.digitize(np.array([node.next_move_score for node in to_insert], dtype=np.float32), self.bins)
+    def insert_nodes_and_get_next_batch(self, to_insert, scores):
+        bin_indices = np.digitize(scores, self.bins)
 
-        if len(to_insert) != 0:
-            bins_to_insert = split_by_bins(to_insert, bin_indices)
-        else:
+
+        if len(to_insert) == 0:
             bins_to_insert = []
+        else:
+            bins_to_insert = split_by_bins(to_insert, bin_indices)
+
 
         last_bin_index_used_in_batch = -1
         for_completion = []
@@ -118,5 +114,5 @@ class PriorityBins:
 
                 break
 
-        return np.concatenate([ary[mask] for ary, mask in for_completion])
 
+        return np.concatenate([ary[mask] for ary, mask in for_completion])
