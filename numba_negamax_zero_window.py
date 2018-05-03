@@ -7,7 +7,6 @@ import threading
 
 import chess.uci
 
-
 # import llvmlite.binding as llvm
 # llvm.set_option('', '--debug-only=loop-vectorize')
 
@@ -52,6 +51,10 @@ ONES_IN_RELEVANT_BITS = np.uint64(2**(SIZE_EXPONENT_OF_TWO)-1)
 switch_square_fn = lambda x : 8 * (7 - (x >> 3)) + (x & 7)
 MOVE_TO_INDEX_ARRAY = np.zeros(shape=[64,64],dtype=np.int32)
 REVERSED_MOVE_TO_INDEX_ARRAY = np.zeros(shape=[64,64],dtype=np.int32)
+
+REVERSED_SQUARES = np.zeros_like(SQUARES)
+for square in SQUARES:
+    REVERSED_SQUARES[square] = switch_square_fn(square)
 
 
 
@@ -99,7 +102,7 @@ new_gamenode_type.define(GameNode.class_type.instance_type)
 
 @njit
 def not_fast_struct_array_to_basic_input_for_all_white_anns(struct_array):
-    to_return = np.zeros(shape=(11,len(struct_array)), dtype=np.uint64) #will switch to np.empty
+    to_return = np.empty(shape=(11,len(struct_array)), dtype=np.uint64)
 
     to_return[0] = struct_array['kings']
     to_return[1] = struct_array['queens']
@@ -113,8 +116,8 @@ def not_fast_struct_array_to_basic_input_for_all_white_anns(struct_array):
     for j in range(len(struct_array)):
         if struct_array[j]['ep_square'] != 0:
             to_return[7,j] = BB_SQUARES[struct_array[j]['ep_square']]
-        # else:                                 #use this if using np.empty instead of np.zeros
-        #     to_return[7,j] = 0
+        else:
+            to_return[7,j] = 0
 
         if struct_array[j]['turn']:
             to_return[8,j] = struct_array[j]['occupied_w']
@@ -147,34 +150,34 @@ def jitted_assign_move_scores(children, not_children, children_indices, not_chil
         not_child_best_move_scores[j] = set_up_next_best_move(not_children[not_children_indices[j]])
 
 
-# @njit
+@njit
 def move_scoring_helper(children, not_children, children_indices, not_children_indices):
     children_to_score = children[children_indices]
     not_children_to_score = not_children[not_children_indices]
     combined_to_score = np.concatenate((children_to_score, not_children_to_score))
     ann_board_inputs = not_fast_struct_array_to_basic_input_for_all_white_anns(combined_to_score)
 
-    # child_legal_move_mask = children_to_score['unexplored_moves'][..., 0] != 255
-    # not_child_legal_move_mask = not_children_to_score['unexplored_moves'][..., 0] != 255
-    # combined_masks = np.concatenate((child_legal_move_mask, not_child_legal_move_mask))
+    # This should REALLY be using views of combined_to_score['children_left'], since there will never be 0 children_left or more than 255 (meaning a uint8 should work to represent the data)
+    size_array = combined_to_score[:]['children_left'].astype(np.int16)
+    size_array[len(children_indices):][:] -= 1
 
-    size_array = np.zeros(len(combined_to_score), dtype=np.int32) #Should move to np.empty
-    for j in range(len(combined_to_score)):
-        size_array[j] = np.searchsorted(combined_to_score[j]['unexplored_moves'][:, 0], 255)
-
-    legal_move_nums = np.empty(np.sum(size_array),dtype=np.int32)
+    from_to_squares = np.empty((np.sum(size_array),2),dtype=np.int32)
     cur_start_index = 0
     for j in range(len(combined_to_score)):
+
         if combined_to_score[j]['turn']:
-            legal_move_nums[cur_start_index:cur_start_index + size_array[j]] = MOVE_TO_INDEX_ARRAY[combined_to_score[j]['unexplored_moves'][0:size_array[j],0], combined_to_score[j]['unexplored_moves'][0:size_array[j],1]]
+            from_to_squares[cur_start_index:cur_start_index + size_array[j], :] = combined_to_score[j]['unexplored_moves'][:size_array[j],:2]
         else:
-            legal_move_nums[cur_start_index:cur_start_index + size_array[j]] = REVERSED_MOVE_TO_INDEX_ARRAY[combined_to_score[j]['unexplored_moves'][0:size_array[j], 0], combined_to_score[j]['unexplored_moves'][0:size_array[j], 1]]
+            #These two lines needs to be done in 1 using slicing like above
+            from_to_squares[cur_start_index:cur_start_index + size_array[j], 0] = REVERSED_SQUARES[combined_to_score[j]['unexplored_moves'][:size_array[j], 0]]
+            from_to_squares[cur_start_index:cur_start_index + size_array[j], 1] = REVERSED_SQUARES[combined_to_score[j]['unexplored_moves'][:size_array[j], 1]]
         cur_start_index += size_array[j]
 
-    return ann_board_inputs, legal_move_nums, size_array
+    return ann_board_inputs, from_to_squares, size_array
 
 
 def start_move_scoring(children, not_children, children_indices, not_children_indices, move_eval_fn):
+
     ann_board_inputs, legal_move_nums, size_array = move_scoring_helper(children, not_children, children_indices, not_children_indices)
 
     child_best_move_scores = np.zeros(len(children_indices), dtype=np.float32)
@@ -621,6 +624,12 @@ def update_node_from_value(node, value, following_move, hash_table):
                     update_node_from_value(node.parent, - node.board_struct[0]['best_value'], node.board_struct[0]['prev_move'], hash_table)
 
 
+@njit
+def temp_jitted_start_tree_update_from_node(parent_node, child_struct, hash_table):
+    update_node_from_value(parent_node,
+                           - child_struct['best_value'],
+                           child_struct['prev_move'],
+                           hash_table)
 
 
 def update_tree_from_terminating_nodes(parent_nodes, struct_array, hash_table, testing=False):
@@ -642,37 +651,57 @@ def update_tree_from_terminating_nodes(parent_nodes, struct_array, hash_table, t
                                 struct_array[should_update_mask]['best_value'] == MAX_FLOAT32_VAL)):
             print("The tree is about to be updated with an value which should be unreachable!")
 
-        for struct in struct_array[should_update_mask]:
-            if struct['best_value'] == MIN_FLOAT32_VAL or struct['best_value'] == MAX_FLOAT32_VAL:
-                print(struct['best_value'])
-
 
     # Since no node being given to this function will have terminated from a child, none of them will have moves to store in the TT.
     # Also the passing of a copy instead of a view will (I think) ensure the memory be aligned for compilation to
     # vectorized versions of the looped functions
-    add_boards_to_tt(struct_array[should_update_mask],hash_table)
+    # add_boards_to_tt(struct_array[should_update_mask],hash_table)
 
-    for j in range(len(should_update_mask)):
+    for j in range(len(struct_array)):
         if should_update_mask[j]:
-            update_node_from_value(parent_nodes[j],
-                                   - struct_array[j]['best_value'],
-                                   struct_array[j]['prev_move'],
-                                   hash_table)
+            temp_jitted_start_tree_update_from_node(parent_nodes[j], struct_array[j], hash_table)
 
 
+@njit
+def jitted_temp_set_node_from_altered_struct(node, board_struct):
+    """
+    NOTES:
+    1) This is VERY slow, and extremely likely to be avoidable.
+    """
+    node.board_struct[0]['unexplored_moves'][:] = board_struct['unexplored_moves'][:]
+    node.board_struct[0]['unexplored_move_scores'][:] = board_struct['unexplored_move_scores'][:]
+    node.board_struct[0]['children_left'] = board_struct['children_left']
+    node.board_struct[0]['next_move_index'] = board_struct['next_move_index']
+
+
+@njit
+def jitted_temp_set_node_move_score_info(node, board_struct):
+    """
+    NOTES:
+    1) This is VERY slow, and extremely likely to be avoidable.
+    """
+    node.board_struct[0]['unexplored_move_scores'][:] = board_struct['unexplored_move_scores'][:]
+    node.board_struct[0]['next_move_index'] = board_struct['next_move_index']
 
 
 
 def temp_set_nodes_to_altered_structs(node_array, struct_array):
+    """
+    NOTES:
+    1) This is VERY slow, and extremely likely to be avoidable. Also some of it's assignments are just unneeded.
+    """
     for j in range(len(node_array)):
-        node_array[j].board_struct[0] = struct_array[j]
+        jitted_temp_set_node_from_altered_struct(node_array[j], struct_array[j])
 
 
 
 def temp_set_tt_move_scores(node_array, struct_array):
+    """
+    NOTES:
+    1) This is VERY slow, and extremely likely to be avoidable.
+    """
     for j in range(len(node_array)):
-        node_array[j].board_struct[0]['unexplored_move_scores'][:] = struct_array[j]['unexplored_move_scores'][:]
-        node_array[j].board_struct[0]['next_move_index'] = struct_array[j]['next_move_index']
+        jitted_temp_set_node_move_score_info(node_array[j], struct_array[j])
 
 
 
@@ -687,16 +716,16 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
     """
 
     struct_batch = get_struct_array_from_node_array(node_batch)
-
     child_struct, struct_batch_next_move_scores = create_child_structs(struct_batch, testing)
+
 
     child_was_from_tt_move_mask = struct_batch['children_left'] == NEXT_MOVE_IS_FROM_TT_VAL
 
     depth_zero_children_mask = child_struct['depth'] == 0
     depth_not_zero_mask = np.logical_not(depth_zero_children_mask)
 
-
     depth_zero_should_terminate_array(child_struct, hash_table)
+
 
     depth_zero_not_scored_mask = np.logical_and(depth_zero_children_mask, np.logical_not(child_struct['terminated']))
 
@@ -714,6 +743,7 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
 
     #(This should likely be put directly into it's only use below to prevent storing it in memory)
     tt_move_nodes_with_more_kids_indices = generate_moves_for_tt_move_nodes(struct_batch, child_was_from_tt_move_mask)
+
 
     get_indices_of_terminating_children(child_struct, hash_table)
 
@@ -734,7 +764,6 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
     if not evaluation_thread is None:
         evaluation_thread.join()
 
-
     if len(to_score_child_moves_indices) != 0 or len(to_score_not_child_moves_indices) != 0:
         move_thread, child_next_move_scores, not_child_next_move_scores = start_move_scoring(
             child_struct,
@@ -744,6 +773,9 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
             move_eval_fn)
     else:
         move_thread = None
+        child_next_move_scores = None
+        not_child_next_move_scores = None
+
 
     # A mask of the given batch which have more unexplored children left
     have_children_left_mask = struct_batch["next_move_index"] != 255
@@ -766,6 +798,7 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
         temp_set_tt_move_scores(node_batch[to_score_not_child_moves_indices], struct_batch[to_score_not_child_moves_indices])
 
 
+
     new_child_nodes = create_nodes_for_struct(
         child_struct[non_zero_depth_child_not_term_indices],
         node_batch[non_zero_depth_child_not_term_indices])
@@ -774,28 +807,18 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
         node_batch[have_children_left_mask],
         new_child_nodes))
 
-
-    if len(to_score_child_moves_indices) != 0:
-        temp_scores_for_insertion = np.concatenate((struct_batch_next_move_scores[struct_batch_next_move_scores != MIN_FLOAT32_VAL], child_next_move_scores))
-    else:
-        temp_scores_for_insertion = struct_batch_next_move_scores[struct_batch_next_move_scores != MIN_FLOAT32_VAL]
-
-
-    super_janky_temp_scores = np.full(len(to_insert), TT_MOVE_SCORE_VALUE, dtype=np.float32)
-    cur_index = 0
-    cur_index_in_other_thing = 0
-
-    for j in range(len(to_insert)):
-        if to_insert[j].board_struct[0]['children_left'] != NEXT_MOVE_IS_FROM_TT_VAL:
-            if temp_scores_for_insertion[cur_index] == TT_MOVE_SCORE_VALUE:
-                super_janky_temp_scores[j] = not_child_next_move_scores[cur_index_in_other_thing]
-                cur_index_in_other_thing += 1
-            else:
-                super_janky_temp_scores[j] = temp_scores_for_insertion[cur_index]
-            cur_index += 1
+    #Set up the array of scores used to place the returned nodes into their proper bins
+    scores_to_return = np.full(len(to_insert), TT_MOVE_SCORE_VALUE, dtype=np.float32)
+    num_not_child_scores = len(to_insert) - len(new_child_nodes)
+    if num_not_child_scores != 0:
+        scores_to_return[:num_not_child_scores] = struct_batch_next_move_scores[struct_batch_next_move_scores != MIN_FLOAT32_VAL]
+        if not not_child_next_move_scores is None and len(not_child_next_move_scores) != 0:
+            scores_to_return[:num_not_child_scores][scores_to_return[:num_not_child_scores] == TT_MOVE_SCORE_VALUE] = not_child_next_move_scores
+    if not child_next_move_scores is None and len(child_next_move_scores) != 0:
+        scores_to_return[num_not_child_scores:][child_struct[non_zero_depth_child_not_term_indices]['children_left'] != NEXT_MOVE_IS_FROM_TT_VAL] = child_next_move_scores
 
 
-    return to_insert, super_janky_temp_scores
+    return to_insert, scores_to_return
 
 
 
@@ -875,7 +898,7 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
         print("Average time per iteration:", time_taken_without_tt / iteration_counter)
         print("Total nodes computed:", total_nodes_computed)
         print("Nodes evaluated per second:", total_nodes_computed/time_taken_without_tt)
-        print("Total nodes given to linked list for insert", given_for_insert)
+        print("Total nodes given to bin arrays for insert", given_for_insert)
 
     return root_game_node.board_struct['best_value']
 
@@ -937,7 +960,7 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, board_eval_fn, move_ev
         #This would ideally share the same tree, but updated for the new seperation value
         cur_root_node = set_up_root_node(move_eval_fn, fen, depth, beta - np.finfo(np.float32).eps)#FLOAT32_EPS)
 
-        # print("current sepearator:", beta- np.finfo(np.float32).eps)#FLOAT32_EPS)
+        print("current sepearator:", beta- np.finfo(np.float32).eps)#FLOAT32_EPS)
         cur_guess = do_alpha_beta_search_with_bins(cur_root_node, search_batch_size, bins_to_use, board_eval_fn, move_eval_fn, hash_table=hash_table, print_info=print_info, full_testing=full_testing)
         if cur_guess < beta:
             upper_bound = cur_guess
@@ -951,7 +974,6 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, board_eval_fn, move_ev
 
     root_tt_entry = hash_table[np.uint64(cur_root_node.board_struct[0]['hash']) & ONES_IN_RELEVANT_BITS]
     try:
-        print(root_tt_entry["stored_from_square"])
         tt_move = chess.Move(root_tt_entry["stored_from_square"],
                        root_tt_entry["stored_to_square"],
                        root_tt_entry["stored_promotion"])
@@ -962,19 +984,22 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, board_eval_fn, move_ev
 
 
 
+
 def iterative_deepening_mtd_f(fen, depths_to_search, batch_sizes, min_windows_to_confirm, board_eval_fn, move_eval_fn, first_guess=0, guess_increments=None, bin_sets=None, hash_table=None):
     if hash_table is None:
-        starting_time = time.time()
+        start_time = time.time()
         hash_table = get_empty_hash_table()
-        # print("Hash table created in time:", time.time() - starting_time)
+        # print("Hash table created in time:", time.time() - start_time)
 
     if bin_sets is None:
         bin_sets = (np.arange(15, -15, -.025) for _ in range(len(depths_to_search)))
 
     if guess_increments is None:
-        guess_increments = [1]*len(depths_to_search)
+        guess_increments = [5]*len(depths_to_search)
 
     for depth, batch_size, window, increment, bins in zip(depths_to_search, batch_sizes, min_windows_to_confirm, guess_increments, bin_sets):
+        print("Starting depth %d search"%depth)
+        start_time = time.time()
         first_guess, tt_move, hash_table = mtd_f(fen,
                                                  depth,
                                                  first_guess,
@@ -986,6 +1011,7 @@ def iterative_deepening_mtd_f(fen, depths_to_search, batch_sizes, min_windows_to
                                                  bins_to_use=bins,
                                                  hash_table=hash_table,
                                                  full_testing=False)
+        print("Completed depth %d in time %f"%(depth, time.time() - start_time))
 
     return first_guess, tt_move, hash_table
 
@@ -996,14 +1022,17 @@ def iterative_deepening_mtd_f(fen, depths_to_search, batch_sizes, min_windows_to
 if __name__ == "__main__":
 
 
-    FEN_TO_TEST = "r2q1rk1/pbpnbppp/1p2pn2/3pN3/2PP4/1PN3P1/P2BPPBP/R2Q1RK1 w - - 10 11"#"rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"##"rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"#"#"rn1q1rk1/pbp1bppp/1p2pn2/3pN3/2PP4/1P4P1/P2BPPBP/RN1Q1RK1 w - - 8 10"#"  #
+    FEN_TO_TEST = "r2q1rk1/pbpnbppp/1p2pn2/3pN3/2PP4/1PN3P1/P2BPPBP/R2Q1RK1 w - - 10 11"#"rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"###"rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"#"#"rn1q1rk1/pbp1bppp/1p2pn2/3pN3/2PP4/1P4P1/P2BPPBP/RN1Q1RK1 w - - 8 10"#"  #
     DEPTH_OF_SEARCH = 4
-    MAX_BATCH_LIST =  [10000]#, 5000, 2000, 1000, 723, 500]# 5*[10000]#[5000]*3#[5000, 2000, 500]#,1,2,3,4,5,6,7,20]#[1,2,3,4]##1*[250,500, 1000, 2000]# [j**2 for j in range(40,0,-2)] + [5000]
+    MAX_BATCH_LIST =  [10000]*20#,5000, 2000, 5000, 2000, 1000, 723, 500,1]# 5*[10000]#[5000]*3#[5000, 2000, 500]#,1,2,3,4,5,6,7,20]#[1,2,3,4]##1*[250,500, 1000, 2000]# [j**2 for j in range(40,0,-2)] + [5000]
     SEPERATING_VALUE = 0
     BINS_TO_USE = np.arange(20, -20, -.02)
 
     PREDICTOR, CLOSER = evaluation_ann_main([True])
     MOVE_PREDICTOR, MOVE_CLOSER = move_ann_main([True])
+
+    # test_node = set_up_root_node(MOVE_PREDICTOR, "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+    # print(structured_scalar_perft_test(test_node.board_struct, 5))
 
 
     print(chess.Board(FEN_TO_TEST))
@@ -1012,6 +1041,11 @@ if __name__ == "__main__":
             start_time = time.time()
             results = mtd_f(FEN_TO_TEST,DEPTH_OF_SEARCH,first_guess,.001, PREDICTOR, MOVE_PREDICTOR, search_batch_size=batch_size, print_info=True, full_testing=False)
             print(results[0], results[1] ,"found by mtd(f)", time.time() - start_time, "\n")
+
+            # starting_time = time.time()
+            # # print(iterative_deepening_mtd_f(FEN_TO_TEST, [1, 2, 3, 4, 5], batch_sizes=[10000] * 5,min_windows_to_confirm=[.01, .01, .01, .001,.001], board_eval_fn=PREDICTOR, move_eval_fn=MOVE_PREDICTOR), "found by iterative deepening in time:", time.time() - starting_time)
+            # print(iterative_deepening_mtd_f(FEN_TO_TEST, [1, 2, 3, 4], batch_sizes=[10000] * 4,min_windows_to_confirm=[.01, .01, .001, .001], board_eval_fn=PREDICTOR,move_eval_fn=MOVE_PREDICTOR), "found by iterative deepening in time:",time.time() - starting_time)
+
 
     CLOSER()
     MOVE_CLOSER()

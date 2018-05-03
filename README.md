@@ -12,23 +12,22 @@ The Batch First engine will embody these ideas.
 - Using a framework similar to MTD(f) to converge towards a boards negamax value
 
 # Things Being Working On
-- Converting the array oriented parts of the negamax algorithm to implementations which better utilize SIMD instructions (mainly through Numba's Vectorize)
-- JIT compiling (with Numba) the entirety of the negamax algorithm implementation
+- Implementing a method of ANN inference more focused on low latency and high-throughput (probably using the [NVIDIA TensorRT](https://developer.nvidia.com/tensorrt) TensorFlow integration) 
+- Vectorizing array operations by means of the LLVM compiler's loop lifting
 - A semi-formal explanation of the engine's core components (e.g. a simple description of the negamax algorithm, and reasoning behind the neural network architecture used)
 
 # Dependencies
 The versions listed are the versions I'm currently using, but are not necessarily the only versions which will work.
 - [TensorFlow](https://github.com/tensorflow/tensorflow) v1.7.0
 - [NumPy](https://github.com/numpy/numpy) v1.14.2
-- [Numba](https://github.com/numba/numba) v0.36.2
+- [Numba](https://github.com/numba/numba) v0.38.0
 - [python-chess](https://github.com/niklasf/python-chess) v0.22.1
 - [khash_numba](https://github.com/synapticarbors/khash_numba)
 
 I run this using the [Intel Distribution For Python](https://software.intel.com/en-us/distribution-for-python) for the speed improvements to NumPy and Numba.   
 
 # Notes For Awesome Developers/People
-This engine is still in development, and thus needs work.  If you have any ideas, questions, are interested in potentially working on the engine, or anything else, I encourage you to send me an email!  
-   
+- This engine is still in development, and thus needs work.  If you have any ideas, questions, are interested in potentially working on the engine, or anything else, I encourage you to send me an email!
 
 # Other Information
 - Trained neural networks will be uploaded when hyperparameter tuning has been completely implemented/completed

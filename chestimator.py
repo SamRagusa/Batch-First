@@ -9,6 +9,7 @@ from tensorflow.python.training import saver
 from tensorflow.python.training import training
 from tensorflow.python.client import timeline
 
+from numba_board import generate_move_to_enumeration_dict
 
 def get_board_data(kings,queens,rooks,bishops,knights,pawns,castling_rights,ep_bitboards,occupied_w,occupied_b):#,occupied):
     non_castling_rooks = tf.bitwise.bitwise_xor(rooks, castling_rights)
@@ -173,7 +174,6 @@ class MoveChEstimator(Estimator):
                               max_moves_for_a_board=100,
                               max_batch_size=50000):
 
-
         run_metadata = tf.RunMetadata()
         hooks = _check_hooks_type(hooks)
 
@@ -197,20 +197,20 @@ class MoveChEstimator(Estimator):
         occupied_b = tf.placeholder(tf.int64, shape=[None], name="occupied_b_placeholder")
         # occupied = tf.placeholder(tf.int64, shape=[None], name="occupied_placeholder")
 
-        move_nums = tf.placeholder(tf.int32, shape=[None], name="move_nums_placeholder")
+        # move_nums = tf.placeholder(tf.int32, shape=[None], name="move_nums_placeholder")
         moves_per_board = tf.placeholder(tf.uint8, shape=[None], name="moves_per_board_placeholder")
-
+        moves = tf.placeholder(tf.uint8, shape=[None, 2], name="move_placeholder")
         # These will be used soon
         # moves_from_square = tf.placeholder(tf.uint8, shape=[None], name="moves_from_square_placeholder")
         # moves_to_square = tf.placeholder(tf.uint8, shape=[None], name="moves_to_square_placeholder")
-        # moves = tf.placeholder(tf.int32, shape=[None, 2], name="moves_placeholder")
 
 
 
+        move_to_index_array = np.zeros(shape=[64, 64], dtype=np.int32)
+        for key, value in generate_move_to_enumeration_dict().items():
+            move_to_index_array[key[0], key[1]] = value
 
-
-
-
+        move_to_index_tensor = tf.constant(move_to_index_array, shape=[64, 64])
 
         properly_arranged_data = get_board_data(kings, queens, rooks, bishops, knights, pawns, castling_rights,
                                                 ep_bitboards, occupied_w, occupied_b)
@@ -222,6 +222,9 @@ class MoveChEstimator(Estimator):
 
         predictions = self._extract_keys(estimator_spec.predictions, predict_keys)[predict_keys]
 
+
+
+
         board_index_repeated_array = tf.transpose(
             tf.reshape(
                 tf.tile(
@@ -230,15 +233,12 @@ class MoveChEstimator(Estimator):
                 [max_batch_size, max_moves_for_a_board]),
             [1, 0])
 
+        board_indices_for_moves = tf.boolean_mask(board_index_repeated_array,
+                                                  tf.sequence_mask(tf.cast(moves_per_board, tf.int32)))
 
-
-
-        board_indices_for_moves = tf.boolean_mask(board_index_repeated_array, tf.sequence_mask(tf.cast(moves_per_board,tf.int32)))
-
-
+        move_nums = tf.gather_nd(move_to_index_tensor, tf.cast(moves, tf.int32))
 
         the_moves = tf.stack([board_indices_for_moves, move_nums], axis=-1)
-
 
         legal_move_scores = tf.gather_nd(predictions, the_moves)
 
@@ -250,11 +250,9 @@ class MoveChEstimator(Estimator):
                 config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.45))),
             hooks=hooks)
 
-
         def predictor(bb_array, the_moves, num_moves_per_board):
             if mon_sess.should_stop():
                 raise StopIteration
-
             return mon_sess.run(legal_move_scores,
                                 {kings: bb_array[0],
                                  queens: bb_array[1],
@@ -267,8 +265,8 @@ class MoveChEstimator(Estimator):
                                  occupied_w: bb_array[8],
                                  occupied_b: bb_array[9],
                                  # occupied: bb_array[10],
-                                 move_nums: the_moves,
-                                 moves_per_board : num_moves_per_board})
+                                 moves: the_moves,
+                                 moves_per_board: num_moves_per_board})
 
         def finish():
             fetched_timeline = timeline.Timeline(run_metadata.step_stats)
@@ -280,4 +278,3 @@ class MoveChEstimator(Estimator):
             mon_sess.close()
 
         return predictor, finish
-

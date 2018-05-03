@@ -202,7 +202,7 @@ def create_node_info_from_fen(fen, depth, seperator):
                       np.full([3], 255, dtype=np.uint8), #The move made to reach the position this board represents
                       0,           #next_move_index  (the index in the stored moves where the next move to make is)
                       0)                   #children_left (the number of children which have yet to returne a value, or be created)
-                     ],dtype=numba_node_info_type)
+                     ],dtype=numpy_node_info_dtype)
 
 
 
@@ -1125,12 +1125,9 @@ def generate_pseudo_legal_ep(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
 
 @njit#(uint64(BoardState.class_type.instance_type, uint8))
 def _slider_blockers(board_state, king):
-    # THESE CAN GO IN snipers INITIALIZATION
-    rooks_and_queens = board_state.rooks | board_state.queens
-    bishops_and_queens = board_state.bishops | board_state.queens
-    snipers = ((RANK_ATTACK_ARRAY[king][0] & rooks_and_queens) |
-               (FILE_ATTACK_ARRAY[king][0] & rooks_and_queens) |
-               (DIAG_ATTACK_ARRAY[king][0] & bishops_and_queens))
+    snipers = (((board_state.rooks | board_state.queens) &
+               (RANK_ATTACK_ARRAY[king][0] | FILE_ATTACK_ARRAY[king][0])) |
+               (DIAG_ATTACK_ARRAY[king][0] & (board_state.bishops | board_state.queens)))
 
     blockers = 0
     if board_state.turn == TURN_WHITE:
@@ -1840,9 +1837,14 @@ def structured_scalar_perft_test(struct_array, depth):
 
     structured_scalar_perft_test_move_gen_helper(struct_array)
 
-    repeated_struct_array = np.repeat(struct_array, struct_array['children_left'])
+
+    if depth == 1:
+        return np.sum(struct_array['children_left'])
 
     legal_moves = struct_array['unexplored_moves'][struct_array['unexplored_moves'][..., 0] != 255]
+
+
+    repeated_struct_array = np.repeat(struct_array, struct_array['children_left'])
 
     #Not sure if these actually provide a speed increase
     repeated_struct_array = np.ascontiguousarray(repeated_struct_array)

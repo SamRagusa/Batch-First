@@ -20,11 +20,40 @@ from itertools import product, chain
 from evaluation_ann import main as evaluation_ann_main
 from ann_creation_helper import line_counter
 
-from numba_negamax_zero_window import for_all_white_jitclass_array_to_basic_input_for_anns
-
 from numba_board import create_board_state_from_fen, generate_legal_moves, BB_ALL,\
-    generate_move_to_enumeration_dict, Move, TURN_WHITE, copy_push, vectorized_flip_vertically,\
-    msb, BoardState, BB_SQUARES, INITIAL_BOARD_FEN, push_with_hash_update, popcount
+    generate_move_to_enumeration_dict, Move, TURN_WHITE, TURN_BLACK, copy_push, vectorized_flip_vertically,\
+    msb, BoardState, BB_SQUARES, INITIAL_BOARD_FEN, push_with_hash_update, popcount, numpy_node_info_dtype, \
+    MAX_MOVES_LOOKED_AT, MIN_FLOAT32_VAL, set_up_move_array
+
+
+@nb.njit
+def for_all_white_jitclass_to_array_for_ann(board):
+    if board.turn == TURN_WHITE:
+        return np.array([board.kings, board.queens, board.rooks, board.bishops, board.knights, board.pawns,
+                        board.castling_rights, 0 if board.ep_square is None else BB_SQUARES[np.int32(board.ep_square)],
+                        board.occupied_w, board.occupied_b, board.occupied],dtype=np.uint64)
+    else:
+        return np.array([board.kings, board.queens, board.rooks, board.bishops, board.knights, board.pawns,
+                        board.castling_rights, 0 if board.ep_square is None else BB_SQUARES[np.int32(board.ep_square)],
+                        board.occupied_b, board.occupied_w, board.occupied],dtype=np.uint64)
+
+
+
+def for_all_white_jitclass_array_to_basic_input_for_anns(board_array):
+    to_return = np.empty(shape=[len(board_array),11], dtype=np.uint64)
+    black_turn = np.zeros(shape=len(board_array), dtype=np.bool_)
+    for j, board in enumerate(board_array):
+
+        to_return[j] = for_all_white_jitclass_to_array_for_ann(board)
+
+        if board.turn == TURN_BLACK:
+            black_turn[j] = True
+
+
+    to_return[black_turn] = vectorized_flip_vertically(to_return[black_turn])
+
+    return to_return.transpose()
+
 
 
 
