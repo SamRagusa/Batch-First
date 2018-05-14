@@ -20,6 +20,12 @@ from numba import jit, njit, jitclass, vectorize
 from numba import cffi_support
 from cffi import FFI
 import time
+import itertools
+import functools
+
+# import llvmlite.binding as llvm
+# llvm.set_option('', '--debug-only=loop-vectorize')
+
 
 ffi = FFI()
 
@@ -40,6 +46,8 @@ move_type = nb.from_dtype(numpy_move_dtype)
 
 MAX_MOVES_LOOKED_AT = 100
 EMPTY_MOVE_ARRAY = np.zeros([MAX_MOVES_LOOKED_AT], numpy_move_dtype)
+
+
 
 
 @njit
@@ -358,6 +366,7 @@ BB_BACKRANKS = BB_RANK_1 | BB_RANK_8
 INITIAL_BOARD_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
 
+
 flip_vert_const_1 = np.uint64(0x00FF00FF00FF00FF)
 flip_vert_const_2 = np.uint64(0x0000FFFF0000FFFF)
 
@@ -367,6 +376,7 @@ def vectorized_flip_vertically(bb):
     bb = ((bb >> 16) & flip_vert_const_2) | ((bb & flip_vert_const_2) << 16)
     bb = ( bb >> 32) | ( bb << 32)
     return bb
+
 
 
 # THIS IS VERY SLOW AND A TEMPORARY IMPLEMENTATION
@@ -385,7 +395,7 @@ def msb(n):
 def scan_reversed(bb):
     for index in range(BB_SQUARES.shape[0]):
         if bb & BB_SQUARES[index]:
-            yield index
+            yield np.uint8(index)
             bb ^= BB_SQUARES[index]
     return
 
@@ -414,54 +424,25 @@ def vectorized_popcount(n):
     return n
 
 
-@vectorize([uint8(uint8)],nopython=True)
-def vectorized_square_file(square):
-    return square & 7
-
 @njit(uint8(uint8))
 def square_file(square):
     return square & 7
-
-
-@vectorize([uint8(uint8)],nopython=True)
-def vectorized_square_rank(square):
-    return square >> 3
 
 @njit(uint8(uint8))
 def square_rank(square):
     return square >> 3
 
-
-@vectorize([uint64(uint64)],nopython=True)
-def vectorized_shift_down(b):
-    return b >> 8
-
 @njit(uint64(uint64))
 def shift_down(b):
     return b >> 8
-
-
-@vectorize([uint64(uint64)],nopython=True)
-def vectorized_shift_up(b):
-    return b << 8
 
 @njit(uint64(uint64))
 def shift_up(b):
     return b << 8
 
-
-@vectorize([uint64(uint64)],nopython=True)
-def vectorized_shift_right(b):
-    return b << 1
-
 @njit(uint64(uint64))
 def shift_right(b):
     return b << 1
-
-
-@vectorize([uint64(uint64)],nopython=True)
-def vectorized_shift_left(b):
-    return b >> 1
 
 @njit(uint64(uint64))
 def shift_left(b):
@@ -473,8 +454,6 @@ def any(iterable):
     for _ in iterable:
         return True
     return False
-
-
 
 
 
@@ -586,7 +565,7 @@ def create_board_state_from_fen(fen):
                       np.uint64(temp_board.occupied_co[chess.WHITE]),
                       np.uint64(temp_board.occupied_co[chess.BLACK]),
                       np.uint64(temp_board.occupied),
-                      np.bool(temp_board.turn),
+                      np.bool_(temp_board.turn),
                       np.uint64(temp_board.castling_rights),
                       None if temp_board.ep_square is None else np.uint8(temp_board.ep_square),
                       np.uint8(temp_board.halfmove_clock),
@@ -1058,10 +1037,10 @@ def _attackers_mask(board_state, color, square, occupied):
     attackers = (
         (BB_KING_ATTACKS[square] & board_state.kings) |
         (BB_KNIGHT_ATTACKS[square] & board_state.knights) |
-        (RANK_ATTACK_ARRAY[square][khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[square] & occupied, 0)] & queens_and_rooks) |
-        (FILE_ATTACK_ARRAY[square][khash_get(FILE_ATTACK_INDEX_LOOKUP_TABLE, BB_FILE_MASKS[square] & occupied, 0)] & queens_and_rooks) |
-        (DIAG_ATTACK_ARRAY[square][khash_get(DIAG_ATTACK_INDEX_LOOKUP_TABLE, BB_DIAG_MASKS[square] & occupied, 0)] & queens_and_bishops) |
-        (BB_PAWN_ATTACKS[color_index][square] & board_state.pawns))
+        (RANK_ATTACK_ARRAY[square, khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[square] & occupied, 0)] & queens_and_rooks) |
+        (FILE_ATTACK_ARRAY[square, khash_get(FILE_ATTACK_INDEX_LOOKUP_TABLE, BB_FILE_MASKS[square] & occupied, 0)] & queens_and_rooks) |
+        (DIAG_ATTACK_ARRAY[square, khash_get(DIAG_ATTACK_INDEX_LOOKUP_TABLE, BB_DIAG_MASKS[square] & occupied, 0)] & queens_and_bishops) |
+        (BB_PAWN_ATTACKS[color_index, square] & board_state.pawns))
 
     if color == TURN_WHITE:
         return attackers & board_state.occupied_w
@@ -1074,9 +1053,9 @@ def attacks_mask(board_state, square):
 
     if bb_square & board_state.pawns:
         if bb_square & board_state.occupied_w:
-            return BB_PAWN_ATTACKS[WHITE][square]
+            return BB_PAWN_ATTACKS[WHITE, square]
         else:
-            return BB_PAWN_ATTACKS[BLACK][square]
+            return BB_PAWN_ATTACKS[BLACK, square]
     elif bb_square & board_state.knights:
         return BB_KNIGHT_ATTACKS[square]
     elif bb_square & board_state.kings:
@@ -1084,13 +1063,13 @@ def attacks_mask(board_state, square):
     else:
         attacks = np.uint64(0)
         if bb_square & board_state.bishops or bb_square & board_state.queens:
-            attacks = DIAG_ATTACK_ARRAY[square][
+            attacks = DIAG_ATTACK_ARRAY[square,
                 khash_get(DIAG_ATTACK_INDEX_LOOKUP_TABLE, BB_DIAG_MASKS[square] & board_state.occupied, 0)]
         if bb_square & board_state.rooks or bb_square & board_state.queens:
 
-            attacks |= (RANK_ATTACK_ARRAY[square][
+            attacks |= (RANK_ATTACK_ARRAY[square,
                             khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[square] & board_state.occupied,0)] |
-                        FILE_ATTACK_ARRAY[square][
+                        FILE_ATTACK_ARRAY[square,
                             khash_get(FILE_ATTACK_INDEX_LOOKUP_TABLE, BB_FILE_MASKS[square] & board_state.occupied, 0)])
         return attacks
 
@@ -1109,11 +1088,11 @@ def generate_pseudo_legal_ep(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
     if board_state.turn:
         capturers = (
             board_state.pawns & board_state.occupied_w & from_mask &
-            BB_PAWN_ATTACKS[BLACK][temp_ep_square] & BB_RANKS[4])
+            BB_PAWN_ATTACKS[BLACK, temp_ep_square] & BB_RANKS[4])
     else:
         capturers = (
             board_state.pawns & board_state.occupied_b & from_mask &
-            BB_PAWN_ATTACKS[WHITE][temp_ep_square] & BB_RANKS[3])
+            BB_PAWN_ATTACKS[WHITE, temp_ep_square] & BB_RANKS[3])
 
     for capturer in scan_reversed(capturers):
         yield create_move(capturer, temp_ep_square)
@@ -1126,13 +1105,13 @@ def generate_pseudo_legal_ep(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
 @njit#(uint64(BoardState.class_type.instance_type, uint8))
 def _slider_blockers(board_state, king):
     snipers = (((board_state.rooks | board_state.queens) &
-               (RANK_ATTACK_ARRAY[king][0] | FILE_ATTACK_ARRAY[king][0])) |
-               (DIAG_ATTACK_ARRAY[king][0] & (board_state.bishops | board_state.queens)))
+               (RANK_ATTACK_ARRAY[king, 0] | FILE_ATTACK_ARRAY[king, 0])) |
+               (DIAG_ATTACK_ARRAY[king, 0] & (board_state.bishops | board_state.queens)))
 
     blockers = 0
     if board_state.turn == TURN_WHITE:
         for sniper in scan_reversed(snipers & board_state.occupied_b):
-            b = BB_BETWEEN[king][sniper] & board_state.occupied
+            b = BB_BETWEEN[king, sniper] & board_state.occupied
 
             # Add to blockers if exactly one piece in between.
             if b and BB_SQUARES[msb(b)] == b:
@@ -1141,7 +1120,7 @@ def _slider_blockers(board_state, king):
         return blockers & board_state.occupied_w
     else:
         for sniper in scan_reversed(snipers & board_state.occupied_w):
-            b = BB_BETWEEN[king][sniper] & board_state.occupied
+            b = BB_BETWEEN[king, sniper] & board_state.occupied
 
             # Add to blockers if exactly one piece in between.
             if b and BB_SQUARES[msb(b)] == b:
@@ -1198,7 +1177,7 @@ def _castling_uncovers_rank_attack(board_state, rook_bb, king_to):
         sliders = (board_state.queens | board_state.rooks) & board_state.occupied_b
     else:
         sliders = (board_state.queens | board_state.rooks) & board_state.occupied_w
-    return RANK_ATTACK_ARRAY[king_to][khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, rank_pieces, 0)] & sliders
+    return RANK_ATTACK_ARRAY[king_to, khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, rank_pieces, 0)] & sliders
 
 
 @njit#(Move.class_type.instance_type(BoardState.class_type.instance_type, uint8, uint8))
@@ -1223,32 +1202,31 @@ def _from_chess960(board_state, from_square, to_square):
 def _from_chess960_tuple(board_state, from_square, to_square):
     if from_square == E1 and board_state.kings & BB_E1:
         if to_square == H1:
-            return E1, G1, 0
+            return E1, G1, np.uint8(0)
         elif to_square == A1:
-            return E1, C1, 0
+            return E1, C1, np.uint8(0)
     elif from_square == E8 and board_state.kings & BB_E8:
         if to_square == H8:
-            return E8, G8, 0
+            return E8, G8, np.uint8(0)
         elif to_square == A8:
-            return E8, C8, 0
+            return E8, C8, np.uint8(0)
 
     # promotion is set to 0 because this function only gets called when looking for castling moves,
     # which can't have promotions
-    return from_square, to_square, 0
+    return from_square, to_square, np.uint8(0)
 
 
 @njit#((BoardState.class_type.instance_type, uint64, uint64))
 def generate_castling_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
     if board_state.turn:
-        backrank = BB_RANK_1 if board_state.turn == TURN_WHITE else BB_RANK_8
+        backrank = BB_RANK_1
         king = board_state.occupied_w & board_state.kings & backrank & from_mask
     else:
-        backrank = BB_RANK_1 if board_state.turn == TURN_WHITE else BB_RANK_8
+        backrank = BB_RANK_8
         king = board_state.occupied_b & board_state.kings & backrank & from_mask
 
     king = king & -king
 
-    ###################pretty sure I can remove the "if not king", since
     if not king or _attacked_for_king(board_state, king, board_state.occupied):
         return
 
@@ -1266,15 +1244,15 @@ def generate_castling_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
         if rook < king:
             king_to = msb(bb_c)
             if not rook & bb_d:
-                empty_for_rook = BB_BETWEEN[candidate][msb(bb_d)] | bb_d
+                empty_for_rook = BB_BETWEEN[candidate, msb(bb_d)] | bb_d
             if not king & bb_c:
-                empty_for_king = BB_BETWEEN[msb(king)][king_to] | bb_c
+                empty_for_king = BB_BETWEEN[msb(king), king_to] | bb_c
         else:
             king_to = msb(bb_g)
             if not rook & bb_f:
-                empty_for_rook = BB_BETWEEN[candidate][msb(bb_f)] | bb_f
+                empty_for_rook = BB_BETWEEN[candidate, msb(bb_f)] | bb_f
             if not king & bb_g:
-                empty_for_king = BB_BETWEEN[msb(king)][king_to] | bb_g
+                empty_for_king = BB_BETWEEN[msb(king), king_to] | bb_g
 
         if not ((board_state.occupied ^ king ^ rook) & (empty_for_king | empty_for_rook) or
                     _attacked_for_king(board_state, empty_for_king, board_state.occupied ^ king) or
@@ -1282,6 +1260,190 @@ def generate_castling_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
             yield _from_chess960(board_state, msb(king), candidate)
 
     return
+
+
+
+
+@njit
+def set_pseudo_legal_ep(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
+    if board_state['ep_square'] == 0:
+        return
+
+    if not BB_SQUARES[board_state['ep_square']] & to_mask:
+        return
+
+    if BB_SQUARES[board_state['ep_square']] & board_state['occupied']:
+        return
+
+    if board_state['turn']:
+        capturers = (
+            board_state['pawns'] & board_state['occupied_w'] & from_mask &
+            BB_PAWN_ATTACKS[BLACK, board_state['ep_square']] & BB_RANKS[4])
+    else:
+        capturers = (
+            board_state['pawns'] & board_state['occupied_b'] & from_mask &
+            BB_PAWN_ATTACKS[WHITE, board_state['ep_square']] & BB_RANKS[3])
+
+    for capturer in scan_reversed(capturers):
+        board_state['unexplored_moves'][board_state.children_left, 0] = capturer
+        board_state['unexplored_moves'][board_state.children_left, 1] = board_state['ep_square']
+        board_state['unexplored_moves'][board_state.children_left, 2] = 0
+        # board_state['unexplored_moves'][board_state.children_left] = (capturer, board_state['ep_square'], 0)
+        board_state['children_left'] += 1
+
+
+@njit
+def set_castling_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
+    if board_state['turn']:
+        backrank = BB_RANK_1
+        king = board_state['occupied_w'] & board_state['kings'] & backrank & from_mask
+    else:
+        backrank = BB_RANK_8
+        king = board_state['occupied_b'] & board_state['kings'] & backrank & from_mask
+
+    king = king & -king
+
+    if not king or _attacked_for_king(board_state, king, board_state['occupied']):
+        return
+
+
+
+    for candidate in scan_reversed(board_state['castling_rights'] & backrank & to_mask):
+        rook = BB_SQUARES[candidate]
+
+        empty_for_rook = np.uint64(0)
+        empty_for_king = np.uint64(0)
+
+        if rook < king:
+            bb_c = BB_FILE_C & backrank
+            bb_d = BB_FILE_D & backrank
+
+            king_to = msb(bb_c)
+            if not rook & bb_d:
+                empty_for_rook = BB_BETWEEN[candidate, msb(bb_d)] | bb_d
+            if not king & bb_c:
+                empty_for_king = BB_BETWEEN[msb(king), king_to] | bb_c
+        else:
+            bb_f = BB_FILE_F & backrank
+            bb_g = BB_FILE_G & backrank
+
+            king_to = msb(bb_g)
+            if not rook & bb_f:
+                empty_for_rook = BB_BETWEEN[candidate, msb(bb_f)] | bb_f
+            if not king & bb_g:
+                empty_for_king = BB_BETWEEN[msb(king), king_to] | bb_g
+
+        if not ((board_state['occupied'] ^ king ^ rook) & (empty_for_king | empty_for_rook) or
+                _attacked_for_king(board_state, empty_for_king, board_state['occupied'] ^ king) or
+                _castling_uncovers_rank_attack(board_state, rook, king_to)):
+            board_state['unexplored_moves'][board_state.children_left, :] = _from_chess960_tuple(board_state, msb(king), candidate)
+            board_state['children_left'] += 1
+
+
+@njit
+def set_pseudo_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
+    if board_state['turn'] == TURN_WHITE:
+        cur_turn_occupied = board_state['occupied_w']
+        opponent_occupied = board_state['occupied_b']
+    else:
+        cur_turn_occupied = board_state['occupied_b']
+        opponent_occupied = board_state['occupied_w']
+
+    our_pieces = cur_turn_occupied
+
+    # Generate piece moves.
+    non_pawns = our_pieces & ~board_state['pawns'] & from_mask
+
+    for from_square in scan_reversed(non_pawns):
+
+        moves = attacks_mask(board_state, from_square) & ~our_pieces & to_mask
+        for to_square in scan_reversed(moves):
+
+            board_state['unexplored_moves'][board_state.children_left, 0] = from_square
+            board_state['unexplored_moves'][board_state.children_left, 1] = to_square
+            board_state['unexplored_moves'][board_state.children_left, 2] = 0
+            board_state['children_left'] += 1
+
+    # Generate castling moves.
+    if from_mask & board_state['kings']:
+        set_castling_moves(board_state, from_mask, to_mask)
+
+    # The remaining moves are all pawn moves.
+    pawns = board_state['pawns'] & cur_turn_occupied & from_mask
+    if not pawns:
+        return
+
+    # Generate pawn captures.
+    capturers = pawns
+    for from_square in scan_reversed(capturers):
+        if board_state['turn']:
+            targets = (BB_PAWN_ATTACKS[WHITE, from_square] &
+                       opponent_occupied & to_mask)
+        else:
+            targets = (BB_PAWN_ATTACKS[BLACK, from_square] &
+                       opponent_occupied & to_mask)
+
+        for to_square in scan_reversed(targets):
+            if square_rank(to_square) in [0, 7]:
+                # board_state['unexplored_moves'][board_state.children_left:board_state.children_left+4][:] = (from_square, to_square, 0)
+                board_state['unexplored_moves'][board_state.children_left:board_state.children_left+4, 0] = from_square
+                board_state['unexplored_moves'][board_state.children_left:board_state.children_left+4, 1] = to_square
+                board_state['unexplored_moves'][board_state.children_left:board_state.children_left+4, 2] = (QUEEN, ROOK, BISHOP, KNIGHT)
+                board_state['children_left'] += 4
+            else:
+                board_state['unexplored_moves'][board_state.children_left, 0] = from_square
+                board_state['unexplored_moves'][board_state.children_left, 1] = to_square
+                board_state['unexplored_moves'][board_state.children_left, 2] = 0
+                # board_state['unexplored_moves'][board_state.children_left][:] = (from_square, to_square, 0)
+                board_state['children_left'] += 1
+
+    # Prepare pawn advance generation.
+    if board_state['turn'] == TURN_WHITE:
+        single_moves = pawns << 8 & ~board_state['occupied']
+        double_moves = single_moves << 8 & ~board_state['occupied'] & (BB_RANK_3 | BB_RANK_4)
+    else:
+        single_moves = pawns >> 8 & ~board_state['occupied']
+        double_moves = single_moves >> 8 & ~board_state['occupied'] & (BB_RANK_6 | BB_RANK_5)
+
+    single_moves &= to_mask
+    double_moves &= to_mask
+
+    # Generate single pawn moves.
+    for to_square in scan_reversed(single_moves):
+        if board_state['turn'] == TURN_BLACK:
+            from_square = to_square + 8
+        else:
+            from_square = to_square - 8
+
+        if square_rank(to_square) in [0, 7]:
+            board_state['unexplored_moves'][board_state.children_left:board_state.children_left + 4, 0] = from_square
+            board_state['unexplored_moves'][board_state.children_left:board_state.children_left + 4, 1] = to_square
+            board_state['unexplored_moves'][board_state.children_left:board_state.children_left + 4, 2] = (QUEEN, ROOK, BISHOP, KNIGHT)
+            board_state['children_left'] += 4
+        else:
+            # board_state['unexplored_moves'][board_state.children_left][:] = (from_square, to_square, 0)
+            board_state['unexplored_moves'][board_state.children_left, 0] = from_square
+            board_state['unexplored_moves'][board_state.children_left, 1] = to_square
+            board_state['unexplored_moves'][board_state.children_left, 2] = 0
+            board_state['children_left'] += 1
+
+    # Generate double pawn moves.
+    for to_square in scan_reversed(double_moves):
+        if board_state['turn'] == TURN_BLACK:
+            from_square = to_square + 16
+        else:
+            from_square = to_square - 16
+        board_state['unexplored_moves'][board_state.children_left, 0] = from_square
+        board_state['unexplored_moves'][board_state.children_left, 1] = to_square
+        board_state['unexplored_moves'][board_state.children_left, 2] = 0
+        # board_state['unexplored_moves'][board_state.children_left,:] = (from_square, to_square, 0)
+        board_state['children_left'] += 1
+
+    # Generate en passant captures.
+    if board_state['ep_square'] != 0:
+        set_pseudo_legal_ep(board_state, from_mask, to_mask)
+
+
 
 
 
@@ -1319,13 +1481,11 @@ def generate_pseudo_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
     capturers = pawns
     for from_square in scan_reversed(capturers):
         if board_state.turn:
-            targets = (
-                BB_PAWN_ATTACKS[WHITE][from_square] &
-                opponent_occupied & to_mask)
+            targets = (BB_PAWN_ATTACKS[WHITE, from_square] &
+                       opponent_occupied & to_mask)
         else:
-            targets = (
-                BB_PAWN_ATTACKS[BLACK][from_square] &
-                opponent_occupied & to_mask)
+            targets = (BB_PAWN_ATTACKS[BLACK, from_square] &
+                       opponent_occupied & to_mask)
 
         for to_square in scan_reversed(targets):
             if square_rank(to_square) in [0, 7]:
@@ -1388,7 +1548,7 @@ def _generate_evasions(board_state, king, checkers, from_mask=BB_ALL, to_mask=BB
 
     attacked = np.uint64(0)
     for checker in scan_reversed(sliders):
-        attacked |= BB_RAYS[king][checker] & ~BB_SQUARES[checker]
+        attacked |= BB_RAYS[king, checker] & ~BB_SQUARES[checker]
 
     if BB_SQUARES[king] & from_mask:
         if board_state.turn:
@@ -1401,7 +1561,7 @@ def _generate_evasions(board_state, king, checkers, from_mask=BB_ALL, to_mask=BB
     checker = msb(checkers)
     if BB_SQUARES[checker] == checkers:
         # Capture or block a single checker.
-        target = BB_BETWEEN[king][checker] | checkers
+        target = BB_BETWEEN[king, checker] | checkers
 
 
         for move in generate_pseudo_legal_moves(board_state, ~board_state.kings & from_mask, target & to_mask):
@@ -1443,7 +1603,7 @@ def is_en_passant(board_state, move):
 
 
 
-@njit(uint64(BoardState.class_type.instance_type, boolean, uint8))
+@njit
 def pin_mask(board_state, color, square):
     if color:
         king = msb(board_state.occupied_w & board_state.kings)
@@ -1462,8 +1622,8 @@ def pin_mask(board_state, color, square):
                 snipers = rays & sliders & board_state.occupied_w
 
             for sniper in scan_reversed(snipers):
-                if BB_BETWEEN[sniper][king] & (board_state.occupied | square_mask) == square_mask:
-                    return BB_RAYS[king][sniper]
+                if BB_BETWEEN[sniper, king] & (board_state.occupied | square_mask) == square_mask:
+                    return BB_RAYS[king, sniper]
 
             break
 
@@ -1487,7 +1647,7 @@ def _ep_skewered(board_state, king, capturer):
 
         # Horizontal attack on the fifth or fourth rank.
         horizontal_attackers = board_state.occupied_b & (board_state.rooks | board_state.queens)
-        if RANK_ATTACK_ARRAY[king][khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[king] & occupancy, 0)] & horizontal_attackers:
+        if RANK_ATTACK_ARRAY[king, khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[king] & occupancy, 0)] & horizontal_attackers:
             return True
 
     else:
@@ -1496,15 +1656,18 @@ def _ep_skewered(board_state, king, capturer):
 
         # Horizontal attack on the fifth or fourth rank.
         horizontal_attackers = board_state.occupied_w & (board_state.rooks | board_state.queens)
-        if RANK_ATTACK_ARRAY[king][
-            khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[king] & occupancy, 0)] & horizontal_attackers:
+        if RANK_ATTACK_ARRAY[king,
+                             khash_get(
+                                 RANK_ATTACK_INDEX_LOOKUP_TABLE,
+                                 BB_RANK_MASKS[king] & occupancy,
+                                 0)] & horizontal_attackers:
             return True
 
     return False
 
 
 
-@njit(boolean(BoardState.class_type.instance_type))
+@njit#(boolean(BoardState.class_type.instance_type))
 def is_in_check(board_state):
     if board_state.turn == TURN_WHITE:
         king = msb(board_state.occupied_w & board_state.kings)
@@ -1527,8 +1690,341 @@ def _is_safe(board_state, king, blockers, move):
                 not _ep_skewered(board_state, king, move.from_square))
     else:
         return (not blockers & BB_SQUARES[move.from_square] or
-                BB_RAYS[move.from_square][move.to_square] & BB_SQUARES[king])
+                BB_RAYS[move.from_square, move.to_square] & BB_SQUARES[king])
 
+
+@njit
+def is_pseudo_legal_ep(board_state, from_mask, to_mask):
+    if board_state['ep_square'] == 0:
+        return False
+
+    if not BB_SQUARES[board_state['ep_square']] & to_mask:
+        return False
+
+    if BB_SQUARES[board_state['ep_square']] & board_state['occupied']:
+        return False
+
+    if board_state['turn']:
+        if board_state['pawns'] & board_state['occupied_w'] & from_mask & BB_PAWN_ATTACKS[BLACK, board_state['ep_square']] & BB_RANKS[4] != 0:
+            return True
+    else:
+        if board_state['pawns'] & board_state['occupied_b'] & from_mask & BB_PAWN_ATTACKS[WHITE, board_state['ep_square']] & BB_RANKS[3] != 0:
+            return True
+
+    return False
+
+
+
+@njit
+def is_pseudo_legal_castling_move(board_state, from_mask, to_mask):
+    if board_state['turn']:
+        backrank = BB_RANK_1
+        king = board_state['occupied_w'] & board_state['kings'] & backrank & from_mask
+    else:
+        backrank = BB_RANK_8
+        king = board_state['occupied_b'] & board_state['kings'] & backrank & from_mask
+
+    king = king & -king
+
+    if not king or _attacked_for_king(board_state, king, board_state['occupied']):
+        return False
+
+
+    candidates = board_state['castling_rights'] & backrank & to_mask
+    if candidates != 0:
+        candidate = msb(candidates)
+        rook = BB_SQUARES[candidate]
+
+        empty_for_rook = np.uint64(0)
+        empty_for_king = np.uint64(0)
+
+        if rook < king:
+            bb_c = BB_FILE_C & backrank
+            bb_d = BB_FILE_D & backrank
+
+
+            king_to = msb(bb_c)
+            if not rook & bb_d:
+                empty_for_rook = BB_BETWEEN[candidate, msb(bb_d)] | bb_d
+            if not king & bb_c:
+                empty_for_king = BB_BETWEEN[msb(king), king_to] | bb_c
+        else:
+            bb_f = BB_FILE_F & backrank
+            bb_g = BB_FILE_G & backrank
+
+
+            king_to = msb(bb_g)
+            if not rook & bb_f:
+                empty_for_rook = BB_BETWEEN[candidate, msb(bb_f)] | bb_f
+            if not king & bb_g:
+                empty_for_king = BB_BETWEEN[msb(king), king_to] | bb_g
+
+        if not ((board_state['occupied'] ^ king ^ rook) & (empty_for_king | empty_for_rook) or
+                _attacked_for_king(board_state, empty_for_king, board_state['occupied'] ^ king) or
+                _castling_uncovers_rank_attack(board_state, rook, king_to)):
+            return True
+
+    return False
+
+
+@njit
+def scalar_is_pseudo_legal_move(board_state, move):
+    if board_state['turn'] == TURN_WHITE:
+        cur_turn_occupied = board_state['occupied_w']
+        opponent_occupied = board_state['occupied_b']
+    else:
+        cur_turn_occupied = board_state['occupied_b']
+        opponent_occupied = board_state['occupied_w']
+
+    our_pieces = cur_turn_occupied
+
+    from_mask = BB_SQUARES[move[0]]
+    to_mask = BB_SQUARES[move[1]]
+
+    # Generate piece moves.
+    non_pawns = our_pieces & ~board_state['pawns'] & from_mask
+    if non_pawns != 0:
+        if attacks_mask(board_state, msb(non_pawns)) & ~our_pieces & to_mask != 0:
+            if move[2] == 0:
+                return True
+
+    # Generate castling moves.
+    if from_mask & board_state['kings']:
+
+        chess960_from_square, chess960_to_square, _ = _to_chess960_tuple(board_state, move)
+        if chess960_to_square != move[1]:
+            if is_pseudo_legal_castling_move(board_state, BB_SQUARES[chess960_from_square], BB_SQUARES[chess960_to_square]):
+                if move[2] == 0:
+                    return True
+
+    # The remaining possible moves are all pawn moves.
+    pawns = board_state['pawns'] & cur_turn_occupied & from_mask
+    if not pawns:
+        return False
+
+
+    # Check pawn captures.
+    if board_state['turn']:
+        targets = BB_PAWN_ATTACKS[WHITE, msb(pawns)] & opponent_occupied & to_mask
+        if targets != 0:
+            if square_rank(msb(targets)) in [0,7]:
+                if not move[2] in [0, PAWN, KING]:
+                    return True
+                else:
+                    return False
+            else:
+                if move[2] == 0:
+                    return True
+                else:
+                    return False
+    else:
+        if BB_PAWN_ATTACKS[BLACK, msb(pawns)] & opponent_occupied & to_mask != 0:
+            return True
+
+
+
+    # Check pawn advance generation.
+    if board_state['turn']:
+        single_moves = pawns << 8 & ~board_state['occupied']
+        if single_moves & to_mask:
+
+            if square_rank(move[1]) in [0,7]:
+                if not move[2] in [0, PAWN, KING]:
+                    return True
+            else:
+                if move[2] == 0:
+                    return True
+        if (single_moves << 8 & ~board_state['occupied'] & (BB_RANK_3 | BB_RANK_4)) & to_mask:
+            if move[2] == 0:
+                return True
+    else:
+        single_moves = pawns >> 8 & ~board_state['occupied']
+        if single_moves & to_mask:
+
+            if square_rank(move[1]) in [0,7]:
+                if not move[2] in [0, PAWN, KING]:
+                    return True
+            else:
+                if move[2] == 0:
+                    return True
+        if (single_moves >> 8 & ~board_state['occupied'] & (BB_RANK_6 | BB_RANK_5)) & to_mask:
+            if move[2] == 0:
+                return True
+
+    # Generate en passant captures.
+    if board_state['ep_square'] != 0:
+        if move[2] == 0:
+            return is_pseudo_legal_ep(board_state, from_mask, to_mask)
+    return False
+
+
+
+
+
+
+@njit
+def is_evasion(board_state, king, checkers, from_mask, to_mask):
+    """
+    NOTES:
+    1) This does NOT check if the move is legal
+    """
+    sliders = checkers & (board_state.bishops | board_state.rooks | board_state.queens)
+
+    attacked = np.uint64(0)
+    for checker in scan_reversed(sliders):
+        attacked |= BB_RAYS[king, checker] & ~BB_SQUARES[checker]
+
+    if BB_SQUARES[king] & from_mask:
+        if board_state.turn:
+            if BB_KING_ATTACKS[king] & ~board_state.occupied_w & ~attacked & to_mask != 0:
+                return True
+
+        else:
+            if BB_KING_ATTACKS[king] & ~board_state.occupied_b & ~attacked & to_mask != 0:
+                return True
+
+    checker = msb(checkers)
+    if BB_SQUARES[checker] == checkers:
+        # If it captures or blocks a single checker.
+        return ~board_state.kings & from_mask and (BB_BETWEEN[king, checker] | checkers) & to_mask
+
+    return False
+
+
+
+@njit
+def set_evasions(board_state, king, checkers, from_mask=BB_ALL, to_mask=BB_ALL):
+    sliders = checkers & (board_state.bishops | board_state.rooks | board_state.queens)
+
+    attacked = np.uint64(0)
+    for checker in scan_reversed(sliders):
+        attacked |= BB_RAYS[king, checker] & ~BB_SQUARES[checker]
+
+    if BB_SQUARES[king] & from_mask:
+        if board_state.turn:
+            for to_square in scan_reversed(BB_KING_ATTACKS[king] & ~board_state.occupied_w & ~attacked & to_mask):
+                board_state['unexplored_moves'][board_state.children_left, 0] = king
+                board_state['unexplored_moves'][board_state.children_left, 1] = to_square
+                board_state['unexplored_moves'][board_state.children_left, 2] = 0
+                board_state['children_left'] += 1
+        else:
+            for to_square in scan_reversed(BB_KING_ATTACKS[king] & ~board_state.occupied_b & ~attacked & to_mask):
+                board_state['unexplored_moves'][board_state.children_left, 0] = king
+                board_state['unexplored_moves'][board_state.children_left, 1] = to_square
+                board_state['unexplored_moves'][board_state.children_left, 2] = 0
+                board_state['children_left'] += 1
+
+    checker = msb(checkers)
+    if BB_SQUARES[checker] == checkers:
+        # Capture or block a single checker.
+        target = BB_BETWEEN[king][checker] | checkers
+
+        set_pseudo_legal_moves(board_state, ~board_state.kings & from_mask, target & to_mask)
+
+        # Capture the checking pawn en passant (but avoid yielding duplicate moves).
+        if board_state.ep_square != 0:
+            if not BB_SQUARES[board_state.ep_square] & target:
+                if board_state.turn == TURN_BLACK:
+                    last_double = board_state.ep_square + 8
+                else:
+                    last_double = board_state.ep_square - 8
+                if last_double == checker:
+                    set_pseudo_legal_ep(board_state, from_mask, to_mask)
+
+
+@njit
+def new_is_castling(board_state, from_square, to_square):
+    """
+    Checks if the given pseudo-legal move is a castling move.
+    """
+    if board_state.kings & BB_SQUARES[from_square]:
+        from_file = square_file(from_square)
+        to_file = square_file(to_square)
+        if from_file > to_file:
+            diff = from_file - to_file
+        else:
+            diff = to_file - from_file
+
+        if board_state.turn == TURN_WHITE:
+            return diff > 1 or bool(board_state.rooks & board_state.occupied_w & BB_SQUARES[to_square])
+        else:
+            return diff > 1 or bool(board_state.rooks & board_state.occupied_b & BB_SQUARES[to_square])
+
+    return False
+
+
+
+
+
+@njit
+def new_is_en_passant(board_state, from_square, to_square):
+    """
+    Checks if the given pseudo-legal move is an en passant capture.
+    """
+    if board_state.ep_square != 0:
+        if to_square >= from_square:
+            return (board_state.ep_square == to_square and
+                    bool(board_state.pawns & BB_SQUARES[from_square]) and
+                    to_square - from_square in [7, 9] and
+                    not board_state.occupied & BB_SQUARES[to_square])
+        else:
+            return (board_state.ep_square == to_square and
+                    bool(board_state.pawns & BB_SQUARES[from_square]) and
+                    from_square - to_square in [7, 9] and
+                    not board_state.occupied & BB_SQUARES[to_square])
+
+    return False
+
+
+
+@njit
+def _new_ep_skewered(board_state, king, capturer):
+    """
+    Handle the special case where the king would be in check, if the pawn and its capturer disappear from the rank.
+
+    Vertical skewers of the captured pawn are not possible. (Pins on the capturer are not handled here.)
+    """
+    # only using as workaround, won't do this long term
+    if board_state.turn:
+        last_double = board_state.ep_square - 8
+        occupancy = (board_state.occupied & ~BB_SQUARES[last_double] & ~BB_SQUARES[capturer] | BB_SQUARES[board_state.ep_square])
+
+        # Horizontal attack on the fifth or fourth rank.
+        horizontal_attackers = board_state.occupied_b & (board_state.rooks | board_state.queens)
+        if RANK_ATTACK_ARRAY[king, khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[king] & occupancy, 0)] & horizontal_attackers:
+            return True
+
+    else:
+        last_double = board_state.ep_square + 8
+        occupancy = (board_state.occupied & ~BB_SQUARES[last_double] & ~BB_SQUARES[capturer] | BB_SQUARES[board_state.ep_square])
+
+        # Horizontal attack on the fifth or fourth rank.
+        horizontal_attackers = board_state.occupied_w & (board_state.rooks | board_state.queens)
+        if RANK_ATTACK_ARRAY[king,
+                             khash_get(
+                                 RANK_ATTACK_INDEX_LOOKUP_TABLE,
+                                 BB_RANK_MASKS[king] & occupancy,
+                                 0)] & horizontal_attackers:
+            return True
+
+    return False
+
+
+
+@njit
+def new_is_safe(board_state, king, blockers, from_square, to_square):
+    if from_square == king:
+        if new_is_castling(board_state, from_square, to_square):
+            return True
+        else:
+            return not bool(_attackers_mask(board_state, not board_state.turn, to_square, board_state.occupied))
+
+    elif new_is_en_passant(board_state, from_square, to_square):
+        return (pin_mask(board_state, board_state.turn, from_square) & BB_SQUARES[to_square] and
+                not _new_ep_skewered(board_state, king, from_square))
+    else:
+        return (not blockers & BB_SQUARES[from_square] or
+                BB_RAYS[from_square, to_square] & BB_SQUARES[king])
 
 
 @njit((BoardState.class_type.instance_type, uint64, uint64), nogil=True)
@@ -1550,6 +2046,7 @@ def generate_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
                 yield move
 
 
+
 @njit
 def set_up_move_array(board_struct):
     if board_struct.turn == TURN_WHITE:
@@ -1560,48 +2057,39 @@ def set_up_move_array(board_struct):
     blockers = _slider_blockers(board_struct, king)
     checkers = _attackers_mask(board_struct, not board_struct['turn'], king, board_struct['occupied'])
 
-    TEMP_JITCLASS_OBJECT = BoardState(board_struct['pawns'],
-                                      board_struct['knights'],
-                                      board_struct['bishops'],
-                                      board_struct['rooks'],
-                                      board_struct['queens'],
-                                      board_struct['kings'],
-                                      board_struct['occupied_w'],
-                                      board_struct['occupied_b'],
-                                      board_struct['occupied'],
-                                      board_struct['turn'],
-                                      board_struct['castling_rights'],
-                                      None if board_struct['ep_square'] == 0 else board_struct['ep_square'],
-                                      board_struct['halfmove_clock'],
-                                      board_struct['hash'])
-
 
     # If in check
     if checkers:
-        for move in _generate_evasions(TEMP_JITCLASS_OBJECT, king, checkers, BB_ALL, BB_ALL):
-            if _is_safe(TEMP_JITCLASS_OBJECT, king, blockers, move):
-                board_struct['unexplored_moves'][board_struct.children_left][:] = (move.from_square, move.to_square, move.promotion)
-                board_struct['children_left'] += 1
-
+        set_evasions(board_struct, king, checkers, BB_ALL, BB_ALL)
 
         if board_struct['children_left']==0:
             board_struct['terminated'] = True
             board_struct['best_value'] = LOSS_RESULT_SCORE
+            #LOOK INTO IF IT CAN RETURN HERE (not set illigal moves to 255)
 
     else:
-        for move in generate_pseudo_legal_moves(TEMP_JITCLASS_OBJECT, BB_ALL, BB_ALL):
-            if _is_safe(TEMP_JITCLASS_OBJECT, king, blockers, move):
-                board_struct['unexplored_moves'][board_struct.children_left][:] = (move.from_square, move.to_square, move.promotion)
-                board_struct['children_left'] += 1
+        set_pseudo_legal_moves(board_struct, BB_ALL, BB_ALL)
 
         if board_struct['children_left']==0:
             board_struct['terminated'] = True
             board_struct['best_value'] = TIE_RESULT_SCORE
+            # LOOK INTO IF IT CAN RETURN HERE (not set illigal moves to 255)
+
+
+
+    legal_move_index = 0
+    for j in range(board_struct['children_left']):
+        if new_is_safe(board_struct, king, blockers, board_struct['unexplored_moves'][j, 0], board_struct['unexplored_moves'][j, 1]):
+            board_struct['unexplored_moves'][legal_move_index] = board_struct['unexplored_moves'][j]
+            legal_move_index += 1
+
+    board_struct['unexplored_moves'][legal_move_index:board_struct['children_left'],:] = 255
+    board_struct['children_left'] = legal_move_index
 
 
 @njit
 def set_up_move_array_except_move(board_struct, move_to_avoid):
-    if board_struct.turn == TURN_WHITE:
+    if board_struct['turn'] == TURN_WHITE:
         king = msb(board_struct['kings'] & board_struct['occupied_w'])
     else:
         king = msb(board_struct['kings'] & board_struct['occupied_b'])
@@ -1609,37 +2097,21 @@ def set_up_move_array_except_move(board_struct, move_to_avoid):
     blockers = _slider_blockers(board_struct, king)
     checkers = _attackers_mask(board_struct, not board_struct['turn'], king, board_struct['occupied'])
 
-    TEMP_JITCLASS_OBJECT = BoardState(board_struct['pawns'],
-                                      board_struct['knights'],
-                                      board_struct['bishops'],
-                                      board_struct['rooks'],
-                                      board_struct['queens'],
-                                      board_struct['kings'],
-                                      board_struct['occupied_w'],
-                                      board_struct['occupied_b'],
-                                      board_struct['occupied'],
-                                      board_struct['turn'],
-                                      board_struct['castling_rights'],
-                                      None if board_struct['ep_square'] == 0 else board_struct['ep_square'],
-                                      board_struct['halfmove_clock'],
-                                      board_struct['hash'])
-
-
     # If in check
     if checkers:
-        for move in _generate_evasions(TEMP_JITCLASS_OBJECT, king, checkers, BB_ALL, BB_ALL):
-            if move.from_square != move_to_avoid[0] or move.to_square != move_to_avoid[1] or move.promotion != move_to_avoid[2]:
-                if _is_safe(TEMP_JITCLASS_OBJECT, king, blockers, move):
-                    board_struct['unexplored_moves'][board_struct.children_left][:] = (move.from_square, move.to_square, move.promotion)
-                    board_struct['children_left'] += 1
-
+        set_evasions(board_struct, king, checkers, BB_ALL, BB_ALL)
     else:
-        for move in generate_pseudo_legal_moves(TEMP_JITCLASS_OBJECT, BB_ALL, BB_ALL):
-            if move.from_square != move_to_avoid[0] or move.to_square != move_to_avoid[1] or move.promotion != move_to_avoid[2]:
-                if _is_safe(TEMP_JITCLASS_OBJECT, king, blockers, move):
-                    board_struct['unexplored_moves'][board_struct.children_left][:] = (move.from_square, move.to_square, move.promotion)
-                    board_struct['children_left'] += 1
+        set_pseudo_legal_moves(board_struct, BB_ALL, BB_ALL)
 
+    legal_move_index = 0
+    for j in range(board_struct['children_left']):
+        if np.any(move_to_avoid != board_struct['unexplored_moves'][j]):
+            if new_is_safe(board_struct, king, blockers, board_struct['unexplored_moves'][j,0],board_struct['unexplored_moves'][j,1]):
+                board_struct['unexplored_moves'][legal_move_index] = board_struct['unexplored_moves'][j]
+                legal_move_index += 1
+
+    board_struct['unexplored_moves'][legal_move_index:board_struct['children_left'],:] = 255
+    board_struct['children_left'] = legal_move_index
 
 
 
@@ -1651,126 +2123,27 @@ def has_legal_move(board_state):
     return any(generate_legal_moves(board_state, BB_ALL, BB_ALL))
 
 
-
-@njit(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
-def is_into_check(board_state, move):
+@njit
+def scalar_is_into_check(board_scalar, from_square, to_square):
     """
     Checks if the given move would leave the king in check or put it into
     check. The move must be at least pseudo legal.  This function was adapted from the Python-Chess version of it.
     """
-
-    if board_state.turn == TURN_WHITE:
-        king = msb(board_state.occupied_w & board_state.kings)
+    if board_scalar.turn == TURN_WHITE:
+        king = msb(board_scalar.occupied_w & board_scalar.kings)
     else:
-        king = msb(board_state.occupied_b & board_state.kings)
+        king = msb(board_scalar.occupied_b & board_scalar.kings)
 
-    # if king is None:
-    #     return False
-
-    checkers = _attackers_mask(board_state, not board_state.turn, king, board_state.occupied)
+    checkers = _attackers_mask(board_scalar, not board_scalar.turn, king, board_scalar.occupied)
     if checkers:
-        # If already in check, look if it is an evasion.
-        for temp_move in _generate_evasions(board_state, king, checkers, BB_SQUARES[move.from_square], BB_SQUARES[move.to_square]):
-            if move_objects_equal(move, temp_move):
-                return True
+        return not is_evasion(board_scalar, king, checkers, BB_SQUARES[from_square], BB_SQUARES[to_square])
 
-    return not _is_safe(board_state, king, _slider_blockers(board_state, king), move)
-
-
-@njit(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
-def is_pseudo_legal(board_state, move):
-    """
-    Checks if a given move is pseudo legal.  This function was adapted from the Python-Chess version.
-    """
-
-    # Source square must not be vacant.
-    piece = piece_type_at(board_state, move.from_square)
-    if not piece:
-        return False
-
-    # Get square masks.
-    from_mask = BB_SQUARES[move.from_square]
-    to_mask = BB_SQUARES[move.to_square]
-
-    # Check turn.
-    if board_state.turn == TURN_WHITE:
-        if not board_state.occupied_w & from_mask:
-            return False
-    else:
-        if not board_state.occupied_b & from_mask:
-            return False
-
-    # Only pawns can promote and only on the backrank.
-    if move.promotion:
-        if piece != PAWN:
-            return False
-
-        if board_state.turn == TURN_WHITE and square_rank(move.to_square) != 7:
-            return False
-        elif board_state.turn == TURN_BLACK and square_rank(move.to_square) != 0:
-            return False
-
-    # Handle castling.
-    if piece == KING:
-        ####This should not be taking in BB_ALL and instead take in from_mask and to_mask,
-        # but I haven't tested or looked into if that correct yet, and I want to get this commit out so for now
-        # this slightly slower version will work fine
-        for temp_move in generate_castling_moves(board_state, BB_ALL, BB_ALL):
-            if move_objects_equal(move, temp_move):
-                return True
-
-    # Destination square can not be occupied.
-    if board_state.turn == TURN_WHITE:
-        if board_state.occupied_w & to_mask:
-            return False
-    else:
-        if board_state.occupied_b & to_mask:
-            return False
-
-    # Handle pawn moves.
-    if piece == PAWN:
-        for temp_move in generate_pseudo_legal_moves(board_state, from_mask, to_mask):
-            if move_objects_equal(move, temp_move):
-                return True
-        return False
-
-    # Handle all other pieces.
-    return bool(attacks_mask(board_state, move.from_square) & to_mask)
-
-
-
-@njit(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
-def is_legal_move(board_state, move):
-    """
-    Checks if a given move is legal for the given board.
-    """
-    return is_pseudo_legal(board_state, move) and not is_into_check(board_state, move)
-
+    return not new_is_safe(board_scalar, king, _slider_blockers(board_scalar, king), from_square, to_square)
 
 
 @njit
 def scalar_is_legal_move(board_scalar, move):
-    # return scalar_is_pseudo_legal(board_scalar, move) and not scalar_is_into_check(board_scalar, move)
-
-    TEMP_JITCLASS_OBJECT = BoardState(board_scalar['pawns'],
-                                      board_scalar['knights'],
-                                      board_scalar['bishops'],
-                                      board_scalar['rooks'],
-                                      board_scalar['queens'],
-                                      board_scalar['kings'],
-                                      board_scalar['occupied_w'],
-                                      board_scalar['occupied_b'],
-                                      board_scalar['occupied'],
-                                      board_scalar['turn'],
-                                      board_scalar['castling_rights'],
-                                      None if board_scalar['ep_square'] == 0 else board_scalar['ep_square'],
-                                      board_scalar['halfmove_clock'],
-                                      board_scalar['hash'])
-
-
-
-    return is_legal_move(TEMP_JITCLASS_OBJECT, Move(move[0], move[1], move[2]))
-
+    return scalar_is_pseudo_legal_move(board_scalar, move) and not scalar_is_into_check(board_scalar, move[0], move[1])
 
 
 
@@ -1824,7 +2197,30 @@ def traditional_perft_test(board_state, depth):
 @njit
 def structured_scalar_perft_test_move_gen_helper(struct_array):
     for j in range(len(struct_array)):
-        set_up_move_array(struct_array[j])
+        if struct_array[j]['turn'] == TURN_WHITE:
+            king = msb(struct_array[j]['kings'] & struct_array[j]['occupied_w'])
+        else:
+            king = msb(struct_array[j]['kings'] & struct_array[j]['occupied_b'])
+
+        blockers = _slider_blockers(struct_array[j], king)
+        checkers = _attackers_mask(struct_array[j], not struct_array[j]['turn'], king, struct_array[j]['occupied'])
+
+        if checkers:
+            set_evasions(struct_array[j], king, checkers, BB_ALL, BB_ALL)
+        else:
+            set_pseudo_legal_moves(struct_array[j], BB_ALL, BB_ALL)
+
+        legal_move_index = 0
+        for i in range(struct_array[j]['children_left']):
+            if new_is_safe(struct_array[j], king, blockers, struct_array[j]['unexplored_moves'][i, 0], struct_array[j]['unexplored_moves'][i, 1]):
+                struct_array[j]['unexplored_moves'][legal_move_index] = struct_array[j]['unexplored_moves'][i]
+                legal_move_index += 1
+
+        struct_array[j]['unexplored_moves'][legal_move_index:struct_array[j]['children_left'], :] = 255
+        struct_array[j]['children_left'] = legal_move_index
+
+
+
 
 # @njit
 def structured_scalar_perft_test(struct_array, depth):
