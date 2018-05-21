@@ -3,29 +3,34 @@ from global_open_priority_nodes import PriorityBins
 
 from evaluation_ann import main as evaluation_ann_main
 from move_evaluation_ann import main as move_ann_main
+
+from board_jitclass import BoardState, generate_move_to_enumeration_dict, has_legal_move, is_in_check
+
+from collections import OrderedDict
+
 import threading
 
 import chess.uci
-#
+
+
 # import llvmlite.binding as llvm
 # llvm.set_option('', '--debug-only=loop-vectorize')
 
 
 
 
-#This value is used for indicating that a given node has/had a legal move in the transposition table that it will/would
-#expand prior to it's full move generation and scoring.
-NEXT_MOVE_IS_FROM_TT_VAL = np.uint8(254)
 
-#This value is used for indicating that a move in a transposition table entry is not being stored.
-NO_TT_MOVE_VALUE = np.uint8(255)
+#(IMPORTANT) the constants below are only here to support older ANNs which use an the older mapping of moves
+#(defined in board_jitclass). They use the same names as those in engine_constants.py,
+# so if using the newer mapping, this must be prevented.
+MOVE_TO_INDEX_ARRAY = np.zeros(shape=[64,64],dtype=np.int32)
+REVERSED_MOVE_TO_INDEX_ARRAY = np.zeros(shape=[64,64],dtype=np.int32)
+for key, value in generate_move_to_enumeration_dict().items():
+    MOVE_TO_INDEX_ARRAY[key[0],key[1]] = value
+    REVERSED_MOVE_TO_INDEX_ARRAY[square_mirror(key[0]), square_mirror(key[1])] = value
 
-#This value is used for indicating that no entry in the transposition table exists for that hash.  It is stored as the
-#entries depth.
-NO_TT_ENTRY_VALUE = np.uint8(255)
 
-#This value is the value used to assigned a node who's next move was found in the TT to the desired bin.
-TT_MOVE_SCORE_VALUE = ALMOST_MAX_FLOAT_32_VAL
+
 
 
 
@@ -44,46 +49,18 @@ hash_table_numba_dtype = nb.from_dtype(hash_table_numpy_dtype)
 
 
 
-SIZE_EXPONENT_OF_TWO = 25 #This needs to be picked precisely.
-ONES_IN_RELEVANT_BITS = np.uint64(2**(SIZE_EXPONENT_OF_TWO)-1)
 
-
-switch_square_fn = lambda x : 8 * (7 - (x >> 3)) + (x & 7)
-MOVE_TO_INDEX_ARRAY = np.zeros(shape=[64,64],dtype=np.int32)
-REVERSED_MOVE_TO_INDEX_ARRAY = np.zeros(shape=[64,64],dtype=np.int32)
-
-REVERSED_SQUARES = np.zeros_like(SQUARES)
-for square in SQUARES:
-    REVERSED_SQUARES[square] = switch_square_fn(square)
-
-
-
-
-
-for key, value in generate_move_to_enumeration_dict().items():
-    MOVE_TO_INDEX_ARRAY[key[0],key[1]] = value
-    REVERSED_MOVE_TO_INDEX_ARRAY[switch_square_fn(key[0]), switch_square_fn(key[1])] = value
-
-
-
-
-
-
-
-
-
-
-new_gamenode_type = deferred_type()
+new_gamenode_type = nb.deferred_type()
 
 new_gamenode_spec = OrderedDict()
 
 #Ideally this would be a single Record, but I couldn't get that to compile yet
 new_gamenode_spec["board_struct"] = numba_node_info_type[:]
 
-new_gamenode_spec["parent"] = optional(new_gamenode_type)
+new_gamenode_spec["parent"] = nb.optional(new_gamenode_type)
 
 
-@jitclass(new_gamenode_spec)
+@nb.jitclass(new_gamenode_spec)
 class GameNode:
     def __init__(self, board_struct, parent):
         self.board_struct = board_struct
@@ -94,6 +71,10 @@ class GameNode:
 
 
 new_gamenode_type.define(GameNode.class_type.instance_type)
+
+
+
+
 
 
 
@@ -164,8 +145,12 @@ def jitted_assign_move_scores(children, not_children, children_indices, not_chil
 
 @njit(nogil=True)
 def move_scoring_helper(children, not_children, children_indices, not_children_indices):
-    children_to_score = children[children_indices]
-    not_children_to_score = not_children[not_children_indices]
+    if len(children_indices) != 0:
+        children_to_score = children[children_indices]
+
+    if len(not_children_indices) != 0:
+        not_children_to_score = not_children[not_children_indices]
+
     combined_to_score = np.concatenate((children_to_score, not_children_to_score))
     piece_bbs, occupied_bbs, ep_squares = struct_array_to_ann_input_all_white(combined_to_score)
 
@@ -180,7 +165,7 @@ def move_scoring_helper(children, not_children, children_indices, not_children_i
         if combined_to_score[j]['turn']:
             from_to_squares[cur_start_index:cur_start_index + size_array[j], :] = combined_to_score[j]['unexplored_moves'][:size_array[j],:2]
         else:
-            #These two lines needs to be done in 1 using slicing like above
+            #These two lines should be done in 1 using slicing like above
             from_to_squares[cur_start_index:cur_start_index + size_array[j], 0] = REVERSED_SQUARES[combined_to_score[j]['unexplored_moves'][:size_array[j], 0]]
             from_to_squares[cur_start_index:cur_start_index + size_array[j], 1] = REVERSED_SQUARES[combined_to_score[j]['unexplored_moves'][:size_array[j], 1]]
         cur_start_index += size_array[j]
@@ -211,6 +196,9 @@ def set_evaluation_scores(struct_array, to_set_mask, results):
         if to_set_mask[j]:
             struct_array[j]['best_value'] = results[index_in_results]
             index_in_results += 1
+
+
+
 
 
 def start_board_evaluations(struct_array, to_score_mask, board_eval_fn):
@@ -272,7 +260,7 @@ def struct_terminated_from_tt(board_struct, hash_table):
     1) While this currently does work, it represents one of the most crucial components of the negamax search,
     and has not been given the thought and effort it needs.  This is an extremely high priority
     """
-    hash_entry = hash_table[board_struct.hash & ONES_IN_RELEVANT_BITS]
+    hash_entry = hash_table[board_struct.hash & ONES_IN_RELEVANT_BITS_FOR_TT_INDEX]
     if hash_entry["depth"] != NO_TT_ENTRY_VALUE:
         if hash_entry["entry_hash"] == board_struct.hash:
             if hash_entry["depth"] >= board_struct.depth:
@@ -353,7 +341,7 @@ def has_legal_tt_move(board_struct, hash_table):
 
     :return: True if a move is found, or False if not.
     """
-    node_entry = hash_table[board_struct['hash'] & ONES_IN_RELEVANT_BITS]
+    node_entry = hash_table[board_struct['hash'] & ONES_IN_RELEVANT_BITS_FOR_TT_INDEX]
     if node_entry['depth'] != NO_TT_ENTRY_VALUE:
         if node_entry['entry_hash'] == board_struct['hash']:
             if node_entry['stored_from_square'] != NO_TT_MOVE_VALUE:
@@ -399,11 +387,6 @@ def get_indices_of_terminating_children(struct_array, hash_table):
 
 
 
-
-
-
-
-
 @njit
 def create_child_structs(struct_array, testing=False):
     #This should not copy the entire array, instead only the fields which are not directly written over
@@ -437,7 +420,7 @@ def create_child_structs(struct_array, testing=False):
 
     child_array['best_value'][:] = MIN_FLOAT32_VAL
     child_array['children_left'][:] = 0
-    child_array['separator'][:] *= -1 #MAKE SURE THIS ISN'T SUPER SLOW IN COMPARISON TO A BITWISE METHOD
+    child_array['separator'][:] *= -1
     child_array['next_move_index'][:] = 255
 
     return child_array, new_next_move_values
@@ -476,7 +459,7 @@ def get_struct_array_from_node_array(node_array):
 def get_empty_hash_table():
     """
     NOTES:
-    1) Uses global variable SIZE_EXPONENT_OF_TWO for it's size.
+    1) Uses global variable SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES for it's size.
     """
     return np.array(
         [(np.uint64(0),
@@ -485,7 +468,7 @@ def get_empty_hash_table():
           MIN_FLOAT32_VAL,
           NO_TT_MOVE_VALUE,
           NO_TT_MOVE_VALUE,
-          NO_TT_MOVE_VALUE) for _ in range(2 ** SIZE_EXPONENT_OF_TWO)],
+          NO_TT_MOVE_VALUE) for _ in range(2 ** SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES)],
         dtype=hash_table_numpy_dtype)
 
 
@@ -494,7 +477,7 @@ def set_tt_node(hash_table, board_hash, depth, upper_bound=MAX_FLOAT32_VAL, lowe
     """
     Puts the given information about a node into the hash table.
     """
-    index = board_hash & ONES_IN_RELEVANT_BITS  #THIS IS BEING DONE TWICE
+    index = board_hash & ONES_IN_RELEVANT_BITS_FOR_TT_INDEX  #THIS IS BEING DONE TWICE
     hash_table[index]["entry_hash"] = board_hash
     hash_table[index]["depth"] = depth
     hash_table[index]["upper_bound"] = upper_bound
@@ -531,7 +514,7 @@ def add_board_and_move_to_tt(board_struct, following_move, hash_table):
     1) While this currently does work, it represents one of the most crucial components of the negamax search,
     and has not been given the thought and effort it needs.  This is an extremely high priority
     """
-    tt_index = board_struct['hash'] & ONES_IN_RELEVANT_BITS
+    tt_index = board_struct['hash'] & ONES_IN_RELEVANT_BITS_FOR_TT_INDEX
     node_entry = hash_table[tt_index]
     if node_entry["depth"] != NO_TT_ENTRY_VALUE:
         if node_entry["entry_hash"] == board_struct['hash']:
@@ -669,12 +652,14 @@ def update_tree_from_terminating_nodes(parent_nodes, struct_array, hash_table, t
 
 
 
-
 @njit
 def jitted_temp_set_node_from_altered_struct(node, board_struct):
     """
     NOTES:
     1) This is VERY slow, and it's removal is a top priority.
+    2) Sometimes this is called when no values actually differ, I have a fix for this that seems to work on every
+    test I try, but the reasoning as to why it works isn't good enough for me to trust it completely.  Finishing that
+    up is likely one of the next things to be done.
     """
     node.board_struct[0]['unexplored_moves'][:] = board_struct['unexplored_moves'][:]
     node.board_struct[0]['unexplored_move_scores'][:] = board_struct['unexplored_move_scores'][:]
@@ -682,11 +667,15 @@ def jitted_temp_set_node_from_altered_struct(node, board_struct):
     node.board_struct[0]['next_move_index'] = board_struct['next_move_index']
 
 
+
 @njit
 def jitted_temp_set_node_move_score_info(node, board_struct):
     """
     NOTES:
     1) This is VERY slow, and it's removal is a top priority.
+    2) Sometimes this is called when no values actually differ, I have a fix for this that seems to work on every
+    test I try, but the reasoning as to why it works isn't good enough for me to trust it completely.  Finishing that
+    up is likely one of the next things to be done.
     """
     node.board_struct[0]['unexplored_move_scores'][:] = board_struct['unexplored_move_scores'][:]
     node.board_struct[0]['next_move_index'] = board_struct['next_move_index']
@@ -718,7 +707,6 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
     struct_batch = get_struct_array_from_node_array(node_batch)
     child_struct, struct_batch_next_move_scores = create_child_structs(struct_batch, testing)
 
-
     child_was_from_tt_move_mask = struct_batch['children_left'] == NEXT_MOVE_IS_FROM_TT_VAL
 
     depth_zero_children_mask = child_struct['depth'] == 0
@@ -744,7 +732,7 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
     #(This should likely be put directly into it's only use below to prevent storing it in memory)
     tt_move_nodes_with_more_kids_indices = generate_moves_for_tt_move_nodes(struct_batch, child_was_from_tt_move_mask)
 
-    SUPER_TEMP_MASK = np.logical_not(np.logical_and(child_was_from_tt_move_mask, struct_batch['children_left'] == 1))####
+    SUPER_TEMP_MASK = np.logical_not(np.logical_and(child_was_from_tt_move_mask, struct_batch['children_left'] == 1))
 
 
     get_indices_of_terminating_children(child_struct, hash_table)
@@ -801,7 +789,7 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
         move_thread.join()
 
         # Set the boards who used TT moves to generate a child move scores in their respective nodes
-        temp_set_tt_move_scores(node_batch[to_score_not_child_moves_indices], struct_batch[to_score_not_child_moves_indices])
+        temp_set_tt_move_scores(node_batch[to_score_not_child_moves_indices],struct_batch[to_score_not_child_moves_indices])
 
 
 
@@ -979,13 +967,15 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, board_eval_fn, move_ev
         counter += 1
 
 
-    root_tt_entry = hash_table[np.uint64(cur_root_node.board_struct[0]['hash']) & ONES_IN_RELEVANT_BITS]
+    root_tt_entry = hash_table[np.uint64(cur_root_node.board_struct[0]['hash']) & ONES_IN_RELEVANT_BITS_FOR_TT_INDEX]
     try:
         tt_move = chess.Move(root_tt_entry["stored_from_square"],
                        root_tt_entry["stored_to_square"],
                        root_tt_entry["stored_promotion"])
     except IndexError as E:
         tt_move = None
+        print("FAILED TO CREATE MOVE in MTD(f)")
+        raise(E)
 
     return cur_guess, tt_move, hash_table
 
@@ -1006,24 +996,28 @@ def iterative_deepening_mtd_f(fen, depths_to_search, batch_sizes, min_windows_to
     for depth, batch_size, window, increment, bins in zip(depths_to_search, batch_sizes, min_windows_to_confirm, guess_increments, bin_sets):
         # print("Starting depth %d search"%depth)
         start_time = time.time()
-        first_guess, tt_move, hash_table = mtd_f(fen,
-                                                 depth,
-                                                 first_guess,
-                                                 window,
-                                                 board_eval_fn,
-                                                 move_eval_fn,
-                                                 guess_increment=increment,
-                                                 search_batch_size=batch_size,
-                                                 bins_to_use=bins,
-                                                 hash_table=hash_table,
-                                                 win_threshold=win_threshold,
-                                                 loss_threshold=loss_threshold,
-                                                 print_info=print_info,
-                                                 full_testing=full_testing)
+        first_guess, tt_move, hash_table = mtd_f(
+            fen,
+            depth,
+            first_guess,
+            window,
+            board_eval_fn,
+            move_eval_fn,
+            guess_increment=increment,
+            search_batch_size=batch_size,
+            bins_to_use=bins,
+            hash_table=hash_table,
+            win_threshold=win_threshold,
+            loss_threshold=loss_threshold,
+            print_info=print_info,
+            full_testing=full_testing)
+
 
         if print_info:
             print("Completed depth %d in time %f"%(depth, time.time() - start_time))
-            return first_guess, tt_move, hash_table
+
+
+    return first_guess, tt_move, hash_table
 
 
 
@@ -1052,7 +1046,7 @@ if __name__ == "__main__":
 
 
     FEN_TO_TEST = "r2q1rk1/pbpnbppp/1p2pn2/3pN3/2PP4/1PN3P1/P2BPPBP/R2Q1RK1 w - - 10 11"#"rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"###"rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"#"#"rn1q1rk1/pbp1bppp/1p2pn2/3pN3/2PP4/1P4P1/P2BPPBP/RN1Q1RK1 w - - 8 10"#"  #
-    DEPTH_OF_SEARCH = 5
+    DEPTH_OF_SEARCH = 4
     MAX_BATCH_LIST =  [10000, 5000,2500]#,1000,500,100]#[5000, 2000]#, 5000, 2000, 1000, 723, 500,1]# 5*[10000]#[5000]*3#[5000, 2000, 500]#,1,2,3,4,5,6,7,20]#[1,2,3,4]##1*[250,500, 1000, 2000]# [j**2 for j in range(40,0,-2)] + [5000]
     SEPERATING_VALUE = 0
     BINS_TO_USE = np.arange(20, -20, -.01)#np.arange(4000, -4000, 99.99)##
@@ -1062,12 +1056,14 @@ if __name__ == "__main__":
     PREDICTOR, CLOSER = evaluation_ann_main([True])
     MOVE_PREDICTOR, MOVE_CLOSER = move_ann_main([True])
 
+
     temp_board_to_test = chess.Board(FEN_TO_TEST)
     print(temp_board_to_test)
     for batch_size in MAX_BATCH_LIST:
         for first_guess in [0]:
             start_time = time.time()
-            results = mtd_f(FEN_TO_TEST,DEPTH_OF_SEARCH,first_guess,.001, PREDICTOR, MOVE_PREDICTOR, search_batch_size=batch_size, print_info=True, full_testing=False)
+            results = mtd_f(FEN_TO_TEST,DEPTH_OF_SEARCH,first_guess,.001, PREDICTOR, random_move_eval, search_batch_size=batch_size, print_info=False, full_testing=False)
+            # results = mtd_f(FEN_TO_TEST, DEPTH_OF_SEARCH, first_guess, 99, piece_sum_eval, random_move_eval,guess_increment=98,search_batch_size=batch_size, print_info=True, full_testing=False)
             print(results[0], results[1] ,"found by mtd(f)", time.time() - start_time, "\n")
 
             # depths_to_check = np.arange(0,DEPTH_OF_SEARCH,2) + 1

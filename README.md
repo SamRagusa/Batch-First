@@ -18,8 +18,8 @@ The Batch First engine will embody these ideas.
 
 # Dependencies
 The versions listed are the versions I'm currently using, but are not necessarily the only versions which will work.
-- [TensorFlow](https://github.com/tensorflow/tensorflow) v1.7.0
-- [NumPy](https://github.com/numpy/numpy) v1.14.2
+- [TensorFlow](https://github.com/tensorflow/tensorflow) v1.8.0
+- [NumPy](https://github.com/numpy/numpy) v1.14.3
 - [Numba](https://github.com/numba/numba) v0.38.0
 - [python-chess](https://github.com/niklasf/python-chess) v0.22.1
 - [khash_numba](https://github.com/synapticarbors/khash_numba)
@@ -31,8 +31,5 @@ I run this using the [Intel Distribution For Python](https://software.intel.com/
 
 # Other Information
 - Trained neural networks will be uploaded when hyperparameter tuning has been completely implemented/completed
-- Special thanks to the python-chess package which most of my move generation code is currently based on
-
-
-
+- Special thanks to the [python-chess](https://github.com/niklasf/python-chess) package which most of the move generation code is currently based on
 
