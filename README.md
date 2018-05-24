@@ -24,7 +24,10 @@ The versions listed are the versions I'm currently using, but are not necessaril
 - [python-chess](https://github.com/niklasf/python-chess) v0.22.1
 - [khash_numba](https://github.com/synapticarbors/khash_numba)
 
-I run this using the [Intel Distribution For Python](https://software.intel.com/en-us/distribution-for-python) for the speed improvements to NumPy and Numba.   
+The tools listed below can be used, but are not needed.  They provide speed improvements to the engine.
+- [TensorRT](https://developers.googleblog.com/2018/03/tensorrt-integration-with-tensorflow.html) to optimize ANN inference
+- [Intel Python Distribution](https://software.intel.com/en-us/distribution-for-python) for speed improvements to NumPy and Numba.
+   
 
 # Notes For Awesome Developers/People
 - This engine is still in development, and thus needs work.  If you have any ideas, questions, are interested in potentially working on the engine, or anything else, I encourage you to send me an email!

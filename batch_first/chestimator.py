@@ -1,15 +1,89 @@
-import time
 import tensorflow as tf
 import numpy as np
+
 from tensorflow.python.estimator.estimator import Estimator
 from tensorflow.python.estimator.estimator import _check_hooks_type
 from tensorflow.python.estimator import model_fn as model_fn_lib
-from tensorflow.python.framework import ops
 from tensorflow.python.training import saver
 from tensorflow.python.training import training
 from tensorflow.python.client import timeline
+from tensorflow.python.platform import gfile
+from tensorflow.python.util import compat
 
-from numba_board import generate_move_to_enumeration_dict
+#If you haven't optimized your graph with TensorRT you can comment this out.
+from tensorflow.contrib import tensorrt as trt
+
+from .board_jitclass import generate_move_to_enumeration_dict
+
+
+
+
+def get_predictor_from_graphdef(session, graphdef_filename, output_tensor, input_tensors, name_prefix=None, is_binary=True):
+    with gfile.FastGFile(graphdef_filename, 'rb' if is_binary else 'r') as f:
+        model_graph_def = tf.GraphDef()
+        model_graph_def.ParseFromString(compat.as_bytes(f.read()))
+        desired_tensors = tf.import_graph_def(
+            model_graph_def,
+            return_elements=[output_tensor] + input_tensors,
+            name=name_prefix)
+
+        def test_predictor(*inputs):
+            return session.run(desired_tensors[0], {desired_tensors[j+1] : inputs[j] for j in range(len(inputs))})
+
+        return test_predictor
+
+
+
+
+
+
+
+
+def get_inference_functions(eval_graphdef_file, move_graphdef_file):
+    """
+    The code relevant to move scoring has been commented out as it's not ready yet.
+    """
+    sess = tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.35)))
+
+    eval_output_tensor_name = "logit_layer/MatMul:0"#"add:0"
+    eval_input_tensor_names = [
+        "piece_bbs:0",
+        "color_occupied_bbs:0",
+        "ep_squares:0"]
+
+    # move_scoring_output_tensor_name = ""
+    # move_scoring_input_tensor_names = [
+    #     "piece_bbs:0",
+    #     "color_occupied_bbs:0",
+    #     "ep_squares:0"]
+
+
+    evaluation_predictor = get_predictor_from_graphdef(
+        sess,
+        eval_graphdef_file,
+        eval_output_tensor_name,
+        eval_input_tensor_names,
+        "board_eval",
+        True)
+
+
+    move_predictor = None
+    # move_predictor = get_predictor_from_graphdef(
+    #     sess,
+    #     move_graphdef_file,
+    #     move_scoring_output_tensor_name,
+    #     move_scoring_input_tensor_names,
+    #     "move_scoring",
+    #     True)
+
+
+    closer_fn = lambda: sess.close()
+
+    return evaluation_predictor, move_predictor, closer_fn
+
+
+
+
 
 
 def new_get_board_data():
@@ -46,68 +120,6 @@ def new_get_board_data():
     return piece_bbs, color_occupied_bbs, ep_squares, full_data
 
 
-
-
-
-
-class ChEstimator(Estimator):
-    def create_predictor(self,
-                         predict_keys=None,
-                         hooks=None,
-                         checkpoint_path=None,
-                         use_full_gpu=False):
-
-        run_metadata = tf.RunMetadata()
-        hooks = _check_hooks_type(hooks)
-
-        # Check that model has been trained.
-        if not checkpoint_path:
-            checkpoint_path = saver.latest_checkpoint(self._model_dir)
-        if not checkpoint_path:
-            raise ValueError('Could not find trained model in model_dir: {}.'.format(
-                self._model_dir))
-
-        with ops.Graph().as_default():
-
-            piece_bbs, color_occupied_bbs, ep_squares, for_evaluation = new_get_board_data()
-
-            estimator_spec = self._call_model_fn({"feature": for_evaluation}, None,
-                                                 model_fn_lib.ModeKeys.PREDICT, None)
-            predictions = self._extract_keys(estimator_spec.predictions, predict_keys)[predict_keys]
-
-            squeezed_predictions = tf.squeeze(predictions, axis=1)
-
-            mon_sess = training.MonitoredSession(
-                session_creator=training.ChiefSessionCreator(
-                    checkpoint_filename_with_path=checkpoint_path,
-                    scaffold=estimator_spec.scaffold,
-                    # config=self._session_config),
-                    config=self._session_config if use_full_gpu else tf.ConfigProto(
-                        gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.45))),
-                hooks=hooks)
-
-
-            def predictor(pieces, occupied_bbs, ep_square_numbers):
-                if mon_sess.should_stop():
-                    raise StopIteration
-
-                return mon_sess.run(squeezed_predictions,
-                                    {piece_bbs: pieces,
-                                     color_occupied_bbs: occupied_bbs,
-                                     ep_squares: ep_square_numbers,
-                                     },)
-                                    # options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE),
-                                    # run_metadata=run_metadata)
-
-
-            def finish():
-            #     fetched_timeline = timeline.Timeline(run_metadata.step_stats)
-            #     chrome_trace = fetched_timeline.generate_chrome_trace_format()
-            #     with open('timeline_eval.json', 'w') as f:
-            #         f.write(chrome_trace)
-                mon_sess.close()
-
-            return predictor, finish
 
 
 

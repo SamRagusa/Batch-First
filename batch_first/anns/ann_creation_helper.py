@@ -5,10 +5,37 @@ from tensorflow.python import training
 
 from functools import reduce
 
+from ..chestimator import new_get_board_data
+# from ..board_jitclass import generate_move_to_enumeration_dict
+
+
+#If you don't have TensorRT installed, you can just comment out it's use. Here it's only used in the
+#save_model_as_graph_def_for_serving function.
+from tensorflow.contrib import tensorrt as trt
 
 
 
-def build_fully_connected_layers_with_batch_norm(the_input, shape, mode, num_previous_fully_connected_layers=0, activation_summaries=[], scope_prefix=""):
+
+
+def save_model_as_graphdef_for_serving(model_path, output_model_path, output_filename, output_node_name, model_tags="serve", as_text=False):
+    with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.3))) as sess:
+        board_eval_graph = tf.train.import_meta_graph(tf.saved_model.loader.load(sess, [model_tags], model_path))
+
+        constant_graph_def = tf.graph_util.convert_variables_to_constants(sess, tf.get_default_graph().as_graph_def(), [output_node_name])
+
+        trt_graph = trt.create_inference_graph(constant_graph_def,
+                                   [output_node_name],
+                                   max_batch_size=25000,
+                                               precision_mode="FP32",
+                                               max_workspace_size_bytes=5000000000
+                                   )
+
+
+        tf.train.write_graph(trt_graph, output_model_path, output_filename, as_text=as_text)
+
+
+
+def build_fully_connected_layers_with_batch_norm(the_input, shape, kernel_initializer, mode, num_previous_fully_connected_layers=0, activation_summaries=[], scope_prefix=""):
     """
     a function to build the fully connected layers with batch normalization onto the computational
     graph from given specifications.
@@ -16,14 +43,13 @@ def build_fully_connected_layers_with_batch_norm(the_input, shape, mode, num_pre
     shape of the format:
     [num_neurons_layer_1,num_neurons_layer_2,...,num_neurons_layer_n]
     """
-
     for index, size in enumerate(shape):
         with tf.variable_scope(scope_prefix + "FC_" + str(num_previous_fully_connected_layers + index + 1)):
             temp_pre_activation = tf.layers.dense(
                 inputs=the_input,
                 units=size,
                 use_bias=False,
-                kernel_initializer=layers.xavier_initializer(),
+                kernel_initializer=kernel_initializer(),
                 name="layer")
 
             temp_batch_normalized = tf.layers.batch_normalization(temp_pre_activation,
@@ -39,7 +65,7 @@ def build_fully_connected_layers_with_batch_norm(the_input, shape, mode, num_pre
     return the_input, activation_summaries
 
 
-def build_inception_module_with_batch_norm(the_input, module, mode, activation_summaries=[], num_previously_built_inception_modules=0, padding='same', force_no_concat=False,make_trainable=True):
+def build_inception_module_with_batch_norm(the_input, module, kernel_initializer, mode, activation_summaries=[], num_previously_built_inception_modules=0, padding='same', force_no_concat=False,make_trainable=True, weight_regularizer=None):
     """
     NOTE:
     1) This comment no longer fully describes the functionality of the function.  It will be updated in the near future
@@ -55,6 +81,9 @@ def build_inception_module_with_batch_norm(the_input, module, mode, activation_s
     [[[filters1_1,kernal_size1_1],... , [filters1_M,kernal_size1_M]],... ,
         [filtersN_1,kernal_sizeN_1],... , [filtersN_P,kernal_sizeN_P]]
     """
+    if weight_regularizer is None:
+        weight_regularizer = lambda:None
+
     path_outputs = [None for _ in range(len(module))]
     to_summarize = []
     cur_input = None
@@ -73,7 +102,8 @@ def build_inception_module_with_batch_norm(the_input, module, mode, activation_s
                     kernel_size=kernel_size,
                     padding=padding,
                     use_bias=False,
-                    kernel_initializer=layers.xavier_initializer(),
+                    kernel_initializer=kernel_initializer(),
+                    kernel_regularizer=weight_regularizer(),
                     trainable=make_trainable,
                     name="layer_" + str(i + 1))
 
@@ -91,19 +121,30 @@ def build_inception_module_with_batch_norm(the_input, module, mode, activation_s
     activation_summaries = activation_summaries + [layers.summarize_activation(layer) for layer in to_summarize]
 
     with tf.variable_scope("inception_module_" + str(num_previously_built_inception_modules + 1)):
+        if len(path_outputs) == 1:
+            return path_outputs[0], activation_summaries
         for j in range(1, len(path_outputs)):
             if force_no_concat or path_outputs[0].get_shape().as_list()[1:3] != path_outputs[j].get_shape().as_list()[1:3]:
                 return [temp_input for temp_input in path_outputs], activation_summaries
 
         return tf.concat([temp_input for temp_input in path_outputs], 3), activation_summaries
+    
+    
+    
 
+def metric_dict_creator(the_dict):
+    metric_dict = {}
+    for key, value in the_dict.items():
+        if isinstance(value, tuple): # Given a tuple (tensor, summary)
+            metric_dict[key] = (tf.reduce_mean(value[0]), value[1])
+        else: #Given a tensor
+            mean_value = tf.reduce_mean(value)
+            metric_dict[key] = (mean_value, tf.summary.scalar(key, mean_value))
 
-def mean_metric_creator(name):
-    def mean_metric(inputs, forced_labels_param, weights=None):
-        mean_value = tf.reduce_mean(inputs)
-        return mean_value, tf.summary.scalar(name, mean_value)
+    return metric_dict
+    
+    
 
-    return mean_metric
 
 
 def board_eval_model_fn(features, labels, mode, params):
@@ -127,8 +168,10 @@ def board_eval_model_fn(features, labels, mode, params):
             cur_inception_module, activation_summaries = build_inception_module_with_batch_norm(
                 cur_inception_module,
                 module_shape,
+                params['kernel_initializer'],
                 mode,
                 padding='valid',
+                make_trainable=params['trainable_cnn_modules'],
                 num_previously_built_inception_modules=module_num)
 
 
@@ -139,16 +182,20 @@ def board_eval_model_fn(features, labels, mode, params):
                 path,
                 [-1, reduce(lambda a, b: a * b, path.get_shape().as_list()[1:])]
             ) for path in cur_inception_module]
-
         inception_module_outputs = tf.concat(inception_module_paths_flattened, 1)
     else:
         inception_module_outputs = cur_inception_module
+
+    print(tf.train.get_global_step)
+    if not params["conv_init_fn"] is None: #and tf.train.global_step(tf.get_default_session(), tf.train.get_global_step()) == 0:
+        params["conv_init_fn"]()
 
 
     # Build the fully connected layers
     dense_layers_outputs, activation_summaries = build_fully_connected_layers_with_batch_norm(
         inception_module_outputs,
         params['dense_shape'],
+        params['kernel_initializer'],
         mode,
         activation_summaries=activation_summaries)
 
@@ -158,7 +205,7 @@ def board_eval_model_fn(features, labels, mode, params):
                              units=params['num_outputs'],
                              use_bias=False,
                              activation=None,
-                             kernel_initializer=layers.xavier_initializer(),
+                             kernel_initializer=params['kernel_initializer'](),
                              name="logit_layer")
 
     loss = None
@@ -168,7 +215,7 @@ def board_eval_model_fn(features, labels, mode, params):
 
     # Calculate loss (for both TRAIN and EVAL modes)
     if mode != tf.estimator.ModeKeys.PREDICT:
-        to_split = tf.reshape(logits, [-1, 3, 1])
+        to_split = tf.reshape(logits, [-1, 3])
         original_pos, desired_pos, random_pos = tf.split(to_split, [1, 1, 1], 1)
 
 
@@ -176,22 +223,23 @@ def board_eval_model_fn(features, labels, mode, params):
         # There are a few other methods I've been trying out in commented out, though none seem to be as good as
         # the one proposed in Deep Pink
         with tf.variable_scope("loss"):
-            # adjusted_equality_sum = (tf.scalar_mul(1.02,original_pos)+ desired_pos)
-            adjusted_equality_sum = (original_pos + desired_pos)
+            ######################################################################################################
+            # adjusted_equality_sum = (original_pos + CONSTANT + desired_pos)
+            adjusted_equality_sum = 2*(original_pos + desired_pos)
+            adjusted_real_rand_sum = (random_pos - desired_pos)
 
 
-            real_greater_rand_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(desired_pos - random_pos)))
+            # real_greater_rand_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(desired_pos - random_pos)))
+            real_greater_rand_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(adjusted_real_rand_sum)))
 
-            # to_compare =tf.squeeze(tf.concat([desired_pos, random_pos], 1))
-            # to_compare = tf.reshape(to_split, [-1,3])
-            # the_labels = tf.squeeze(tf.concat([tf.ones_like(desired_pos),tf.zeros_like(random_pos)], 1))
 
-            # softmax_inequality_loss = tf.losses.sigmoid_cross_entropy(the_labels, to_compare)
+
+
 
             ## test_new_loss_component = tf.reduce_mean(-tf.log(tf.sigmoid(-(original_pos + random_pos))))
             ## test_new_loss_component_summary = tf.summary.scalar("test_new_loss_component", test_new_loss_component)
 
-            # old_new_squared_scalar_loss = tf.reduce_mean(tf.square(adjusted_equality_sum))
+
             # loss = real_greater_rand_scalar_loss +  old_new_squared_scalar_loss
 
             ## test_equality_loss = tf.reduce_mean(
@@ -211,13 +259,24 @@ def board_eval_model_fn(features, labels, mode, params):
             # loss = real_greater_rand_scalar_loss + test_equality_loss
             loss = real_greater_rand_scalar_loss + equality_scalar_loss + negative_equality_scalar_loss
             # loss = real_greater_rand_scalar_loss + equality_scalar_loss + negative_equality_scalar_loss + test_new_loss_component
+            loss_summary = tf.summary.scalar("loss", loss)
 
+            ########################################################################################################
+
+            # # to_compare =tf.squeeze(tf.concat([desired_pos, random_pos], 1))
+            # to_compare = tf.squeeze(tf.concat([random_pos,desired_pos], 1))
+            # # to_compare = tf.reshape(to_split, [-1,3])
+            # the_labels = tf.squeeze(tf.concat([tf.ones_like(desired_pos),tf.zeros_like(random_pos)], 1))
+            #
+            # old_new_squared_scalar_loss = tf.reduce_mean(tf.square((original_pos + desired_pos)))
+            # softmax_inequality_loss = tf.losses.sigmoid_cross_entropy(the_labels, to_compare)
+            #
             # loss = old_new_squared_scalar_loss + softmax_inequality_loss
-            # loss = softmax_inequality_loss
-
+            # # loss = softmax_inequality_loss
+            #
             # old_real_summary = tf.summary.scalar("old_real_squared_loss", old_new_squared_scalar_loss)
             # softmax_summary = tf.summary.scalar("softmax_inequality_loss", softmax_inequality_loss)  #THIS SHOULD ALL ACTUALLY BE CALLED SIGMOID INEQUALITY LOSS@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-            loss_summary = tf.summary.scalar("loss", loss)
+            # loss_summary = tf.summary.scalar("loss", loss)
 
 
     # Configure the Training Op (for TRAIN mode)
@@ -245,44 +304,52 @@ def board_eval_model_fn(features, labels, mode, params):
     the_export_outputs = {
         "serving_default" : tf.estimator.export.RegressionOutput(value=logits)}
 
-    unstacked_input = tf.unstack(input_layer, axis=3)
+
+
     # Create the validation metrics
-    validation_metric = None
+    validation_metrics = None
     if mode != tf.estimator.ModeKeys.PREDICT:
-        real_rand_diff = desired_pos - random_pos
+        # unstacked_input = tf.unstack(input_layer, axis=3)
+
+
+        rand_real_diff = random_pos - desired_pos
         old_plus_desired = original_pos + desired_pos
 
-        mean_abs_real_rand_diff = tf.reduce_mean(tf.abs(real_rand_diff))
-        mean_abs_old_plus_desired = tf.reduce_mean(tf.abs(old_plus_desired))
+        abs_rand_real_diff = tf.abs(rand_real_diff)
+        # mean_abs_rand_real_diff = tf.reduce_mean(abs_rand_real_diff)
 
-        abs_realrand_realold_ratio = tf.reduce_mean(real_rand_diff) / mean_abs_old_plus_desired#################################################################################RENAME THIS AND IT'S COMMENT##############################################################################################################
+        abs_old_plus_desired = tf.abs(old_plus_desired)
+        mean_abs_old_plus_desired = tf.reduce_mean(abs_old_plus_desired)
+
+        abs_randreal_realold_ratio = tf.reduce_mean(rand_real_diff) / mean_abs_old_plus_desired
 
 
-        validation_metric = {
-            "metrics/rand_vs_real_accuracy": mean_metric_creator("metrics/rand_vs_real_accuracy")(tf.cast(tf.greater(desired_pos, random_pos), tf.float32), None),
-            "metrics/mean_dist_real_rand": mean_metric_creator("metrics/mean_dist_real_rand")(real_rand_diff, None),
-            # "metrics/mean_abs_dist_real_rand": mean_metric_creator("metrics/mean_abs_dist_real_rand")(abs_real_rand_diff, None),
-            "metrics/mean_abs_dist_real_rand": (mean_abs_real_rand_diff, tf.summary.scalar("metrics/mean_abs_dist_real_rand", mean_abs_real_rand_diff)),
-            "metrics/mean_dist_old_real": mean_metric_creator("metrics/mean_dist_old_real")(old_plus_desired, None),
-            "metrics/mean_abs_dist_old_real": (mean_abs_old_plus_desired, tf.summary.scalar("metrics/mean_abs_dist_old_real", mean_abs_old_plus_desired)),
-            "metrics/abs_realrand_realold_ratio" : (abs_realrand_realold_ratio, tf.summary.scalar("metrics/abs_realrand_realold_ratio", abs_realrand_realold_ratio)),
 
-            # "loss/test_new_loss_component" : (test_new_loss_component,test_new_loss_component_summary),
-            # "loss/real_greater_rand_loss": (real_greater_rand_scalar_loss, real_rand_loss_summary),
-            "loss/mean_original_plus_desired_loss": (equality_scalar_loss, equality_sum_loss_summary),
-            "loss/mean_negative_original_plus_desired": (negative_equality_scalar_loss, negative_equality_sum_loss_summary),
-            # "loss/old_real_squared_loss" : (old_new_squared_scalar_loss, old_real_summary),
-            # "loss/softmax_inequality_loss":(softmax_inequality_loss, softmax_summary),
+        to_create_metric_dict = {
+            "metrics/rand_vs_real_accuracy" : tf.cast(tf.less(desired_pos, random_pos), tf.float32),
+            "metrics/mean_dist_rand_real" : rand_real_diff,
+            "metrics/mean_abs_rand_real_diff" : abs_rand_real_diff,
+            "metrics/mean_dist_old_real" : old_plus_desired,
+            "metrics/mean_abs_dist_old_real" : abs_old_plus_desired,
+            "metrics/abs_randreal_realold_ratio" : abs_randreal_realold_ratio,
+
+            "metrics/mean_old_pos" : original_pos,
+            "metrics/mean_new_pos": desired_pos,
+            "metrics/mean_random_pos": random_pos,
+            "metrics/mean_abs_old_pos": tf.abs(original_pos),
+            "metrics/mean_abs_new_pos": tf.abs(desired_pos),
+            "metrics/mean_abs_random_pos": tf.abs(random_pos),
+
+            "loss/real_greater_rand_loss" : (real_greater_rand_scalar_loss, real_rand_loss_summary),
+            "loss/mean_original_plus_desired_loss" : (equality_scalar_loss, equality_sum_loss_summary),
+            "loss/mean_negative_original_plus_desired" : (negative_equality_scalar_loss, negative_equality_sum_loss_summary),
             "loss/loss" : (loss, loss_summary),
-            # "loss/ratio_old_new_sum_loss_to_negative_sum" : (ratio_old_new_sum_loss_to_negative_sum, tf.summary.scalar("loss/ratio_old_new_sum_loss_to_negative_sum", ratio_old_new_sum_loss_to_negative_sum)),
-            # "sanity_check/input_tensor_mean" : mean_metric_creator("sanity_check/input_tensor_mean")(features, None),
-            "metrics/mean_old_pos": mean_metric_creator("metrics/mean_old_pos")(original_pos, None),
-            "metrics/mean_new_pos": mean_metric_creator("metrics/mean_new_pos")(desired_pos, None),
-            # "metrics/negative_new_to_old_ratio" : mean_metric_creator("metrics/negative_new_to_old_ratio")(tf.divide(-desired_pos, original_pos), None),
-            "metrics/mean_random_pos": mean_metric_creator("metrics/mean_random_pos")(random_pos, None),
-            "metrics/mean_abs_old_pos": mean_metric_creator("metrics/mean_abs_old_pos")(tf.abs(original_pos), None),
-            "metrics/mean_abs_new_pos": mean_metric_creator("metrics/mean_abs_new_pos")(tf.abs(desired_pos), None),
-            "metrics/mean_abs_random_pos": mean_metric_creator("metrics/mean_abs_random_pos")(tf.abs(random_pos), None)}
+            "loss/ratio_old_new_sum_loss_to_negative_sum" : ratio_old_new_sum_loss_to_negative_sum,
+
+        }
+
+
+        validation_metrics = metric_dict_creator(to_create_metric_dict)
 
     # Create the trainable variable summaries and merge them together to give to a hook
     trainable_var_summaries = layers.summarize_tensors(tf.get_collection(
@@ -302,14 +369,14 @@ def board_eval_model_fn(features, labels, mode, params):
         train_op=train_op,
         training_hooks=[summary_hook],
         export_outputs=the_export_outputs,
-        eval_metric_ops=validation_metric)
+        eval_metric_ops=validation_metrics)
+
 
 
 def move_gen_cnn_model_fn(features, labels, mode, params):
     """
     Generates an EstimatorSpec for the model.
     """
-
     def index_tensor_to_index_pairs(index_tensor):
         """
         Takes an array of indices and returns an array defined by the following (not perfectly descriptive
@@ -342,6 +409,7 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
             cur_inception_module, activation_summaries = build_inception_module_with_batch_norm(
                 cur_inception_module,
                 module_shape,
+                params['kernel_initializer'],
                 mode,
                 padding='valid',
                 num_previously_built_inception_modules=module_num,
@@ -365,6 +433,7 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
     dense_layers_outputs, activation_summaries = build_fully_connected_layers_with_batch_norm(
         inception_module_outputs,
         params['dense_shape'],
+        params['kernel_initializer'],
         mode,
         activation_summaries=activation_summaries)
 
@@ -466,22 +535,28 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
 
     unstacked_input = tf.unstack(input_layer, axis=3)
     # Create the validation metrics
-    validation_metric = None
+    validation_metrics = None
     if mode != tf.estimator.ModeKeys.PREDICT:
-        validation_metric = {
+
+        mean_important_logits = tf.reduce_mean(important_logits)
+        important_logits_minus_labels = important_logits-important_labels
+        mean_important_minus_labels = tf.reduce_mean(important_logits_minus_labels)
+
+        to_create_metric_dict = {
             "loss/loss" : (loss, loss_scalar_summary),
-            "metrics/total_moves_above_desired_moves" : (total_moves_above_desired_moves, tf.summary.scalar("metrics/total_moves_above_desired_moves", total_moves_above_desired_moves)),
-            "metrics/ratio_moves_above_desired_moves": (total_moves_above_desired_moves/total_possible_moves,tf.summary.scalar("metrics/ratio_moves_above_desired_moves",total_moves_above_desired_moves/total_possible_moves)),
-            # "sanity_check/mean_possible_moves" : (mean_possible_moves, tf.summary.scalar("sanity_check/mean_possible_moves", mean_possible_moves)),
-            "sanity_check/total_possible_moves" : (total_possible_moves, tf.summary.scalar("sanity_check/total_possible_moves", total_possible_moves)),
-            "metrics/mean_evaluation_value" : mean_metric_creator("metrics/mean_evaluation_value")(important_logits,None),
-            "metrics/mean_expected_value" : mean_metric_creator("metrics/mean_expected_value")(important_labels,None),
-            "metrics/mean_abs_expected_value": mean_metric_creator("metrics/mean_abs_expected_value")(abs(important_labels), None),
-            "metrics/distance_from_desired" : mean_metric_creator("metrics/distance_from_desired")(important_logits-important_labels,None),
-            "metrics/abs_distance_from_desired": mean_metric_creator("metrics/abs_distance_from_desired")(tf.abs(important_logits - important_labels), None),
-            "metrics/distance_from_not_desired": mean_metric_creator("metrics/distance_from_not_desired")(tf.boolean_mask(logits, opposite_bool_mask) - tf.boolean_mask(labels, opposite_bool_mask),None),
-            "metrics/relative_distance_from_desired": mean_metric_creator("metrics/relative_distance_from_desired")(tf.abs((important_logits - tf.boolean_mask(labels, bool_mask))/important_logits), None),
+            "metrics/total_moves_above_desired_moves" : total_moves_above_desired_moves,
+            "metrics/ratio_moves_above_desired_moves" : total_moves_above_desired_moves/total_possible_moves,
+            "metrics/mean_evaluation_value" : mean_important_logits ,
+            "metrics/mean_expected_value" : important_labels,
+            "metrics/mean_abs_expected_value" : abs(important_labels),
+            "metrics/distance_from_desired" : mean_important_minus_labels,
+            "metrics/abs_distance_from_desired" : tf.abs(important_logits_minus_labels),
+            "metrics/distance_from_not_desired" : tf.boolean_mask(logits, opposite_bool_mask) - tf.boolean_mask(labels, opposite_bool_mask),
+            "metrics/relative_distance_from_desired": tf.abs(mean_important_minus_labels / mean_important_logits),
         }
+
+        validation_metrics = metric_dict_creator(to_create_metric_dict)
+
 
     # Create the trainable variable summaries and merge them together to give to a hook
     trainable_var_summaries = layers.summarize_tensors(tf.get_collection(
@@ -499,12 +574,11 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
         train_op=train_op,
         training_hooks=[summary_hook],
         export_outputs=the_export_outputs,
-        eval_metric_ops=validation_metric)
+        eval_metric_ops=validation_metrics)
 
 
 
-
-def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, include_unoccupied=True, shuffle_buffer_size=None):################MUST COMBINE THIS FUNCTIONALITY WITH THE ONE BELOW IT (just add ability to subtract one before one_hot
+def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, include_unoccupied=True, shuffle_buffer_size=None): ################MUST COMBINE THIS FUNCTIONALITY WITH THE ONE BELOW IT (just add ability to subtract one before one_hot
     def tf_records_input_data_fn():
         with tf.device('/cpu:0'):
 
@@ -603,163 +677,58 @@ def move_gen_one_hot_create_tf_records_input_data_fn(filename_pattern, batch_siz
 
 
 
-def serving_input_reciever_fn_creater(whites_turn):#########################################################################DECIDE IF THIS SHOULD BE REMOVED FOR THIS COMMIT###################################################
-    """
-    TO MAKE BLACKS TURN:
-    1) switch color of pieces (switch occupied_w with occupied_b
-    2) reverse the positioning of the board
-    """
-    def serving_input_reciever_fn():
-        feature_spec = {"occupied_w" : tf.FixedLenFeature([1], tf.int64),
-                        "occupied_b" : tf.FixedLenFeature([1], tf.int64),
-                        "kings" : tf.FixedLenFeature([1], tf.int64),
-                        "queens": tf.FixedLenFeature([1], tf.int64),
-                        "rooks": tf.FixedLenFeature([1], tf.int64),
-                        "bishops" : tf.FixedLenFeature([1], tf.int64),
-                        "knights": tf.FixedLenFeature([1], tf.int64),
-                        "pawns": tf.FixedLenFeature([1], tf.int64),
-                        "ep_square" : tf.FixedLenFeature([1], tf.int64),
-                        "castling_rights" : tf.FixedLenFeature([1], tf.int64),
-                        }
+def no_chestimator_serving_input_reciever():
+    piece_bbs, color_occupied_bbs, ep_squares, formatted_data = new_get_board_data()
+
+    receiver_tensors = {"piece_bbs": piece_bbs,
+                        "color_occupied_bbs": color_occupied_bbs,
+                        "ep_squares": ep_squares}
+
+    return tf.estimator.export.ServingInputReceiver(formatted_data, receiver_tensors)
 
 
+#The code commented out below has never been run, and as is I'm fairly confident it won't work.
 
-        serialized_tf_example = tf.placeholder(dtype=tf.string, name='input_example_tensor')
-
-        receiver_tensors = {'example': serialized_tf_example}
-
-        features = tf.parse_example(serialized_tf_example, feature_spec)
-
-        with tf.device("/gpu:0"):
-            print("features:", features)
-            if whites_turn:
-                first_players_occupied = features["occupied_w"]
-                second_players_occupied = features["occupied_b"]
-            else:
-                first_players_occupied = features["occupied_b"]
-                second_players_occupied = features["occupied_w"]
-
-
-            the_ints = tf.concat([
-                tf.bitwise.invert(tf.bitwise.bitwise_or(features["occupied_w"], features["occupied_b"])),# (Empty squares) might be faster to just pass occupied in the Protocol Buffer
-                features["ep_square"],# (ep_square) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)#########################################################THIS I THINK IS COMPLETELY WRONG SINCE I NEVER DID THE GATHER###########################
-                tf.bitwise.bitwise_and(first_players_occupied, features["kings"]),# Likely can do without AND operation
-                tf.bitwise.bitwise_and(first_players_occupied, features["queens"]),
-                tf.bitwise.bitwise_and(first_players_occupied, features["rooks"]),
-                tf.bitwise.bitwise_and(first_players_occupied, features["bishops"]),
-                tf.bitwise.bitwise_and(first_players_occupied, features["knights"]),
-                tf.bitwise.bitwise_and(first_players_occupied, features["pawns"]),
-                tf.bitwise.bitwise_and(first_players_occupied, features["castling_rights"]),# (White castling rooks) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
-                tf.bitwise.bitwise_and(second_players_occupied, features["kings"]),# Likely can do without AND operation
-                tf.bitwise.bitwise_and(second_players_occupied, features["queens"]),
-                tf.bitwise.bitwise_and(second_players_occupied, features["rooks"]),
-                tf.bitwise.bitwise_and(second_players_occupied, features["bishops"]),
-                tf.bitwise.bitwise_and(second_players_occupied, features["knights"]),
-                tf.bitwise.bitwise_and(second_players_occupied, features["pawns"]),
-                tf.bitwise.bitwise_and(second_players_occupied, features["castling_rights"]),# (Black castling rooks) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
-                ],
-                axis=1
-            )
-
-            the_bytes = tf.cast(tf.bitcast(the_ints,tf.uint8),dtype=tf.int32)
-
-            if not whites_turn:
-                the_bytes = tf.reverse(the_bytes, axis=[2])
-
-            float_bool_masks = tf.constant(
-                [np.unpackbits(num).tolist() for num in np.arange(2 ** 8, dtype=np.uint8)],
-                dtype=tf.float32)
-
-            data = tf.gather(float_bool_masks, the_bytes)
-
-            properly_aranged_data = tf.transpose(data, perm=[0, 2, 3, 1])
-
-            return tf.estimator.export.ServingInputReceiver(properly_aranged_data, receiver_tensors)
-
-    return serving_input_reciever_fn
+# def no_chestimator_serving_move_scoring_input_reciever(max_batch_size=50000, max_moves_for_a_board=100):
+#     piece_bbs, color_occupied_bbs, ep_squares, formatted_data = new_get_board_data()
+#
+#     moves_per_board = tf.placeholder(tf.uint8, shape=[None], name="moves_per_board_placeholder")
+#     moves = tf.placeholder(tf.uint8, shape=[None, 2], name="move_placeholder")
+#
+#     board_index_repeated_array = tf.transpose(
+#         tf.reshape(
+#             tf.tile(
+#                 tf.range(max_moves_for_a_board),
+#                 [max_batch_size]),
+#             [max_batch_size, max_moves_for_a_board]),
+#         [1, 0])
+#
+#     move_to_index_array = np.zeros(shape=[64, 64], dtype=np.int32)
+#     for key, value in generate_move_to_enumeration_dict().items():
+#         move_to_index_array[key[0], key[1]] = value
+#
+#     move_to_index_tensor = tf.constant(move_to_index_array, shape=[64, 64])
+#
+#     board_indices_for_moves = tf.boolean_mask(board_index_repeated_array,
+#                                               tf.sequence_mask(tf.cast(moves_per_board, tf.int32)))
+#
+#     move_nums = tf.gather_nd(move_to_index_tensor, tf.cast(moves, tf.int32))
+#
+#     the_moves = tf.stack([board_indices_for_moves, move_nums], axis=-1)
+#
+#
+#     receiver_tensors = {"piece_bbs" : piece_bbs,
+#                         "color_occupied_bbs" : color_occupied_bbs,
+#                         "ep_squares" : ep_squares,
+#                         "moves_per_board" : moves_per_board,
+#                         "moves" : moves}
+#
+#     dict_for_model_fn = {"data" : formatted_data,
+#                          "legal_move_indices" : the_moves}
+#
+#     return tf.estimator.export.ServingInputReceiver(dict_for_model_fn , receiver_tensors)
 
 
-def serving_input_reciever_legal_moves_fn(whites_turn):
-    """
-    TO MAKE BLACKS TURN:
-    1) switch color of pieces (switch occupied_w with occupied_b)
-    2) reverse the positioning of the board
-    3) (not done yet) switch the indices of logits to return
-    """
-    def serving_input_reciever_fn():
-        feature_spec = {"occupied_w" : tf.FixedLenFeature([1], tf.int64),
-                        "occupied_b" : tf.FixedLenFeature([1], tf.int64),
-                        "kings" : tf.FixedLenFeature([1], tf.int64),
-                        "queens": tf.FixedLenFeature([1], tf.int64),
-                        "rooks": tf.FixedLenFeature([1], tf.int64),
-                        "bishops" : tf.FixedLenFeature([1], tf.int64),
-                        "knights": tf.FixedLenFeature([1], tf.int64),
-                        "pawns": tf.FixedLenFeature([1], tf.int64),
-                        "ep_square" : tf.FixedLenFeature([1], tf.int64),
-                        "castling_rights" : tf.FixedLenFeature([1], tf.int64),
-                        "legal_move_indices" : tf.FixedLenSequenceFeature([], tf.int64, allow_missing=True),
-                        }
-
-
-
-        serialized_tf_example = tf.placeholder(dtype=tf.string, name='input_example_tensor')
-
-        receiver_tensors = {'example': serialized_tf_example}
-
-        features = tf.parse_example(serialized_tf_example, feature_spec)
-
-        with tf.device("/gpu:0"):
-            if whites_turn:
-                first_players_occupied = features["occupied_w"]
-                second_players_occupied = features["occupied_b"]
-
-                the_legal_move_indices = features["legal_move_indices"] #currently this has no use
-            else:
-                first_players_occupied = features["occupied_b"]
-                second_players_occupied = features["occupied_w"]
-
-                the_legal_move_indices = features["legal_move_indices"] #currently this has no use
-
-
-            the_ints = tf.concat([
-                tf.bitwise.invert(tf.bitwise.bitwise_or(features["occupied_w"], features["occupied_b"])),# (Empty squares) might be faster to just pass occupied in the Protocol Buffer
-                features["ep_square"],# (ep_square) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
-                tf.bitwise.bitwise_and(first_players_occupied, features["kings"]),# Likely can do without AND operation
-                tf.bitwise.bitwise_and(first_players_occupied, features["queens"]),
-                tf.bitwise.bitwise_and(first_players_occupied, features["rooks"]),
-                tf.bitwise.bitwise_and(first_players_occupied, features["bishops"]),
-                tf.bitwise.bitwise_and(first_players_occupied, features["knights"]),
-                tf.bitwise.bitwise_and(first_players_occupied, features["pawns"]),
-                tf.bitwise.bitwise_and(first_players_occupied, features["castling_rights"]),# (White castling rooks) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
-                tf.bitwise.bitwise_and(second_players_occupied, features["kings"]),# Likely can do without AND operation
-                tf.bitwise.bitwise_and(second_players_occupied, features["queens"]),
-                tf.bitwise.bitwise_and(second_players_occupied, features["rooks"]),
-                tf.bitwise.bitwise_and(second_players_occupied, features["bishops"]),
-                tf.bitwise.bitwise_and(second_players_occupied, features["knights"]),
-                tf.bitwise.bitwise_and(second_players_occupied, features["pawns"]),
-                tf.bitwise.bitwise_and(second_players_occupied, features["castling_rights"]),# (Black castling rooks) very likely should do this differently (to avoid 8 indicies in tf.gather and instead use 1)
-                ],
-                axis=1
-            )
-
-            the_bytes = tf.cast(tf.bitcast(the_ints,tf.uint8),dtype=tf.int32)
-
-            if not whites_turn:
-                the_bytes = tf.reverse(the_bytes, axis=[2])
-
-
-            float_bool_masks = tf.constant(
-                [np.unpackbits(num).tolist() for num in np.arange(2 ** 8, dtype=np.uint8)],
-                dtype=tf.float32)
-
-            data = tf.gather(float_bool_masks, the_bytes)
-
-            properly_aranged_data = tf.transpose(data, perm=[0, 2, 3, 1])
-
-            dict_to_return = {"data": properly_aranged_data, "move_indices": the_legal_move_indices}
-            return tf.estimator.export.ServingInputReceiver(dict_to_return, receiver_tensors)
-
-    return serving_input_reciever_fn
 
 
 def line_counter(filename):

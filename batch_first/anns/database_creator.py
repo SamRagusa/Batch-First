@@ -7,7 +7,6 @@ import numpy as np
 import numba as nb
 import tensorflow as tf
 
-import chess
 import chess.pgn
 import pickle
 import math
@@ -15,15 +14,19 @@ import time
 import random
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from itertools import product, chain
 
-from evaluation_ann import main as evaluation_ann_main
-from ann_creation_helper import line_counter
+from .evaluation_ann import main as evaluation_ann_main
+from .ann_creation_helper import line_counter
 
-from numba_board import create_board_state_from_fen, generate_legal_moves, BB_ALL,\
-    generate_move_to_enumeration_dict, Move, TURN_WHITE, TURN_BLACK, copy_push, vectorized_flip_vertically,\
-    msb, BoardState, BB_SQUARES, INITIAL_BOARD_FEN, push_with_hash_update, popcount, numpy_node_info_dtype, \
-    MAX_MOVES_LOOKED_AT, MIN_FLOAT32_VAL, set_up_move_array
+from ..numba_board import vectorized_flip_vertically, msb,  popcount, numpy_node_info_dtype, set_up_move_array
+
+from ..board_jitclass import BoardState, Move, create_board_state_from_fen, generate_legal_moves, \
+    generate_move_to_enumeration_dict, copy_push, push_with_hash_update
+
+
+from .. import TURN_WHITE, TURN_BLACK, BB_SQUARES, MIN_FLOAT32_VAL, MAX_MOVES_LOOKED_AT, INITIAL_BOARD_FEN,BB_ALL
+
+
 
 
 @nb.njit

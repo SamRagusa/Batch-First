@@ -1,8 +1,8 @@
 from chess.polyglot import zobrist_hash
 
-from engine_constants import *
+from . import *
+# from engine_constants import *
 
-import time
 
 # import llvmlite.binding as llvm
 # llvm.set_option('', '--debug-only=loop-vectorize')
