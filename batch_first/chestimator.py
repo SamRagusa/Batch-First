@@ -13,7 +13,7 @@ from tensorflow.python.util import compat
 #If you haven't optimized your graph with TensorRT you can comment this out.
 from tensorflow.contrib import tensorrt as trt
 
-from .board_jitclass import generate_move_to_enumeration_dict
+from batch_first.board_jitclass import generate_move_to_enumeration_dict
 
 
 
@@ -45,7 +45,7 @@ def get_inference_functions(eval_graphdef_file, move_graphdef_file):
     """
     sess = tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.35)))
 
-    eval_output_tensor_name = "logit_layer/MatMul:0"#"add:0"
+    eval_output_tensor_name = "add:0"#"logit_layer/MatMul:0"#
     eval_input_tensor_names = [
         "piece_bbs:0",
         "color_occupied_bbs:0",

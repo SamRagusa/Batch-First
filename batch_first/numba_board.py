@@ -1,6 +1,6 @@
 from chess.polyglot import zobrist_hash
 
-from . import *
+from batch_first import *
 # from engine_constants import *
 
 

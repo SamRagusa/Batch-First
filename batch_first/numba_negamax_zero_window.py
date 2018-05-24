@@ -3,12 +3,16 @@ from collections import OrderedDict
 import chess.uci
 import time
 
-from .numba_board import *
-from .global_open_priority_nodes import PriorityBins
-from .anns.move_evaluation_ann import main as move_ann_main
-from .board_jitclass import BoardState, generate_move_to_enumeration_dict, has_legal_move, is_in_check
-from .transposition_table import get_empty_hash_table, add_board_and_move_to_tt
-from .chestimator import get_inference_functions
+
+# from batch_first import *
+from numba_board import *
+
+from global_open_priority_nodes import PriorityBins
+from board_jitclass import BoardState, generate_move_to_enumeration_dict, has_legal_move, is_in_check
+from transposition_table import get_empty_hash_table, add_board_and_move_to_tt
+from chestimator import get_inference_functions
+from batch_first.anns.move_evaluation_ann import main as move_ann_main
+
 
 
 

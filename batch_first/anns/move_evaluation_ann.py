@@ -1,8 +1,8 @@
 import tensorflow as tf
 from functools import reduce
 
-from . import ann_creation_helper as ann_h
-from ..chestimator import MoveChEstimator
+import ann_creation_helper as ann_h
+from batch_first.chestimator import MoveChEstimator
 
 
 tf.logging.set_verbosity(tf.logging.INFO)

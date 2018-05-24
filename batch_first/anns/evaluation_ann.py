@@ -6,7 +6,9 @@ Created on Jul 2, 2017
 
 import tensorflow as tf
 
-from . import ann_creation_helper as ann_h
+
+
+import ann_creation_helper as ann_h
 
 
 tf.logging.set_verbosity(tf.logging.INFO)

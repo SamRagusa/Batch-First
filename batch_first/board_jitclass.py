@@ -3,11 +3,11 @@ from numba import uint64, boolean, uint8
 from collections import OrderedDict
 
 
-from .numba_board import *
+from batch_first.numba_board import *
 
 
 #I'm not sure why I'm being required to import these functions, given the import directly above, but I'll figure it out soon (haven't really tried yet)
-from .numba_board import _remove_piece_at, _set_piece_at, _attacked_for_king, _attackers_mask, _castling_uncovers_rank_attack,_slider_blockers
+from batch_first.numba_board import _remove_piece_at, _set_piece_at, _attacked_for_king, _attackers_mask, _castling_uncovers_rank_attack,_slider_blockers
 
 
 

@@ -5,8 +5,8 @@ from tensorflow.python import training
 
 from functools import reduce
 
-from ..chestimator import new_get_board_data
-# from ..board_jitclass import generate_move_to_enumeration_dict
+from batch_first.chestimator import new_get_board_data
+# from batch_first.board_jitclass import generate_move_to_enumeration_dict
 
 
 #If you don't have TensorRT installed, you can just comment out it's use. Here it's only used in the
