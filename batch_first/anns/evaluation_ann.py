@@ -21,7 +21,7 @@ def main(using_to_serve):
     """
     Set up the data pipelines, create the computational graph, train the model, and evaluate the results.
     """
-    SAVE_MODEL_DIR = "/srv/tmp/encoder_evaluation/normal_next_try_3"#"/srv/tmp/encoder_evaluation/conv_train_wide_and_deep_4"
+    SAVE_MODEL_DIR = "/srv/tmp/encoder_evaluation/normal_next_try_6"#"/srv/tmp/encoder_evaluation/conv_train_wide_and_deep_4"
     TRAINING_FILENAME_PATTERN = "/srv/databases/chess_engine/one_rand_per_board_data/scoring_training_set_*.tfrecords"
     VALIDATION_FILENAME_PATTERN = "/srv/databases/chess_engine/one_rand_per_board_data/scoring_validation_set_*.tfrecords"
     TRAIN_OP_SUMMARIES = ["gradient_norm", "gradients"]
@@ -34,18 +34,24 @@ def main(using_to_serve):
     VALIDATION_BATCH_SIZE = 10000
     # NUM_TRAINING_EPOCHS = 250
     LOG_ITERATION_INTERVAL =10000
-    LEARNING_RATE = 1e-5
+    LEARNING_RATE = 1e-6#5
     init_conv_layers_fn = None
-    CHECKPOINT_DIR_WITH_CONV_LAYERS = "/srv/tmp/encoder_helper/with_moves_6.4"
+    KERNEL_REGULARIZER = lambda:None
+    CHECKPOINT_DIR_WITH_CONV_LAYERS = "/srv/tmp/encoder_helper/with_moves_7_regularized.3"
     KERNEL_INITIALIZER = lambda : tf.contrib.layers.variance_scaling_initializer()#factor=.5)
     MAKE_CNN_MODULES_TRAINABLE = True
 
     INCEPTION_MODULES = [
         [
             [[20, 3],  # 720
-             [30, 3],  # 480
-             [300, 4]]],
-        lambda tensor: tf.reshape(tensor, [-1,300]),
+             [35, 3],  # 560
+             [400, 4]]],  # 400
+
+        
+            # [[20, 3],  # 720
+            #  [30, 3],  # 480
+            #  [300, 4]]],
+        lambda tensor: tf.reshape(tensor, [-1,400]),
     ]
 
 
@@ -56,7 +62,7 @@ def main(using_to_serve):
 
     learning_decay_function = lambda gs  : tf.train.exponential_decay(LEARNING_RATE,
                                                                       global_step=gs,
-                                                                      decay_steps=BATCHES_IN_TRAINING_EPOCH,#*2,
+                                                                      decay_steps=BATCHES_IN_TRAINING_EPOCH*2,
                                                                       decay_rate=0.96,
                                                                       staircase=True)
 
@@ -89,6 +95,7 @@ def main(using_to_serve):
             "num_input_filters" : NUM_INPUT_FILTERS,
             "conv_init_fn": init_conv_layers_fn,
             "kernel_initializer" : KERNEL_INITIALIZER,
+            "kernel_regularizer" : KERNEL_REGULARIZER,
             "trainable_cnn_modules" : MAKE_CNN_MODULES_TRAINABLE,
             })
 

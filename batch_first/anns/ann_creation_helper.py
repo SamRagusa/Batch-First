@@ -6,7 +6,7 @@ from tensorflow.python import training
 from functools import reduce
 
 from batch_first.chestimator import new_get_board_data
-# from batch_first.board_jitclass import generate_move_to_enumeration_dict
+from batch_first.board_jitclass import generate_move_to_enumeration_dict
 
 
 #If you don't have TensorRT installed, you can just comment out it's use. Here it's only used in the
@@ -32,6 +32,7 @@ def save_model_as_graphdef_for_serving(model_path, output_model_path, output_fil
 
 
         tf.train.write_graph(trt_graph, output_model_path, output_filename, as_text=as_text)
+
 
 
 
@@ -63,6 +64,8 @@ def build_fully_connected_layers_with_batch_norm(the_input, shape, kernel_initia
         activation_summaries.append(layers.summarize_activation(temp_layer_output))
 
     return the_input, activation_summaries
+
+
 
 
 def build_inception_module_with_batch_norm(the_input, module, kernel_initializer, mode, activation_summaries=[], num_previously_built_inception_modules=0, padding='same', force_no_concat=False,make_trainable=True, weight_regularizer=None):
@@ -128,9 +131,99 @@ def build_inception_module_with_batch_norm(the_input, module, kernel_initializer
                 return [temp_input for temp_input in path_outputs], activation_summaries
 
         return tf.concat([temp_input for temp_input in path_outputs], 3), activation_summaries
+
+
+
+
+def build_transposed_inception_module_with_batch_norm(the_input, module, kernel_initializer, mode, activation_summaries=[], num_previously_built_inception_modules=0, padding='same', force_no_concat=False,make_trainable=True, weight_regularizer=None):
+    if weight_regularizer is None:
+        weight_regularizer = lambda:None
+
+    path_outputs = [None for _ in range(len(module))]
+    to_summarize = []
+    cur_input = None
+    for j, path in enumerate(module):
+        with tf.variable_scope("inception_module_" + str(num_previously_built_inception_modules + 1) + "_path_" + str(j + 1)):
+            for i, section in enumerate(path):
+                if i == 0:
+                    if j != 0:
+                        path_outputs[j - 1] = cur_input
+
+                    cur_input = the_input
+
+                cur_conv_output = tf.layers.conv2d_transpose(
+                    inputs=cur_input,
+                    filters=section[0],
+                    kernel_size=section[1],
+                    strides=section[2],
+                    padding=padding,
+                    use_bias=False,
+                    activation=None,
+                    kernel_initializer=kernel_initializer(),
+                    kernel_regularizer=weight_regularizer(),
+                    trainable=make_trainable)
+                    # name="layer_" + str(i + 1))
+
+                cur_batch_normalized = tf.layers.batch_normalization(cur_conv_output,
+                                                                     training=(mode == tf.estimator.ModeKeys.TRAIN),
+                                                                     trainable=make_trainable,
+                                                                     fused=True)
+
+                cur_input = tf.nn.relu(cur_batch_normalized)
+
+                to_summarize.append(cur_input)
+
+    path_outputs[-1] = cur_input
+
+    activation_summaries = activation_summaries + [layers.summarize_activation(layer) for layer in to_summarize]
+
+    with tf.variable_scope("inception_module_" + str(num_previously_built_inception_modules + 1)):
+        if len(path_outputs) == 1:
+            return path_outputs[0], activation_summaries
+        for j in range(1, len(path_outputs)):
+            if force_no_concat or path_outputs[0].get_shape().as_list()[1:3] != path_outputs[j].get_shape().as_list()[1:3]:
+                return [temp_input for temp_input in path_outputs], activation_summaries
+
+        return tf.concat([temp_input for temp_input in path_outputs], 3), activation_summaries
+
+
+
+
     
-    
-    
+
+
+def build_convolutional_modules(input, modules, mode, kernel_initializer, kernel_regularizer, make_trainable):
+    activation_summaries = []
+
+    cur_inception_module = input
+
+    for module_num, module_shape in enumerate(modules):
+        if callable(module_shape):
+            cur_inception_module = module_shape(cur_inception_module)
+        else:
+            cur_inception_module, activation_summaries = build_inception_module_with_batch_norm(
+                cur_inception_module,
+                module_shape,
+                kernel_initializer,
+                mode,
+                padding='valid',
+                make_trainable=make_trainable,
+                num_previously_built_inception_modules=module_num,
+                weight_regularizer=kernel_regularizer)
+
+    if isinstance(cur_inception_module, list):
+        inception_module_paths_flattened = [
+            tf.reshape(
+                path,
+                [-1, reduce(lambda a, b: a * b, path.get_shape().as_list()[1:])]
+            ) for path in cur_inception_module]
+        return tf.concat(inception_module_paths_flattened, 1), activation_summaries
+
+    return cur_inception_module, activation_summaries
+
+
+
+
 
 def metric_dict_creator(the_dict):
     metric_dict = {}
@@ -142,8 +235,150 @@ def metric_dict_creator(the_dict):
             metric_dict[key] = (mean_value, tf.summary.scalar(key, mean_value))
 
     return metric_dict
-    
-    
+
+
+
+
+
+def encoder_builder_fn(features, labels, mode, params):
+    """
+    Generates an EstimatorSpec for the model.
+    """
+
+    if mode == tf.estimator.ModeKeys.PREDICT:
+        input_layer = features["data"]
+    else:
+        input_layer = tf.reshape(features, [-1, 8, 8, params['num_input_filters']])
+
+
+    logits, activation_summaries = build_convolutional_modules(
+        input_layer,
+        params['inception_modules'],
+        mode,
+        params['kernel_initializer'],
+        params['kernel_regularizer'],
+        params['trainable_cnn_modules'])
+
+
+    if not params["conv_init_fn"] is None:
+        params["conv_init_fn"]()
+
+
+    loss = None
+    legal_move_loss = None
+    pieces_loss = None
+    train_op = None
+    legal_move_summary = None
+    pieces_loss_summary = None
+    loss_summary = None
+
+    empty_squares = tf.expand_dims(1 - tf.reduce_sum(input_layer, axis=3), axis=3)
+    print(empty_squares)
+    one_hot_piece_labels = tf.concat([input_layer, empty_squares], axis=3)
+
+
+    piece_logit_slices = logits[..., :16]
+    move_logit_slices = logits[..., 16:]
+
+
+    # Calculate loss (for both TRAIN and EVAL modes)
+    if mode != tf.estimator.ModeKeys.PREDICT:
+        with tf.variable_scope("loss"):
+
+            index_to_move_dict = {value: key for key, value in generate_move_to_enumeration_dict().items()}
+            possible_move_indices = tf.constant([[index_to_move_dict[j][0],index_to_move_dict[j][1]] for j in range(len(index_to_move_dict))], dtype=tf.int32)
+
+            legal_move_ints = tf.transpose(tf.to_int32(labels))
+
+
+            move_logits_to_from_format = tf.transpose(tf.reshape(move_logit_slices, (-1,64,64)),perm=[1,2,0])
+
+            possible_move_logits = tf.gather_nd(move_logits_to_from_format, possible_move_indices)
+
+            pieces_loss = tf.losses.softmax_cross_entropy(tf.reshape(one_hot_piece_labels, (-1, 16)), tf.reshape(piece_logit_slices, (-1, 16)))
+            legal_move_loss = tf.losses.sigmoid_cross_entropy(legal_move_ints, possible_move_logits)
+
+            loss = pieces_loss + legal_move_loss
+
+            pieces_loss_summary = tf.summary.scalar("pieces_loss", pieces_loss)
+            legal_move_summary = tf.summary.scalar("legal_move_loss", legal_move_loss)
+            loss_summary = tf.summary.scalar("loss", loss)
+
+    # Configure the Training Op (for TRAIN mode)
+    if mode == tf.estimator.ModeKeys.TRAIN:
+        global_step = tf.train.get_global_step()
+        learning_rate = params['learning_decay_function'](global_step)
+        tf.summary.scalar("learning_rate", learning_rate)
+        train_op = layers.optimize_loss(
+            loss=loss,
+            global_step=global_step,
+            learning_rate=learning_rate,
+            optimizer=params['optimizer'],
+            summaries=params['train_summaries'])
+
+
+    # Generate predictions
+    predictions = {
+        "scores" : logits
+    }
+
+    # A dictionary for scoring used when exporting model for serving.
+    the_export_outputs = {
+        "serving_default" : tf.estimator.export.RegressionOutput(value=logits)}
+
+
+    # Create the validation metrics
+    validation_metrics = None
+    if mode != tf.estimator.ModeKeys.PREDICT:
+        piece_predictions = tf.nn.softmax(piece_logit_slices, axis=3)
+
+        calculated_diff = piece_predictions - one_hot_piece_labels
+
+        filter_diff_sums = tf.reduce_sum(calculated_diff, axis=[1, 2])
+
+        mean_abs_diffs = tf.reduce_mean(tf.abs(filter_diff_sums), axis=0)
+
+        to_create_metric_dict = {
+            "loss/pieces_loss": (pieces_loss, pieces_loss_summary),
+            "loss/legal_move_loss": (legal_move_loss, legal_move_summary),
+            "loss/loss": (loss, loss_summary),
+            "metrics/mean_abs_ep_diff": mean_abs_diffs[0],
+            "metrics/mean_abs_unoccupied_diff": mean_abs_diffs[15],
+            "metrics/mean_abs_king_diff": (mean_abs_diffs[1] + mean_abs_diffs[8]) / 2,
+            "metrics/mean_abs_queen_diff": (mean_abs_diffs[2] + mean_abs_diffs[9]) / 2,
+            "metrics/mean_abs_not_castling_rook_diff": (mean_abs_diffs[3] + mean_abs_diffs[10]) / 2,
+            "metrics/mean_abs_bishop_diff": (mean_abs_diffs[4] + mean_abs_diffs[11]) / 2,
+            "metrics/mean_abs_knight_diff": (mean_abs_diffs[5] + mean_abs_diffs[12]) / 2,
+            "metrics/mean_abs_pawn_diff": (mean_abs_diffs[6] + mean_abs_diffs[13]) / 2,
+            "metrics/mean_abs_can_castle_rook_diff": (mean_abs_diffs[7] + mean_abs_diffs[14]) / 2,
+        }
+
+
+        validation_metrics = metric_dict_creator(to_create_metric_dict)
+
+
+
+    # Create the trainable variable summaries and merge them together to give to a hook
+    trainable_var_summaries = layers.summarize_tensors(tf.get_collection(
+        tf.GraphKeys.TRAINABLE_VARIABLES))  # Not sure if needs to be stored as a variable, should check
+    merged_summaries = tf.summary.merge_all()
+    summary_hook = tf.train.SummarySaverHook(save_steps=params['log_interval'],
+                                             output_dir=params['model_dir'],
+                                             summary_op=merged_summaries)
+
+
+    # Return the EstimatorSpec object
+    return tf.estimator.EstimatorSpec(
+        mode=mode,
+        predictions=predictions,
+        loss=loss,
+        train_op=train_op,
+        training_hooks=[summary_hook],
+        export_outputs=the_export_outputs,
+        eval_metric_ops=validation_metrics)
+
+
+
 
 
 
@@ -158,35 +393,18 @@ def board_eval_model_fn(features, labels, mode, params):
         #Reshape features from original shape of [-1, 3, 8, 8, 16]
         input_layer = tf.reshape(features, [-1, 8, 8, params['num_input_filters']])
 
-    cur_inception_module = input_layer
-
-    activation_summaries = []
-    for module_num, module_shape in enumerate(params['inception_modules']):
-        if callable(module_shape):
-            cur_inception_module = module_shape(cur_inception_module)
-        else:
-            cur_inception_module, activation_summaries = build_inception_module_with_batch_norm(
-                cur_inception_module,
-                module_shape,
-                params['kernel_initializer'],
-                mode,
-                padding='valid',
-                make_trainable=params['trainable_cnn_modules'],
-                num_previously_built_inception_modules=module_num)
 
 
 
-    if isinstance(cur_inception_module, list):
-        inception_module_paths_flattened = [
-            tf.reshape(
-                path,
-                [-1, reduce(lambda a, b: a * b, path.get_shape().as_list()[1:])]
-            ) for path in cur_inception_module]
-        inception_module_outputs = tf.concat(inception_module_paths_flattened, 1)
-    else:
-        inception_module_outputs = cur_inception_module
+    inception_module_outputs, activation_summaries = build_convolutional_modules(
+        input_layer,
+        params['inception_modules'],
+        mode,
+        params['kernel_initializer'],
+        params['kernel_regularizer'],
+        params['trainable_cnn_modules'])
 
-    print(tf.train.get_global_step)
+
     if not params["conv_init_fn"] is None: #and tf.train.global_step(tf.get_default_session(), tf.train.get_global_step()) == 0:
         params["conv_init_fn"]()
 
@@ -399,32 +617,14 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
         input_layer = features
 
 
-    cur_inception_module = input_layer
+    inception_module_outputs, activation_summaries = build_convolutional_modules(
+        input_layer,
+        params['inception_modules'],
+        mode,
+        params['kernel_initializer'],
+        params['kernel_regularizer'],
+        params['trainable_cnn_modules'])
 
-    activation_summaries = []
-    for module_num, module_shape in enumerate(params['inception_modules']):
-        if callable(module_shape):
-            cur_inception_module = module_shape(cur_inception_module)
-        else:
-            cur_inception_module, activation_summaries = build_inception_module_with_batch_norm(
-                cur_inception_module,
-                module_shape,
-                params['kernel_initializer'],
-                mode,
-                padding='valid',
-                num_previously_built_inception_modules=module_num,
-                make_trainable=params["trainable_cnn_modules"])
-
-    if isinstance(cur_inception_module, list):
-        inception_module_paths_flattened = [
-            tf.reshape(
-                path,
-                [-1, reduce(lambda a, b: a * b, path.get_shape().as_list()[1:])]
-            ) for path in cur_inception_module]
-
-        inception_module_outputs = tf.concat(inception_module_paths_flattened, 1)
-    else:
-        inception_module_outputs = cur_inception_module
 
     if not params["conv_init_fn"] is None:
         params["conv_init_fn"]()
@@ -618,6 +818,56 @@ def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, includ
             return features, None
 
     return tf_records_input_data_fn
+
+
+
+def encoder_tf_records_input_data_fn(filename_pattern, batch_size, shuffle_buffer_size=100000, include_unoccupied=True, repeat=True, shuffle=True):
+    num_things_in_parallel = 12
+
+    def tf_records_input_data_fn():
+
+        filenames = tf.data.Dataset.list_files(filename_pattern)
+        dataset = filenames.apply(
+            tf.contrib.data.parallel_interleave(
+                lambda filename: tf.data.TFRecordDataset(filename),
+                cycle_length=7,
+                sloppy=True,
+            ))
+
+        def parser(record):
+            context_features = {"board": tf.FixedLenFeature([64], tf.int64)}
+            sequence_features = {"moves": tf.FixedLenSequenceFeature([], tf.int64, allow_missing=True)}
+
+            parsed_record = tf.parse_single_sequence_example(record, context_features=context_features,sequence_features=sequence_features)
+
+            if include_unoccupied:
+                reshaped_board = tf.one_hot(tf.reshape(parsed_record[0]["board"],[8,8]),16)
+            else:
+                reshaped_board = tf.one_hot(tf.reshape(parsed_record[0]["board"], [8, 8])-1,15)
+
+            sparse_tensor = tf.sparse_tensor_to_dense(tf.SparseTensor(tf.expand_dims(parsed_record[1]["moves"],1), tf.fill(tf.shape(parsed_record[1]["moves"]),True),[1792]),default_value=False,validate_indices=False)
+
+            return reshaped_board, sparse_tensor
+
+        if shuffle:
+            dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
+
+        dataset = dataset.map(parser, num_parallel_calls=num_things_in_parallel)
+        dataset = dataset.batch(batch_size)
+        dataset = dataset.prefetch(num_things_in_parallel)
+
+        if repeat:
+            dataset = dataset.repeat()
+
+        iterator = dataset.make_one_shot_iterator()
+
+        features = iterator.get_next()
+
+        return features[0], features[1]
+
+    return tf_records_input_data_fn
+
+
 
 
 def move_gen_one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, shuffle_buffer_size=100000, include_unoccupied=True, repeat=True, shuffle=True):

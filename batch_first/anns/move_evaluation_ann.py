@@ -1,5 +1,4 @@
 import tensorflow as tf
-from functools import reduce
 
 import ann_creation_helper as ann_h
 from batch_first.chestimator import MoveChEstimator
@@ -30,6 +29,7 @@ def main(using_to_serve):
     MAKE_CNN_MODULES_TRAINABLE = True
     # CHECKPOINT_DIR_WITH_CONV_LAYERS = "/srv/tmp/current/small_cnn_2"
     KERNEL_INITIALIZER = lambda: tf.contrib.layers.variance_scaling_initializer()
+    KERNEL_REGULARIZER = lambda: None
     init_conv_layers_fn = None
 
 
@@ -87,7 +87,7 @@ def main(using_to_serve):
         config=tf.estimator.RunConfig().replace(
             save_checkpoints_steps=LOG_ITERATION_INTERVAL,
             save_summary_steps=LOG_ITERATION_INTERVAL,
-            session_config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.5))),
+            session_config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.3))),
             # session_config=tf.ConfigProto(log_device_placement=True)),
         params={
             "dense_shape": DENSE_SHAPE,
@@ -102,6 +102,7 @@ def main(using_to_serve):
             "trainable_cnn_modules" : MAKE_CNN_MODULES_TRAINABLE,
             "conv_init_fn" : init_conv_layers_fn,
             "kernel_initializer": KERNEL_INITIALIZER,
+            "kernel_regularizer" : KERNEL_REGULARIZER,
             "behold" : None
         })
 
