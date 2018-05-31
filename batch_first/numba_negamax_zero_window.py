@@ -4,15 +4,11 @@ import chess.uci
 import time
 
 
-# from batch_first import *
-from numba_board import *
+from .numba_board import *
 
-from global_open_priority_nodes import PriorityBins
-from board_jitclass import BoardState, generate_move_to_enumeration_dict, has_legal_move, is_in_check
-from transposition_table import get_empty_hash_table, add_board_and_move_to_tt
-from chestimator import get_inference_functions
-from batch_first.anns.move_evaluation_ann import main as move_ann_main
-
+from .global_open_priority_nodes import PriorityBins
+from .board_jitclass import BoardState, generate_move_to_enumeration_dict, has_legal_move, is_in_check
+from .transposition_table import get_empty_hash_table, add_board_and_move_to_tt
 
 
 
@@ -32,13 +28,6 @@ REVERSED_MOVE_TO_INDEX_ARRAY = np.zeros(shape=[64,64],dtype=np.int32)
 for key, value in generate_move_to_enumeration_dict().items():
     MOVE_TO_INDEX_ARRAY[key[0],key[1]] = value
     REVERSED_MOVE_TO_INDEX_ARRAY[square_mirror(key[0]), square_mirror(key[1])] = value
-
-
-
-
-
-
-
 
 
 
@@ -829,7 +818,7 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, board_eval_fn, move_ev
 
 
 
-def iterative_deepening_mtd_f(fen, depths_to_search, batch_sizes, min_windows_to_confirm, board_eval_fn, move_eval_fn, first_guess=0, guess_increments=None, bin_sets=None, hash_table=None, win_threshold=1000000, loss_threshold=-1000000, print_info=False, full_testing=True):
+def iterative_deepening_mtd_f(fen, depths_to_search, batch_sizes, min_windows_to_confirm, board_eval_fn, move_eval_fn, first_guess=0, guess_increments=None, bin_sets=None, hash_table=None, win_threshold=1000000, loss_threshold=-1000000, print_info=False, full_testing=False):
     if hash_table is None:
         hash_table = get_empty_hash_table()
 
@@ -864,66 +853,4 @@ def iterative_deepening_mtd_f(fen, depths_to_search, batch_sizes, min_windows_to
 
 
     return first_guess, tt_move, hash_table
-
-
-
-
-
-
-if __name__ == "__main__":
-
-    temp_piece_values = np.array([900,500,300,300,100,500],dtype=np.float32)
-    @njit(nogil=True)
-    def piece_sum_eval(pieces, occupied_bbs, unused):
-        piece_counts = vectorized_popcount(np.bitwise_and(pieces[...,1:], occupied_bbs))
-        return np.sum(temp_piece_values*(piece_counts[:,0].view(np.int8) - piece_counts[:,1].view(np.int8)).astype(np.float32),axis=1)
-
-    @njit(nogil=True)
-    def random_move_eval(unused_1, unused_2, unused_3, unused_4, num_moves_per_board):
-        return np.linspace(-1,1,np.sum(num_moves_per_board)) #it's not really random
-        # return np.random.rand(np.sum(num_moves_per_board))
-
-
-
-
-        
-
-
-
-
-    FEN_TO_TEST = "r2q1rk1/pbpnbppp/1p2pn2/3pN3/2PP4/1PN3P1/P2BPPBP/R2Q1RK1 w - - 10 11"#"rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"###"rn1qkb1r/p1pp1ppp/bp2pn2/8/2PP4/5NP1/PP2PP1P/RNBQKB1R w KQkq - 1 5"#"#"rn1q1rk1/pbp1bppp/1p2pn2/3pN3/2PP4/1P4P1/P2BPPBP/RN1Q1RK1 w - - 8 10"#"  #
-    DEPTH_OF_SEARCH = 5
-    MAX_BATCH_LIST =  [5000]*4#[10000, 10000, 5000,2500]#,1000,500,100]#[5000, 2000]#, 5000, 2000, 1000, 723, 500,1]# 5*[10000]#[5000]*3#[5000, 2000, 500]#,1,2,3,4,5,6,7,20]#[1,2,3,4]##1*[250,500, 1000, 2000]# [j**2 for j in range(40,0,-2)] + [5000]
-    SEPERATING_VALUE = 0
-    BINS_TO_USE = np.arange(20, -20, -.01)
-    # BINS_TO_USE = np.arange(4000, -4000, 99.99)
-    BOARD_EVAL_GRAPHDEF_FILE = "/srv/tmp/encoder_evaluation/conv_train_wide_and_deep_4/1526978123/tensorrt_eval_graph.pb"
-
-
-    PREDICTOR, _, CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILE, None)
-    MOVE_PREDICTOR, MOVE_CLOSER = move_ann_main([True])
-
-
-    temp_board_to_test = chess.Board(FEN_TO_TEST)
-    print(temp_board_to_test)
-    for batch_size in MAX_BATCH_LIST:
-        for first_guess in [0]:
-            start_time = time.time()
-            results = mtd_f(FEN_TO_TEST,DEPTH_OF_SEARCH,first_guess,.001, PREDICTOR, MOVE_PREDICTOR, search_batch_size=batch_size, print_info=True, full_testing=False)
-            # results = mtd_f(FEN_TO_TEST, DEPTH_OF_SEARCH, first_guess, 99, piece_sum_eval, random_move_eval,guess_increment=98,search_batch_size=batch_size, print_info=True, full_testing=False)
-            print(results[0], results[1] ,"found by mtd(f)", time.time() - start_time, "\n")
-
-            # depths_to_check = np.arange(0,DEPTH_OF_SEARCH,2) + 1
-            # results = iterative_deepening_mtd_f(
-            #     FEN_TO_TEST,
-            #     depths_to_check,
-            #     [10000 for _ in range(len(depths_to_check))],
-            #     [.001 for _ in range(len(depths_to_check))],
-            #     PREDICTOR,
-            #     MOVE_PREDICTOR,
-            #     bin_sets=[BINS_TO_USE for _ in range(len(depths_to_check))],
-            # )
-
-    CLOSER()
-    MOVE_CLOSER()
 

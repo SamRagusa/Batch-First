@@ -18,6 +18,7 @@ from batch_first.board_jitclass import generate_move_to_enumeration_dict
 
 
 
+
 def get_predictor_from_graphdef(session, graphdef_filename, output_tensor, input_tensors, name_prefix=None, is_binary=True):
     with gfile.FastGFile(graphdef_filename, 'rb' if is_binary else 'r') as f:
         model_graph_def = tf.GraphDef()
@@ -37,13 +38,12 @@ def get_predictor_from_graphdef(session, graphdef_filename, output_tensor, input
 
 
 
-
-
 def get_inference_functions(eval_graphdef_file, move_graphdef_file):
     """
     The code relevant to move scoring has been commented out as it's not ready yet.
     """
-    sess = tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.35)))
+
+    sess = tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.1)))
 
     eval_output_tensor_name = "add:0"#"logit_layer/MatMul:0"#
     eval_input_tensor_names = [
@@ -117,7 +117,8 @@ def new_get_board_data():
 
     full_data = tf.concat([ep_bitboards, properly_arranged_non_ep_data], 3)
 
-    return piece_bbs, color_occupied_bbs, ep_squares, full_data
+    return (piece_bbs, color_occupied_bbs, ep_squares), full_data
+
 
 
 
@@ -146,7 +147,7 @@ class MoveChEstimator(Estimator):
         moves_per_board = tf.placeholder(tf.uint8, shape=[None], name="moves_per_board_placeholder")
         moves = tf.placeholder(tf.uint8, shape=[None, 2], name="move_placeholder")
 
-        piece_bbs, color_occupied_bbs, ep_squares, for_evaluation = new_get_board_data()
+        (piece_bbs, color_occupied_bbs, ep_squares), for_evaluation = new_get_board_data()
 
 
         move_to_index_array = np.zeros(shape=[64, 64], dtype=np.int32)
@@ -172,6 +173,7 @@ class MoveChEstimator(Estimator):
                 [max_batch_size, max_moves_for_a_board]),
             [1, 0])
 
+
         board_indices_for_moves = tf.boolean_mask(board_index_repeated_array,
                                                   tf.sequence_mask(tf.cast(moves_per_board, tf.int32)))
 
@@ -186,7 +188,7 @@ class MoveChEstimator(Estimator):
                 checkpoint_filename_with_path=checkpoint_path,
                 scaffold=estimator_spec.scaffold,
                 # config=self._session_config),
-                config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.45))),
+                config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.2))),
             hooks=hooks)
 
         def predictor(pieces, occupied_bbs, ep_square_numbers, the_moves, num_moves_per_board):

@@ -11,8 +11,7 @@ The Batch First engine will embody these ideas.
 - Using Numba to compile all Python code used for move generation to machine code with the LLVM compiler
 - Using a framework similar to MTD(f) to converge towards a boards negamax value
 
-# Things Being Working On
-- Implementing a method of ANN inference more focused on low latency and high-throughput (probably using the [NVIDIA TensorRT](https://developer.nvidia.com/tensorrt) TensorFlow integration) 
+# Things Being Working On 
 - Vectorizing array operations by means of the LLVM compiler's loop lifting
 - A semi-formal explanation of the engine's core components (e.g. a simple description of the negamax algorithm, and reasoning behind the neural network architecture used)
 
@@ -34,5 +33,5 @@ The tools listed below can be used, but are not needed.  They provide speed impr
 
 # Other Information
 - Trained neural networks will be uploaded when hyperparameter tuning has been completely implemented/completed
-- Special thanks to the [python-chess](https://github.com/niklasf/python-chess) package which most of the move generation code is currently based on
+- Special thanks to the [python-chess](https://github.com/niklasf/python-chess) package which the tests rely on, and most of the move generation code is based on 
 

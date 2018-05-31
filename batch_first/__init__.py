@@ -141,26 +141,6 @@ TT_MOVE_SCORE_VALUE = ALMOST_MAX_FLOAT_32_VAL
 
 
 
-@njit
-def test_game_completed_constants():
-    """
-    This is to verify that float point precision doesn't end up equating win/loss values with unreachable constants.
-    """
-    if MIN_FLOAT32_VAL == ALMOST_MIN_FLOAT_32_VAL:
-        print("MIN FLOAT VALUE IS EQUAL TO ALMOST MIN VALUE IN JIT TEST!")
-
-    if MAX_FLOAT32_VAL == ALMOST_MAX_FLOAT_32_VAL:
-        print("MAX FLOAT VALUE IS EQUAL TO ALMOST MAX VALUE IN JIT TEST!")
-
-test_game_completed_constants()
-
-
-
-
-
-
-
-
 COLORS = [WHITE, BLACK] = [1, 0]
 TURN_COLORS = [TURN_WHITE, TURN_BLACK] = [True, False]
 COLOR_NAMES = ["black", "white"]
