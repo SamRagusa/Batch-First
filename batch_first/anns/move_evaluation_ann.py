@@ -1,7 +1,6 @@
 import tensorflow as tf
 
-import ann_creation_helper as ann_h
-from batch_first.chestimator import MoveChEstimator
+import batch_first.anns.ann_creation_helper as ann_h
 
 
 tf.logging.set_verbosity(tf.logging.INFO)
@@ -15,7 +14,6 @@ def main(using_to_serve):
     SAVE_MODEL_DIR = "/srv/tmp/move_scoring_1/pre_commit_test_1"
     TRAINING_FILENAME_PATTERN = "/srv/databases/chess_engine/move_scoring_1/move_scoring_training_set_*.tfrecords"
     VALIDATION_FILENAME_PATTERN = "/srv/databases/chess_engine/move_scoring_1/move_scoring_validation_set_*.tfrecords"
-    # TESTING_FILENAME_PATTERN = "/srv/databases/chess_engine/move_scoring_1/move_scoring_testing_set_*.tfrecords"
     TRAIN_OP_SUMMARIES = ["gradient_norm", "gradients"]
     NUM_INPUT_FILTERS = 15
     NUM_OUTPUTS = 1792
@@ -81,7 +79,7 @@ def main(using_to_serve):
 
 
     # Create the Estimator
-    the_estimator = MoveChEstimator(
+    the_estimator = tf.estimator.Estimator(
         model_fn=ann_h.move_gen_cnn_model_fn,
         model_dir=SAVE_MODEL_DIR,
         config=tf.estimator.RunConfig().replace(
@@ -107,15 +105,15 @@ def main(using_to_serve):
         })
 
 
-    if using_to_serve[0]:
-        return the_estimator.create_move_predictor("move_values")
-
-
-
     validation_hook = ann_h.ValidationRunHook(
         step_increment=BATCHES_IN_TRAINING_EPOCH//12,
         estimator=the_estimator,
-        input_fn_creator=lambda: ann_h.move_gen_one_hot_create_tf_records_input_data_fn(VALIDATION_FILENAME_PATTERN,VALIDATION_BATCH_SIZE,include_unoccupied=NUM_INPUT_FILTERS==16,repeat=False,shuffle=False),
+        input_fn_creator=lambda: ann_h.move_gen_one_hot_create_tf_records_input_data_fn(
+            VALIDATION_FILENAME_PATTERN,
+            VALIDATION_BATCH_SIZE,
+            include_unoccupied=NUM_INPUT_FILTERS==16,
+            repeat=False,
+            shuffle=False),
         temp_num_steps_in_epoch=BATCHES_IN_VALIDATION_EPOCH,
         recall_input_fn_creator_after_evaluate=True)
 
@@ -127,9 +125,11 @@ def main(using_to_serve):
             TRAINING_BATCH_SIZE,
             include_unoccupied=NUM_INPUT_FILTERS==16),
         hooks=[validation_hook],
-        # max_steps=1,
+        max_steps=1,
     )
 
+    # Save the model for serving
+    the_estimator.export_savedmodel(SAVE_MODEL_DIR, ann_h.no_chestimator_serving_move_scoring_input_reciever)
 
 
 

@@ -15,20 +15,20 @@ from tensorflow.contrib import tensorrt as trt
 
 
 
+def save_model_as_graphdef_for_serving(model_path, output_model_path, output_filename, output_node_name, model_tags="serve", trt_memory_fraction=.4, total_video_memory=1.1e10, max_batch_size=25000, as_text=False):
 
-
-def save_model_as_graphdef_for_serving(model_path, output_model_path, output_filename, output_node_name, model_tags="serve", as_text=False):
-    with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.3))) as sess:
+    #This would ideally be 1 instead of .85, but the GPU that this is running on is responsible for things like graphics
+    with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.85-trt_memory_fraction))) as sess:
         board_eval_graph = tf.train.import_meta_graph(tf.saved_model.loader.load(sess, [model_tags], model_path))
 
         constant_graph_def = tf.graph_util.convert_variables_to_constants(sess, tf.get_default_graph().as_graph_def(), [output_node_name])
 
-        trt_graph = trt.create_inference_graph(constant_graph_def,
-                                   [output_node_name],
-                                   max_batch_size=25000,
-                                               precision_mode="FP32",
-                                               max_workspace_size_bytes=5000000000
-                                   )
+        trt_graph = trt.create_inference_graph(
+            constant_graph_def,
+            [output_node_name],
+            max_batch_size=max_batch_size,
+            precision_mode="FP32",
+            max_workspace_size_bytes=int(trt_memory_fraction*total_video_memory))
 
 
         tf.train.write_graph(trt_graph, output_model_path, output_filename, as_text=as_text)
@@ -531,7 +531,7 @@ def board_eval_model_fn(features, labels, mode, params):
 
 
         rand_real_diff = random_pos - desired_pos
-        old_plus_desired = original_pos + desired_pos
+        old_plus_desired = original_pos + desired_pos + .01
 
         abs_rand_real_diff = tf.abs(rand_real_diff)
         # mean_abs_rand_real_diff = tf.reduce_mean(abs_rand_real_diff)
@@ -651,7 +651,7 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
     loss = None
     train_op = None
 
-    bool_mask = None
+
 
 
     # Calculate loss (for both TRAIN and EVAL modes)
@@ -694,6 +694,8 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
 
             loss = tf.losses.mean_squared_error(labels, logits, weights=weight_mask)
             loss_scalar_summary = tf.summary.scalar("loss", loss)
+    else:
+        important_logits = tf.gather_nd(logits, features["legal_move_indices"])
 
 
 
@@ -716,24 +718,12 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
         # "important_logits":important_logits}
 
 
-    if mode != tf.estimator.ModeKeys.PREDICT:
-        # A dictionary for scoring used when exporting model for serving.
-        the_export_outputs = {
-            # "serving_default" : tf.estimator.export.PredictOutput(outputs={"logits": logits}),
-            "serving_default" : tf.estimator.export.ClassificationOutput(scores=logits),
-        }
-        # A dictionary for scoring used when exporting model for serving.
-    else:
-        # real_indices = index_tensor_to_index_pairs(legal_move_indices)
-        # legal_move_logits = tf.gather_nd(logits, real_indices)
-        the_export_outputs = {
-            # "serving_default" : tf.estimator.export.PredictOutput(outputs={"logits": logits}),
-            "serving_default": tf.estimator.export.ClassificationOutput(scores=logits),
-            # "legal_moves" :  tf.estimator.export.ClassificationOutput(scores=legal_move_logits),
-        }
+    # A dictionary for scoring used when exporting model for serving.
+    the_export_outputs = {
+        "serving_default": tf.estimator.export.ClassificationOutput(scores=important_logits),
+    }
 
 
-    unstacked_input = tf.unstack(input_layer, axis=3)
     # Create the validation metrics
     validation_metrics = None
     if mode != tf.estimator.ModeKeys.PREDICT:
@@ -937,46 +927,45 @@ def no_chestimator_serving_input_reciever():
     return tf.estimator.export.ServingInputReceiver(formatted_data, receiver_tensors)
 
 
-#The code commented out below has never been run, and as is I'm fairly confident it won't work.
 
-# def no_chestimator_serving_move_scoring_input_reciever(max_batch_size=50000, max_moves_for_a_board=100):
-#     piece_bbs, color_occupied_bbs, ep_squares, formatted_data = new_get_board_data()
-#
-#     moves_per_board = tf.placeholder(tf.uint8, shape=[None], name="moves_per_board_placeholder")
-#     moves = tf.placeholder(tf.uint8, shape=[None, 2], name="move_placeholder")
-#
-#     board_index_repeated_array = tf.transpose(
-#         tf.reshape(
-#             tf.tile(
-#                 tf.range(max_moves_for_a_board),
-#                 [max_batch_size]),
-#             [max_batch_size, max_moves_for_a_board]),
-#         [1, 0])
-#
-#     move_to_index_array = np.zeros(shape=[64, 64], dtype=np.int32)
-#     for key, value in generate_move_to_enumeration_dict().items():
-#         move_to_index_array[key[0], key[1]] = value
-#
-#     move_to_index_tensor = tf.constant(move_to_index_array, shape=[64, 64])
-#
-#     board_indices_for_moves = tf.boolean_mask(board_index_repeated_array,
-#                                               tf.sequence_mask(tf.cast(moves_per_board, tf.int32)))
-#
-#     move_nums = tf.gather_nd(move_to_index_tensor, tf.cast(moves, tf.int32))
-#
-#     the_moves = tf.stack([board_indices_for_moves, move_nums], axis=-1)
-#
-#
-#     receiver_tensors = {"piece_bbs" : piece_bbs,
-#                         "color_occupied_bbs" : color_occupied_bbs,
-#                         "ep_squares" : ep_squares,
-#                         "moves_per_board" : moves_per_board,
-#                         "moves" : moves}
-#
-#     dict_for_model_fn = {"data" : formatted_data,
-#                          "legal_move_indices" : the_moves}
-#
-#     return tf.estimator.export.ServingInputReceiver(dict_for_model_fn , receiver_tensors)
+def no_chestimator_serving_move_scoring_input_reciever(max_batch_size=50000, max_moves_for_a_board=100):
+    (piece_bbs, color_occupied_bbs, ep_squares), formatted_data = new_get_board_data()
+
+    moves_per_board = tf.placeholder(tf.uint8, shape=[None], name="moves_per_board_placeholder")
+    moves = tf.placeholder(tf.uint8, shape=[None, 2], name="move_placeholder")
+
+    board_index_repeated_array = tf.transpose(
+        tf.reshape(
+            tf.tile(
+                tf.range(max_moves_for_a_board),
+                [max_batch_size]),
+            [max_batch_size, max_moves_for_a_board]),
+        [1, 0])
+
+    move_to_index_array = np.zeros(shape=[64, 64], dtype=np.int32)
+    for key, value in generate_move_to_enumeration_dict().items():
+        move_to_index_array[key[0], key[1]] = value
+
+    move_to_index_tensor = tf.constant(move_to_index_array, shape=[64, 64])
+
+    board_indices_for_moves = tf.boolean_mask(board_index_repeated_array,
+                                              tf.sequence_mask(tf.cast(moves_per_board, tf.int32)))
+
+    move_nums = tf.gather_nd(move_to_index_tensor, tf.cast(moves, tf.int32))
+
+    the_moves = tf.stack([board_indices_for_moves, move_nums], axis=-1)
+
+
+    receiver_tensors = {"piece_bbs" : piece_bbs,
+                        "color_occupied_bbs" : color_occupied_bbs,
+                        "ep_squares" : ep_squares,
+                        "moves_per_board" : moves_per_board,
+                        "moves" : moves}
+
+    dict_for_model_fn = {"data" : formatted_data,
+                         "legal_move_indices" : the_moves}
+
+    return tf.estimator.export.ServingInputReceiver(dict_for_model_fn , receiver_tensors)
 
 
 

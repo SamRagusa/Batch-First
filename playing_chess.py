@@ -5,8 +5,10 @@ import chess
 
 from batch_first.engine import ChessEngine, BatchFirstEngine
 from batch_first.chestimator import get_inference_functions
-from batch_first.anns.move_evaluation_ann import main as move_ann_main
+
+# from batch_first.anns.ann_creation_helper import save_model_as_graphdef_for_serving
 # from batch_first.numba_board import vectorized_popcount
+
 
 
 
@@ -90,11 +92,26 @@ class StockFishEngine(ChessEngine):
 
 
 
-BOARD_EVAL_GRAPHDEF_FILE = "/srv/tmp/encoder_evaluation/conv_train_wide_and_deep_4/1526978123/tensorrt_eval_graph.pb"
+# board_eval_model_path = "/srv/tmp/encoder_evaluation/conv_train_wide_and_deep_4/1526978123"
+# save_model_as_graphdef_for_serving(
+#     model_path=board_eval_model_path,
+#     output_model_path=board_eval_model_path,
+#     output_filename="tensorrt_eval_graph.pb",
+#     output_node_name="add")#"logit_layer/MatMul")
+
+# move_scoring_model_path = "/srv/tmp/move_scoring_1/pre_commit_test_1/1527820525"
+# save_model_as_graphdef_for_serving(
+#     model_path=move_scoring_model_path,
+#     output_model_path=move_scoring_model_path,
+#     output_filename="tensorrt_move_scoring_graph.pb",
+#     output_node_name="GatherNd_1")
 
 
-BOARD_PREDICTOR, _, BOARD_PREDICTOR_CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILE, None)
-MOVE_PREDICTOR, MOVE_PREDICTOR_CLOSER =  move_ann_main([True])
+BOARD_EVAL_GRAPHDEF_FILENAME = "/srv/tmp/encoder_evaluation/conv_train_wide_and_deep_4/1526978123/tensorrt_eval_graph.pb"
+MOVE_SCORING_GRAPHDEF_FILENAME = "/srv/tmp/move_scoring_1/pre_commit_test_1/1527820525/tensorrt_move_scoring_graph.pb"
+
+BOARD_PREDICTOR, MOVE_PREDICTOR, PREDICTOR_CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILENAME, MOVE_SCORING_GRAPHDEF_FILENAME)
+
 
 
 
@@ -113,8 +130,10 @@ for j in range(1):
     play_one_game(batch_first_engine, random_engine, True)
 
 
-BOARD_PREDICTOR_CLOSER()
-MOVE_PREDICTOR_CLOSER()
+
+PREDICTOR_CLOSER()
+
+
 
 
 
