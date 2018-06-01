@@ -1,8 +1,9 @@
 import numpy as np
-from numba import njit
+import numba as nb
 
 
-@njit
+
+@nb.njit
 def should_not_terminate(game_node):
     cur_node = game_node
     while cur_node is not None:

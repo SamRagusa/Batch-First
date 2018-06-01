@@ -15,7 +15,7 @@ import random
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from evaluation_ann import main as evaluation_ann_main
+# from evaluation_ann import main as evaluation_ann_main
 from ann_creation_helper import line_counter
 
 from batch_first import TURN_WHITE, TURN_BLACK, BB_SQUARES, MIN_FLOAT32_VAL, MAX_MOVES_LOOKED_AT, INITIAL_BOARD_FEN,BB_ALL
@@ -25,9 +25,11 @@ from batch_first.numba_board import vectorized_flip_vertically, msb,  popcount, 
 from batch_first.board_jitclass import BoardState, Move, create_board_state_from_fen, generate_legal_moves, \
     generate_move_to_enumeration_dict, copy_push, push_with_hash_update
 
+from batch_first.numba_negamax_zero_window import struct_array_to_ann_input_all_white
 
 
 
+from batch_first.chestimator import get_inference_functions
 
 
 
@@ -44,23 +46,31 @@ def for_all_white_jitclass_to_array_for_ann(board):
 
 
 
-def for_all_white_jitclass_array_to_basic_input_for_anns(board_array):
-    to_return = np.empty(shape=[len(board_array),11], dtype=np.uint64)
-    black_turn = np.zeros(shape=len(board_array), dtype=np.bool_)
-    for j, board in enumerate(board_array):
-
-        to_return[j] = for_all_white_jitclass_to_array_for_ann(board)
-
-        if board.turn == TURN_BLACK:
-            black_turn[j] = True
-
-
-    to_return[black_turn] = vectorized_flip_vertically(to_return[black_turn])
-
-    return to_return.transpose()
-
-
-
+def create_struct_array_from_jitclasses(boards, depth=255, separator=0):
+    return np.array([(board.pawns,
+                      board.knights,
+                      board.bishops,
+                      board.rooks,
+                      board.queens,
+                      board.kings,
+                      board.occupied_w,
+                      board.occupied_b,
+                      board.occupied,
+                      board.turn,
+                      board.castling_rights,
+                      board.ep_square if not board.ep_square is None else 0,
+                      board.halfmove_clock,
+                      board.cur_hash,
+                      False,                                                                  #terminated
+                      separator,
+                      depth,
+                      MIN_FLOAT32_VAL,                                                        #best_value
+                      np.full([MAX_MOVES_LOOKED_AT, 3], 255, dtype=np.uint8),                 #unexplored moves
+                      np.full([MAX_MOVES_LOOKED_AT], MIN_FLOAT32_VAL, dtype=np.float32),   #unexplored move scores
+                      np.full([3], 255, dtype=np.uint8), #The move made to reach the position this board represents
+                      0,      #next_move_index  (the index in the stored moves where the next move to make is)
+                      0)      #children_left (the number of children which have yet to returne a value, or be created)
+                     for board in boards],dtype=numpy_node_info_dtype)
 
 
 @nb.njit
@@ -76,36 +86,6 @@ def board_info_array_from_dict_keys(keys):
                       MIN_FLOAT32_VAL, np.full([MAX_MOVES_LOOKED_AT, 3], 255, dtype=np.uint8),
                       np.full([MAX_MOVES_LOOKED_AT], MIN_FLOAT32_VAL, dtype=np.float32),
                       np.full([3], 255, dtype=np.uint8), 0, 0) for key in keys],dtype=numpy_node_info_dtype)
-
-
-# def create_node_info_from_fen(fen, depth, seperator):
-#     temp_board = chess.Board(fen)
-#
-#     return np.array([(temp_board.pawns,
-#                       temp_board.knights,
-#                       temp_board.bishops,
-#                       temp_board.rooks,
-#                       temp_board.queens,
-#                       temp_board.kings,
-#                       temp_board.occupied_co[chess.WHITE],
-#                       temp_board.occupied_co[chess.BLACK],
-#                       temp_board.occupied,
-#                       temp_board.turn,
-#                       temp_board.castling_rights,
-#                       temp_board.ep_square if not temp_board.ep_square is None else 0,
-#                       temp_board.halfmove_clock,
-#                       zobrist_hash(temp_board),
-#                       False,                                                                  #terminated
-#                       seperator,
-#                       depth,
-#                       MIN_FLOAT32_VAL,                                                        #best_value
-#                       np.full([MAX_MOVES_LOOKED_AT, 3], 255, dtype=np.uint8),                 #unexplored moves
-#                       np.full([MAX_MOVES_LOOKED_AT], MIN_FLOAT32_VAL, dtype=np.float32),   #unexplored move scores
-#                       np.full([3], 255, dtype=np.uint8), #The move made to reach the position this board represents
-#                       0,           #next_move_index  (the index in the stored moves where the next move to make is)
-#                       0)                   #children_left (the number of children which have yet to returne a value, or be created)
-#                      ],dtype=numba_node_info_type)
-
 
 
 
@@ -584,32 +564,39 @@ if __name__ == "__main__":
     file_ratios = [.05]*len(final_dataset_filenames)
     for_deep_pink_loss_use = [False]*len(final_dataset_filenames)
 
-    ############################################################################################################################################################################################################################################################
-    # # Create the databases for use in training the board evaluation neural network.  Long term this will likely be combined
-    # # with the generation of the move scoring database to prevent any overlap in boards between the datasets.
-    # start_time = time.time()
-    # create_database_from_pgn(
-    #     [pgn_file_paths[0]],#pgn_file_paths[:-1],
-    #     to_collect_filters=[during_search_n_man_filter_creator(6)],
-    #     data_writer=board_eval_data_writer_creator(
-    #         file_ratios,
-    #         for_deep_pink_loss_use,
-    #         comparison_move_generator=standard_comparison_move_generator,
-    #         print_frequency=10000),
-    #     num_first_moves_to_skip=5,
-    #     output_filenames=final_dataset_filenames)
-    #
-    # print("Time taken to create databases:", time.time() - start_time)
-    #
+
+    # Create the databases for use in training the board evaluation neural network.  Long term this will likely be combined
+    # with the generation of the move scoring database to prevent any overlap in boards between the datasets.
+    start_time = time.time()
+    create_database_from_pgn(
+        [pgn_file_paths[0]],#pgn_file_paths[:-1],
+        to_collect_filters=[during_search_n_man_filter_creator(6)],
+        data_writer=board_eval_data_writer_creator(
+            file_ratios,
+            for_deep_pink_loss_use,
+            comparison_move_generator=standard_comparison_move_generator,
+            print_frequency=10000),
+        num_first_moves_to_skip=5,
+        output_filenames=["/srv/databases/chess_engine/TESTING/pickled_1.pkl"])#final_dataset_filenames)
+
+    print("Time taken to create databases:", time.time() - start_time)
 
 
 
 
+    BOARD_EVAL_GRAPHDEF_FILE = "/srv/tmp/encoder_evaluation/conv_train_wide_and_deep_4/1526978123/tensorrt_eval_graph.pb"
 
-    predictor, closer = evaluation_ann_main([True])
+    BOARD_PREDICTOR, _, BOARD_PREDICTOR_CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILE, None)
 
-    def chestimator_eval_fn(node_array):
-        return predictor(for_all_white_jitclass_array_to_basic_input_for_anns(node_array))
+
+    def cur_eval_fn(node_array):
+        return BOARD_PREDICTOR(
+            *struct_array_to_ann_input_all_white(
+                create_struct_array_from_jitclasses(
+                    node_array))).squeeze(axis=1)
+
+
+
 
 
 
@@ -620,83 +607,60 @@ if __name__ == "__main__":
     #         print_frequency=100000)
     #
 
-    move_scoring_writer = generate_database_with_child_values_tf_records(chestimator_eval_fn)
+    move_scoring_writer = generate_database_with_child_values_tf_records(cur_eval_fn)
+
+    output_filenames = [
+                "scoring_training_set_0.pkl",
+                "scoring_training_set_1.pkl",
+                "scoring_training_set_2.pkl",
+                "scoring_training_set_3.pkl",
+                "scoring_training_set_4.pkl",
+                "scoring_training_set_5.pkl",
+                "scoring_training_set_6.pkl",
+                "scoring_validation_set_0.pkl",
+                "scoring_testing_set_0.pkl",
+                "scoring_testing_set_1.pkl",
+                "move_scoring_training_set_0.pkl",
+                "move_scoring_training_set_1.pkl",
+                "move_scoring_training_set_2.pkl",
+                "move_scoring_training_set_3.pkl",
+                "move_scoring_training_set_4.pkl",
+                "move_scoring_training_set_5.pkl",
+                "move_scoring_training_set_6.pkl",
+                "move_scoring_validation_set_0.pkl",
+                "move_scoring_testing_set_0.pkl",
+                "move_scoring_testing_set_1.pkl",
+                ]
 
     final_dataset_filenames = list(
         map(
             lambda x: "/srv/databases/chess_engine/move_scoring_1/" + x,
-            [
-                "scoring_training_set_0.pkl",
-                "scoring_training_set_1.pkl",
-                "scoring_training_set_2.pkl",
-                "scoring_training_set_3.pkl",
-                "scoring_training_set_4.pkl",
-                "scoring_training_set_5.pkl",
-                "scoring_training_set_6.pkl",
-                "scoring_validation_set_0.pkl",
-                "scoring_testing_set_0.pkl",
-                "scoring_testing_set_1.pkl",
-                "move_scoring_training_set_0.pkl",
-                "move_scoring_training_set_1.pkl",
-                "move_scoring_training_set_2.pkl",
-                "move_scoring_training_set_3.pkl",
-                "move_scoring_training_set_4.pkl",
-                "move_scoring_training_set_5.pkl",
-                "move_scoring_training_set_6.pkl",
-                "move_scoring_validation_set_0.pkl",
-                "move_scoring_testing_set_0.pkl",
-                "move_scoring_testing_set_1.pkl",
-                ]))
+            output_filenames))
+
 
     TEMP = list(
         map(
             lambda x: "/srv/databases/chess_engine/full_6/" + x,
-            [
-                "scoring_training_set_0.pkl",
-                "scoring_training_set_1.pkl",
-                "scoring_training_set_2.pkl",
-                "scoring_training_set_3.pkl",
-                "scoring_training_set_4.pkl",
-                "scoring_training_set_5.pkl",
-                "scoring_training_set_6.pkl",
-                "scoring_validation_set_0.pkl",
-                "scoring_testing_set_0.pkl",
-                "scoring_testing_set_1.pkl",
-                "move_scoring_training_set_0.pkl",
-                "move_scoring_training_set_1.pkl",
-                "move_scoring_training_set_2.pkl",
-                "move_scoring_training_set_3.pkl",
-                "move_scoring_training_set_4.pkl",
-                "move_scoring_training_set_5.pkl",
-                "move_scoring_training_set_6.pkl",
-                "move_scoring_validation_set_0.pkl",
-                "move_scoring_testing_set_0.pkl",
-                "move_scoring_testing_set_1.pkl",
-            ]))
+            output_filenames))
+
 
     file_index  = 16
     print("Creating database for file",file_index)
-    INPUT_FILENAME = TEMP[file_index]#final_dataset_filenames[file_index]
-    OUTPUT_FILENAME = final_dataset_filenames[file_index][:-3] + "tfrecords"#"npy"#INPUT_FILENAME[:-3] + "npy"#"tfrecords"
+    # INPUT_FILENAME = TEMP[file_index]#final_dataset_filenames[file_index]
+    INPUT_FILENAME = "/srv/databases/chess_engine/TESTING/pickled_1.pkl"
+    OUTPUT_FILENAME = final_dataset_filenames[file_index][:-3] + "tfrecords"#"npy"
     with open(INPUT_FILENAME, "rb") as input:
-        # cur_dict_to_write = {cur_tuple[0]: cur_tuple[1] for cur_tuple in pickle.load(input)}
-        # thing =
-        # print(thing)
         cur_dict_to_write = {cur_tuple[0]: cur_tuple[1] for cur_tuple in pickle.load(input)}
+
         # the following line of code is only commented out because the move scoring data should be disjoint from
         # the board evaluation data.  It is fine to use for database generation!
-
-
         # board_eval_writer(cur_dict_to_write, [OUTPUT_FILENAME])
 
 
-        # move_scoring_writer({cur_tuple[0]: cur_tuple[1] for cur_tuple in the_dict_as_set},[OUTPUT_FILENAME])
         move_scoring_writer(cur_dict_to_write, [OUTPUT_FILENAME])
 
         # board_info_numpy_file_writer(cur_dict_to_write ,[OUTPUT_FILENAME])
 
-
-
-    # closer()
+    BOARD_PREDICTOR_CLOSER()
 
 

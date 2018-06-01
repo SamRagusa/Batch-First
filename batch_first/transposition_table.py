@@ -1,6 +1,8 @@
 import numpy as np
 import numba as nb
 
+import chess
+
 
 from batch_first import SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES, ONES_IN_RELEVANT_BITS_FOR_TT_INDEX, NO_TT_ENTRY_VALUE,\
     NO_TT_MOVE_VALUE, MIN_FLOAT32_VAL, MAX_FLOAT32_VAL
@@ -36,6 +38,24 @@ def get_empty_hash_table():
           NO_TT_MOVE_VALUE,
           NO_TT_MOVE_VALUE) for _ in range(2 ** SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES)],
         dtype=hash_table_numpy_dtype)
+
+
+
+def choose_move(hash_table, node):
+    """
+    Chooses the desired move to be made from the given node.  This is done by use of the given hash table.
+
+    NOTES:
+    1) This is a first attempt, and while EXTREMELY crucial, I don't believe it works as desired.
+
+    :return: A python-chess Move object representing the desired move to be made
+    """
+    root_tt_entry = hash_table[np.uint64(node.board_struct[0]['hash']) & ONES_IN_RELEVANT_BITS_FOR_TT_INDEX]
+    return chess.Move(
+        root_tt_entry["stored_from_square"],
+        root_tt_entry["stored_to_square"],
+        root_tt_entry["stored_promotion"])
+
 
 
 @nb.njit

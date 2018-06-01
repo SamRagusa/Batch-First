@@ -8,7 +8,7 @@ from .numba_board import *
 
 from .global_open_priority_nodes import PriorityBins
 from .board_jitclass import BoardState, generate_move_to_enumeration_dict, has_legal_move, is_in_check
-from .transposition_table import get_empty_hash_table, add_board_and_move_to_tt
+from .transposition_table import get_empty_hash_table, add_board_and_move_to_tt, choose_move
 
 
 
@@ -802,15 +802,7 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, board_eval_fn, move_ev
         counter += 1
 
 
-    root_tt_entry = hash_table[np.uint64(cur_root_node.board_struct[0]['hash']) & ONES_IN_RELEVANT_BITS_FOR_TT_INDEX]
-    try:
-        tt_move = chess.Move(root_tt_entry["stored_from_square"],
-                       root_tt_entry["stored_to_square"],
-                       root_tt_entry["stored_promotion"])
-    except IndexError as E:
-        tt_move = None
-        print("FAILED TO CREATE MOVE in MTD(f)")
-        raise(E)
+    tt_move = choose_move(hash_table, cur_root_node)
 
     return cur_guess, tt_move, hash_table
 
