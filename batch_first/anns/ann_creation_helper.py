@@ -5,7 +5,7 @@ from tensorflow.python import training
 
 from functools import reduce
 
-from batch_first.chestimator import new_get_board_data
+from batch_first.chestimator import get_board_data
 from batch_first.board_jitclass import generate_move_to_enumeration_dict
 
 
@@ -17,8 +17,8 @@ from tensorflow.contrib import tensorrt as trt
 
 def save_model_as_graphdef_for_serving(model_path, output_model_path, output_filename, output_node_name, model_tags="serve", trt_memory_fraction=.4, total_video_memory=1.1e10, max_batch_size=25000, as_text=False):
 
-    #This would ideally be 1 instead of .85, but the GPU that this is running on is responsible for things like graphics
-    with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.85-trt_memory_fraction))) as sess:
+    #This would ideally be 1 instead of .8, but the GPU that this is running on is responsible for things like graphics
+    with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.8-trt_memory_fraction))) as sess:
         board_eval_graph = tf.train.import_meta_graph(tf.saved_model.loader.load(sess, [model_tags], model_path))
 
         constant_graph_def = tf.graph_util.convert_variables_to_constants(sess, tf.get_default_graph().as_graph_def(), [output_node_name])
@@ -768,7 +768,8 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
 
 
 
-def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, include_unoccupied=True, shuffle_buffer_size=None): ################MUST COMBINE THIS FUNCTIONALITY WITH THE ONE BELOW IT (just add ability to subtract one before one_hot
+#Should combine this functionality with the one below it (for creating the encoder),(just add ability to subtract one before one_hot)
+def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, include_unoccupied=True, shuffle_buffer_size=None, repeat=True):
     def tf_records_input_data_fn():
         with tf.device('/cpu:0'):
 
@@ -776,7 +777,7 @@ def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, includ
             dataset = filenames.apply(
                 tf.contrib.data.parallel_interleave(
                     lambda filename : tf.data.TFRecordDataset(filename),
-                    cycle_length=7,
+                    cycle_length=5,
                     sloppy=True))
 
             def parser(record):
@@ -800,7 +801,8 @@ def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, includ
 
             dataset = dataset.prefetch(1)#num_things_in_parallel)#buffer_size=batch_size)
 
-            dataset = dataset.repeat()
+            if repeat:
+                dataset = dataset.repeat()
 
             iterator = dataset.make_one_shot_iterator()
 
@@ -820,7 +822,7 @@ def encoder_tf_records_input_data_fn(filename_pattern, batch_size, shuffle_buffe
         dataset = filenames.apply(
             tf.contrib.data.parallel_interleave(
                 lambda filename: tf.data.TFRecordDataset(filename),
-                cycle_length=7,
+                cycle_length=5,
                 sloppy=True,
             ))
 
@@ -867,7 +869,7 @@ def move_gen_one_hot_create_tf_records_input_data_fn(filename_pattern, batch_siz
         dataset = filenames.apply(
             tf.contrib.data.parallel_interleave(
                 lambda filename: tf.data.TFRecordDataset(filename),
-                cycle_length=7,
+                cycle_length=5,
                 sloppy=True,
             ))
 
@@ -916,20 +918,20 @@ def move_gen_one_hot_create_tf_records_input_data_fn(filename_pattern, batch_siz
     return tf_records_input_data_fn
 
 
-
 def no_chestimator_serving_input_reciever():
-    piece_bbs, color_occupied_bbs, ep_squares, formatted_data = new_get_board_data()
+    (piece_bbs, color_occupied_bbs, ep_squares, castling_lookup_indices, kings), formatted_data = get_board_data()
 
     receiver_tensors = {"piece_bbs": piece_bbs,
                         "color_occupied_bbs": color_occupied_bbs,
-                        "ep_squares": ep_squares}
+                        "ep_squares": ep_squares,
+                        "castling_lookup_indices": castling_lookup_indices,
+                        "kings": kings}
 
     return tf.estimator.export.ServingInputReceiver(formatted_data, receiver_tensors)
 
 
-
 def no_chestimator_serving_move_scoring_input_reciever(max_batch_size=50000, max_moves_for_a_board=100):
-    (piece_bbs, color_occupied_bbs, ep_squares), formatted_data = new_get_board_data()
+    (piece_bbs, color_occupied_bbs, ep_squares, castling_lookup_indices, kings), formatted_data = get_board_data()
 
     moves_per_board = tf.placeholder(tf.uint8, shape=[None], name="moves_per_board_placeholder")
     moves = tf.placeholder(tf.uint8, shape=[None, 2], name="move_placeholder")
@@ -959,6 +961,8 @@ def no_chestimator_serving_move_scoring_input_reciever(max_batch_size=50000, max
     receiver_tensors = {"piece_bbs" : piece_bbs,
                         "color_occupied_bbs" : color_occupied_bbs,
                         "ep_squares" : ep_squares,
+                        "castling_lookup_indices": castling_lookup_indices,
+                        "kings": kings,
                         "moves_per_board" : moves_per_board,
                         "moves" : moves}
 
@@ -966,7 +970,6 @@ def no_chestimator_serving_move_scoring_input_reciever(max_batch_size=50000, max
                          "legal_move_indices" : the_moves}
 
     return tf.estimator.export.ServingInputReceiver(dict_for_model_fn , receiver_tensors)
-
 
 
 

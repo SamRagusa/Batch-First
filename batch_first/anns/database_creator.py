@@ -15,34 +15,20 @@ import random
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# from evaluation_ann import main as evaluation_ann_main
+
 from ann_creation_helper import line_counter
 
-from batch_first import TURN_WHITE, TURN_BLACK, BB_SQUARES, MIN_FLOAT32_VAL, MAX_MOVES_LOOKED_AT, INITIAL_BOARD_FEN,BB_ALL
+from batch_first import TURN_WHITE, BB_SQUARES, MIN_FLOAT32_VAL, MAX_MOVES_LOOKED_AT, INITIAL_BOARD_FEN,BB_ALL
 
 from batch_first.numba_board import vectorized_flip_vertically, msb,  popcount, numpy_node_info_dtype, set_up_move_array
 
 from batch_first.board_jitclass import BoardState, Move, create_board_state_from_fen, generate_legal_moves, \
     generate_move_to_enumeration_dict, copy_push, push_with_hash_update
 
-from batch_first.numba_negamax_zero_window import struct_array_to_ann_input_all_white
-
-
+from batch_first.numba_negamax_zero_window import struct_array_to_ann_inputs
 
 from batch_first.chestimator import get_inference_functions
 
-
-
-@nb.njit
-def for_all_white_jitclass_to_array_for_ann(board):
-    if board.turn == TURN_WHITE:
-        return np.array([board.kings, board.queens, board.rooks, board.bishops, board.knights, board.pawns,
-                        board.castling_rights, 0 if board.ep_square is None else BB_SQUARES[np.int32(board.ep_square)],
-                        board.occupied_w, board.occupied_b, board.occupied],dtype=np.uint64)
-    else:
-        return np.array([board.kings, board.queens, board.rooks, board.bishops, board.knights, board.pawns,
-                        board.castling_rights, 0 if board.ep_square is None else BB_SQUARES[np.int32(board.ep_square)],
-                        board.occupied_b, board.occupied_w, board.occupied],dtype=np.uint64)
 
 
 
@@ -104,28 +90,27 @@ def get_board_info_tuple(board):
 
 
 
-
 def get_feature_array(white_info):
     """
     NOTES:
     1) For the method used here to work (iterating over the masks), rook indices must always be set before
     castling_rights, and unoccupied must be set before the ep_square.
-    and
     """
     answer = np.zeros(64,dtype=np.uint8)
-
 
     occupied_colors = np.array([[white_info[8]], [white_info[9]]])
     piece_info = np.array([white_info[:7]])
 
-    masks = np.unpackbits(np.bitwise_and(occupied_colors, piece_info).reshape(14).view(np.uint8)).reshape([-1,64]).view(np.bool_)
+    masks = np.unpackbits(np.bitwise_and(occupied_colors, piece_info).reshape(14).view(np.uint8)).reshape([14, 8, 8]).view(np.bool_)[...,::-1].reshape(14,64)
+
 
     for j, mask in enumerate(masks):
-        answer[mask] = j+2
+        answer[mask] = j + 2
 
     #Set the ep square
     if white_info[7] !=0:
         answer[msb(white_info[7])] = 1
+
 
     return answer
 
@@ -158,7 +143,7 @@ class BoardData:
 
 
 def create_database_from_pgn(filenames, to_collect_filters=[], post_collection_filters=[], data_writer=None,
-                             num_first_moves_to_skip=0, output_filenames=["board_config_database.csv"]):
+                             num_first_moves_to_skip=0, output_filenames=["board_config_database.csv"], print_info=True):
     """
     A function used to generate customized chess databases from a set of pgn files.  It does so using the python-chess
     package for pgn file parsing, and error handling (if the error lies within the pgn file itself), and uses
@@ -167,19 +152,20 @@ def create_database_from_pgn(filenames, to_collect_filters=[], post_collection_f
 
     :param filenames: An array of filenames (paths) for the png files of chess games to read data from.
     :param to_collect_filters: A list of functions used to filter out (board, move) pairs during the parsing of the pgn files. Each function in
-    the array must accept two parameters, the first being the current BoardState object, and the second being the next
-    move to be made, as a Python-Chess Move object.  They should return True if the (board, move) pair should be
-    filtered out, False if not.
+     the array must accept two parameters, the first being the current BoardState object, and the second being the next
+     move to be made, as a Python-Chess Move object.  They should return True if the (board, move) pair should be
+     filtered out, False if not.
     :param post_collection_filters: An array of functions just like to_collect_filters, except that the second
-    parameter is a BoardData object instead of a move, and the filters are applied after all pgn files have been parsed,
-    as opposed to during.
+     parameter is a BoardData object instead of a move, and the filters are applied after all pgn files have been parsed,
+     as opposed to during.
     :param data_writer: A function that takes in two parameters, the first of which is a dictionary mapping string
-    representations of boards (as determined by other parameters of this function) to BoardData objects,
-    and the second parameter accepts the output_filenames array, which is given as another parameter of this function.
-    If none is give, it will pickle and save the dictionary of information.
+     representations of boards (as determined by other parameters of this function) to BoardData objects,
+     and the second parameter accepts the output_filenames array, which is given as another parameter of this function.
+     If none is give, it will pickle and save the dictionary of information.
     :param num_first_moves_to_skip: The number of halfmoves to omit at the start of every game during collection
-    of board data
+     of board data
     :param output_filenames: An array of filenames (paths) to be passed to the data_writer as a parameter.
+    :print_info: A boolean value, indicating if updates on what is happening within the function should be printed
 
 
     NOTES:
@@ -188,8 +174,8 @@ def create_database_from_pgn(filenames, to_collect_filters=[], post_collection_f
     """
     configs = {}
     for index, filename in enumerate(filenames):
-
-        print("Starting file", str(index + 1), "with", line_counter(filename), "lines")
+        if print_info:
+            print("Starting file", str(index + 1), "with", line_counter(filename), "lines")
 
         pgn_file = open(filename)
 
@@ -221,8 +207,9 @@ def create_database_from_pgn(filenames, to_collect_filters=[], post_collection_f
             cur_game = chess.pgn.read_game(pgn_file)
         pgn_file.close()
 
+    if print_info:
+        print("Applying post-collection filters to data.")
 
-    print("Applying post-collection filters to data.")
     to_delete = []
     if post_collection_filters != []:
         for board_info, data in configs.items():
@@ -231,11 +218,15 @@ def create_database_from_pgn(filenames, to_collect_filters=[], post_collection_f
                     to_delete.append(board_info)
                     break
 
-        print("Number of boards deleted by post-collection filters:", len(to_delete))
+        if print_info:
+            print("Number of boards deleted by post-collection filters:", len(to_delete))
+
         for board_info in to_delete:
             del configs[board_info]
 
-    print("Writing data to new file.")
+    if print_info:
+        print("Writing data to new file.")
+
     if data_writer is None:
         with open(output_filenames[0], 'wb') as writer:
             pickle.dump(configs, writer, pickle.HIGHEST_PROTOCOL)
@@ -286,12 +277,12 @@ def board_eval_data_writer_creator(file_ratios, for_deep_pink_loss, comparison_m
 
     :param file_ratios: The ratios of the given boards to use when creating each database file.
     :param for_deep_pink_loss: An array of boolean values indicating which of the database files being created should be
-    formatted for use with Deep Pink's loss function (or a loss function with a similar idea).
+     formatted for use with Deep Pink's loss function (or a loss function with a similar idea).
     :param comparison_move_generator: A generator function taking a BoardState and BoardData object as parameters.
-    The generator produces moves such that from the given board, making one of the moves would result in
-    the random board in the (old, new, random) triplet.
+     The generator produces moves such that from the given board, making one of the moves would result in
+     the random board in the (old, new, random) triplet.
     :param print_frequency: The increment in which to print the number of boards processed and written to file,
-    and how much time that took.
+     and how much time that took.
     """
 
 
@@ -325,7 +316,8 @@ def board_eval_data_writer_creator(file_ratios, for_deep_pink_loss, comparison_m
 
         number_of_boards = len(dict)
 
-        print("Number of board configurations:", number_of_boards)
+        if not print_frequency is None:
+            print("Number of board configurations:", number_of_boards)
         start_time = time.time()
 
         cur_entry_num = 0
@@ -336,11 +328,12 @@ def board_eval_data_writer_creator(file_ratios, for_deep_pink_loss, comparison_m
             if not should_get_deep_pink_loss:
                 pickle.dump({next(dict_iterator) for _ in range(int(math.floor(ratio * number_of_boards)))}, writer, pickle.HIGHEST_PROTOCOL)
                 cur_entry_num += int(math.floor(ratio * number_of_boards))
-                print(cur_entry_num, "boards writen (just completed a file's pickle.dump)")
+                if not print_frequency is None:
+                    print(cur_entry_num, "boards writen (just completed a file's pickle.dump)")
             else:
                 for _ in range(int(math.floor(ratio * number_of_boards))):
 
-                    if cur_entry_num % print_frequency == 0:
+                    if not print_frequency is None and cur_entry_num % print_frequency == 0:
                         print(cur_entry_num, "total boards writen.  The time since the previous print:",
                               time.time() - start_time)
                         start_time = time.time()
@@ -411,7 +404,7 @@ def generate_database_with_child_values_tf_records(node_batch_eval_fn, print_int
     :param print_interval: The interval in which to print the functions progress and time taken since last print
     :param batch_size: The number of examples to be prepared at a time by each thread
     :param num_workers: The number of workers to be created/used by the ThreadPoolExecutor (used when generating
-    batches of data to write)
+     batches of data to write)
     """
 
 
@@ -457,8 +450,8 @@ def generate_database_with_child_values_tf_records(node_batch_eval_fn, print_int
     def the_writer(the_dict, output_filenames):
         """
         :param output_filenames: An array of size 1 containing the desired output filename/location of
-        of the resulting TFRecords database.   (This is an array of size one to adhere to the basic structure of the
-        data_writer described in the create_database_from_pgn function)
+         of the resulting TFRecords database.   (This is an array of size one to adhere to the basic structure of the
+         data_writer described in the create_database_from_pgn function)
         """
         writer = tf.python_io.TFRecordWriter(output_filenames[0])
         cur_keys = []
@@ -532,31 +525,30 @@ if __name__ == "__main__":
 
     pgn_file_paths = list(map(lambda year, num : "/srv/databases/from_pycharm/fics/ficsgamesdb_%d_standard2000_nomovetimes_%s.pgn"%(year, num), range(1999,2017), pgn_file_nums))
 
-    #Without being split their percentages of the data are: [.35,.05,.1, .35,.05,.1]
     final_dataset_filenames = list(
         map(
-            lambda x: "/srv/databases/chess_engine/one_rand_per_board_data/" + x,
+            lambda x: "/srv/databases/chess_engine/full_9/" + x,
             [
+                "encoder_training_set_0.pkl",
+                "encoder_training_set_1.pkl",
+                "encoder_training_set_2.pkl",
+                "encoder_training_set_3.pkl",
+                "encoder_training_set_4.pkl",
+                "encoder_validation_set_0.pkl",
                 "scoring_training_set_0.pkl",
                 "scoring_training_set_1.pkl",
                 "scoring_training_set_2.pkl",
                 "scoring_training_set_3.pkl",
                 "scoring_training_set_4.pkl",
-                "scoring_training_set_5.pkl",
-                "scoring_training_set_6.pkl",
                 "scoring_validation_set_0.pkl",
                 "scoring_testing_set_0.pkl",
-                "scoring_testing_set_1.pkl",
                 "move_scoring_training_set_0.pkl",
                 "move_scoring_training_set_1.pkl",
                 "move_scoring_training_set_2.pkl",
                 "move_scoring_training_set_3.pkl",
                 "move_scoring_training_set_4.pkl",
-                "move_scoring_training_set_5.pkl",
-                "move_scoring_training_set_6.pkl",
                 "move_scoring_validation_set_0.pkl",
                 "move_scoring_testing_set_0.pkl",
-                "move_scoring_testing_set_1.pkl",
                 ]))
 
 
@@ -569,7 +561,7 @@ if __name__ == "__main__":
     # with the generation of the move scoring database to prevent any overlap in boards between the datasets.
     start_time = time.time()
     create_database_from_pgn(
-        [pgn_file_paths[0]],#pgn_file_paths[:-1],
+        pgn_file_paths[:-1],
         to_collect_filters=[during_search_n_man_filter_creator(6)],
         data_writer=board_eval_data_writer_creator(
             file_ratios,
@@ -577,23 +569,27 @@ if __name__ == "__main__":
             comparison_move_generator=standard_comparison_move_generator,
             print_frequency=10000),
         num_first_moves_to_skip=5,
-        output_filenames=["/srv/databases/chess_engine/TESTING/pickled_1.pkl"])#final_dataset_filenames)
+        output_filenames=final_dataset_filenames)
 
     print("Time taken to create databases:", time.time() - start_time)
 
 
 
 
-    BOARD_EVAL_GRAPHDEF_FILE = "/srv/tmp/encoder_evaluation/conv_train_wide_and_deep_4/1526978123/tensorrt_eval_graph.pb"
+    BOARD_EVAL_GRAPHDEF_FILE = "/srv/tmp/encoder_evaluation/normal_next_try_4_regulated/1528279891/tensorrt_eval_graph.pb"
+    TEMP_STR = "/srv/tmp/move_scoring_1/pre_commit_test_1/1528279921/tensorrt_move_scoring_graph.pb"
 
-    BOARD_PREDICTOR, _, BOARD_PREDICTOR_CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILE, None)
+    BOARD_PREDICTOR, _, BOARD_PREDICTOR_CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILE, TEMP_STR)
 
 
     def cur_eval_fn(node_array):
         return BOARD_PREDICTOR(
-            *struct_array_to_ann_input_all_white(
+            *struct_array_to_ann_inputs(
                 create_struct_array_from_jitclasses(
                     node_array))).squeeze(axis=1)
+
+    def dummy_eval_fn(node_array):
+        return np.zeros(len(node_array),dtype=np.float32)
 
 
 
@@ -606,56 +602,23 @@ if __name__ == "__main__":
     #         comparison_move_generator=standard_comparison_move_generator,
     #         print_frequency=100000)
     #
+    #
+    # encoding_writer = generate_database_with_child_values_tf_records(dummy_eval_fn)
 
     move_scoring_writer = generate_database_with_child_values_tf_records(cur_eval_fn)
 
-    output_filenames = [
-                "scoring_training_set_0.pkl",
-                "scoring_training_set_1.pkl",
-                "scoring_training_set_2.pkl",
-                "scoring_training_set_3.pkl",
-                "scoring_training_set_4.pkl",
-                "scoring_training_set_5.pkl",
-                "scoring_training_set_6.pkl",
-                "scoring_validation_set_0.pkl",
-                "scoring_testing_set_0.pkl",
-                "scoring_testing_set_1.pkl",
-                "move_scoring_training_set_0.pkl",
-                "move_scoring_training_set_1.pkl",
-                "move_scoring_training_set_2.pkl",
-                "move_scoring_training_set_3.pkl",
-                "move_scoring_training_set_4.pkl",
-                "move_scoring_training_set_5.pkl",
-                "move_scoring_training_set_6.pkl",
-                "move_scoring_validation_set_0.pkl",
-                "move_scoring_testing_set_0.pkl",
-                "move_scoring_testing_set_1.pkl",
-                ]
 
-    final_dataset_filenames = list(
-        map(
-            lambda x: "/srv/databases/chess_engine/move_scoring_1/" + x,
-            output_filenames))
-
-
-    TEMP = list(
-        map(
-            lambda x: "/srv/databases/chess_engine/full_6/" + x,
-            output_filenames))
-
-
-    file_index  = 16
+    file_index = 13
     print("Creating database for file",file_index)
-    # INPUT_FILENAME = TEMP[file_index]#final_dataset_filenames[file_index]
-    INPUT_FILENAME = "/srv/databases/chess_engine/TESTING/pickled_1.pkl"
+    INPUT_FILENAME = final_dataset_filenames[file_index]
     OUTPUT_FILENAME = final_dataset_filenames[file_index][:-3] + "tfrecords"#"npy"
     with open(INPUT_FILENAME, "rb") as input:
         cur_dict_to_write = {cur_tuple[0]: cur_tuple[1] for cur_tuple in pickle.load(input)}
 
-        # the following line of code is only commented out because the move scoring data should be disjoint from
-        # the board evaluation data.  It is fine to use for database generation!
+
         # board_eval_writer(cur_dict_to_write, [OUTPUT_FILENAME])
 
+        # encoding_writer(cur_dict_to_write, [OUTPUT_FILENAME])
 
         move_scoring_writer(cur_dict_to_write, [OUTPUT_FILENAME])
 

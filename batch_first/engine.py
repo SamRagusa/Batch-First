@@ -15,7 +15,7 @@ def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False
     move evaluation function.
 
     :param filename: The filename for the binary file (in NumPy .npy format) containing board structs.
-    It's used for computing a sample of move scores
+     It's used for computing a sample of move scores
     :param move_eval_fn: The move evaluation function to be used when searching the tree
     :param quantiles: The quantiles desired from the sample of move scores computed
     :param print_info: A boolean value indicating if info about the computations should be printed

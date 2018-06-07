@@ -58,44 +58,58 @@ new_gamenode_type.define(GameNode.class_type.instance_type)
 
 
 
-
-
-
 @njit(nogil=True)
-def struct_array_to_ann_input_all_white(struct_array):
-    ep_squares = np.zeros(len(struct_array),dtype=np.uint8)
-    potential_reversal = np.empty((9,len(struct_array)), dtype=np.uint64)
+def struct_array_to_ann_inputs(struct_array):
 
-    potential_reversal[0] = struct_array['kings']
-    potential_reversal[1] = struct_array['queens']
-    potential_reversal[2] = struct_array['rooks'] ^ struct_array['castling_rights']   #non castling rooks
-    potential_reversal[3] = struct_array['bishops']
-    potential_reversal[4] = struct_array['knights']
-    potential_reversal[5] = struct_array['pawns']
+    byte_info = np.empty((4,len(struct_array)), dtype=np.uint8)  #[[ep_squares], [castling_lookup_indices], [white_kings], [black_kings]]
 
-    potential_reversal[6] = struct_array['castling_rights']
+    potential_reversal = np.empty((7,len(struct_array)), dtype=np.uint64)
+
+    potential_reversal[0] = struct_array['queens']
+    potential_reversal[1] = struct_array['rooks'] ^ struct_array['castling_rights']   #rooks without castling rights
+    potential_reversal[2] = struct_array['bishops']
+    potential_reversal[3] = struct_array['knights']
+    potential_reversal[4] = struct_array['pawns']
+
 
     for j in range(len(struct_array)):
 
         if struct_array[j]['turn']:
-            if struct_array[j]['ep_square'] != 0:
-                ep_squares[j] = struct_array[j]['ep_square']
+            byte_info[1, j] = khash_get(WHITE_CASTLING_RIGHTS_LOOKUP_TABLE, struct_array[j]['castling_rights'], 0)
 
-            potential_reversal[7,j] = struct_array[j]['occupied_w']
-            potential_reversal[8,j] = struct_array[j]['occupied_b']
+            byte_info[2, j] = msb(struct_array[j]['occupied_w'] & struct_array[j]['kings'])
+            byte_info[3, j] = msb(struct_array[j]['occupied_b'] & struct_array[j]['kings'])
+
+            if struct_array[j]['ep_square'] != 0:
+                byte_info[0, j] = struct_array[j]['ep_square']
+            else:
+                byte_info[0, j] = 0
+
+            potential_reversal[5,j] = struct_array[j]['occupied_w']
+            potential_reversal[6,j] = struct_array[j]['occupied_b']
+
         else:
+            byte_info[1, j] = khash_get(BLACK_CASTLING_RIGHTS_LOOKUP_TABLE, struct_array[j]['castling_rights'], 0)
+
+            byte_info[2, j] = msb(struct_array[j]['occupied_b'] & struct_array[j]['kings'])
+            byte_info[3, j] = msb(struct_array[j]['occupied_w'] & struct_array[j]['kings'])
+
             if struct_array[j]['ep_square'] != 0:
-                ep_squares[j] = REVERSED_SQUARES[struct_array[j]['ep_square']]
+                byte_info[0, j] = REVERSED_SQUARES[struct_array[j]['ep_square']]
+            else:
+                byte_info[0, j] = 0
 
-            potential_reversal[7,j] = struct_array[j]['occupied_b']
-            potential_reversal[8,j] = struct_array[j]['occupied_w']
-
-    # to_return[10] = struct_array['occupied']
+            potential_reversal[5, j] = struct_array[j]['occupied_b']
+            potential_reversal[6, j] = struct_array[j]['occupied_w']
 
     black_turn_mask = np.logical_not(struct_array['turn'])
-    potential_reversal[:, black_turn_mask] = vectorized_flip_vertically(potential_reversal[:,black_turn_mask])
 
-    return np.expand_dims(potential_reversal[:7].transpose(), 1), np.expand_dims(potential_reversal[7:].transpose(), 2), ep_squares
+    #The next line is making an uneeded copy.  This function should be refactored to account for this
+    potential_reversal[:, black_turn_mask] = vectorized_flip_vertically(potential_reversal[:,black_turn_mask])
+    byte_info[2:, black_turn_mask] = vectorized_square_mirror(byte_info[2:,black_turn_mask])
+
+    return np.expand_dims(potential_reversal[:5].transpose(), 1), np.expand_dims(potential_reversal[5:].transpose(),2), byte_info[0,:], byte_info[1,:], byte_info[2:,:].transpose()
+
 
 
 @njit
@@ -134,7 +148,7 @@ def move_scoring_helper(children, not_children, children_indices, not_children_i
         not_children_to_score = not_children[not_children_indices]
 
     combined_to_score = np.concatenate((children_to_score, not_children_to_score))
-    piece_bbs, occupied_bbs, ep_squares = struct_array_to_ann_input_all_white(combined_to_score)
+    piece_bbs, occupied_bbs, ep_squares, castling_lookup_indices, kings = struct_array_to_ann_inputs(combined_to_score)
 
     # This should REALLY be using views of combined_to_score['children_left'], since there will never be 0 children_left or more than 255 (meaning a uint8 should work to represent the data)
     size_array = combined_to_score[:]['children_left'].astype(np.int16)
@@ -152,7 +166,8 @@ def move_scoring_helper(children, not_children, children_indices, not_children_i
             from_to_squares[cur_start_index:cur_start_index + size_array[j], 1] = REVERSED_SQUARES[combined_to_score[j]['unexplored_moves'][:size_array[j], 1]]
         cur_start_index += size_array[j]
 
-    return piece_bbs, occupied_bbs, ep_squares, from_to_squares, size_array
+    return piece_bbs, occupied_bbs, ep_squares, castling_lookup_indices, kings, from_to_squares, size_array
+
 
 
 def start_move_scoring(children, not_children, children_indices, not_children_indices, move_eval_fn):
@@ -181,8 +196,6 @@ def set_evaluation_scores(struct_array, to_set_mask, results):
 
 
 
-
-
 def start_board_evaluations(struct_array, to_score_mask, board_eval_fn):
     """
     Start the evaluation of the depth zero nodes which were not previously terminated, and set their results to their
@@ -193,7 +206,7 @@ def start_board_evaluations(struct_array, to_score_mask, board_eval_fn):
 
     def evaluate_and_set():
         results = board_eval_fn(
-            *struct_array_to_ann_input_all_white(
+            *struct_array_to_ann_inputs(
                 struct_array[to_score_mask])).squeeze(axis=1)
         set_evaluation_scores(struct_array, to_score_mask, results)
 
@@ -805,7 +818,6 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, board_eval_fn, move_ev
     tt_move = choose_move(hash_table, cur_root_node)
 
     return cur_guess, tt_move, hash_table
-
 
 
 

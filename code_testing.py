@@ -6,20 +6,26 @@ from chess.polyglot import zobrist_hash
 import random
 import itertools
 import chess
+import chess.pgn
 import os
+import tempfile
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 import batch_first as bf
 
-from batch_first.chestimator import new_get_board_data
+from batch_first.anns.ann_creation_helper import one_hot_create_tf_records_input_data_fn
+
+from batch_first.anns.database_creator import create_database_from_pgn, board_eval_data_writer_creator, standard_comparison_move_generator
+
+from batch_first.chestimator import get_board_data
 
 from batch_first.board_jitclass import create_board_state_from_fen, traditional_perft_test
 
 from batch_first.numba_board import create_node_info_from_fen, structured_scalar_perft_test, scalar_is_legal_move, \
-    numpy_node_info_dtype, create_node_info_from_python_chess_board, push_moves
+    numpy_node_info_dtype, create_node_info_from_python_chess_board, push_moves, square_mirror
 
-from batch_first.numba_negamax_zero_window import struct_array_to_ann_input_all_white
+from batch_first.numba_negamax_zero_window import struct_array_to_ann_inputs
 
 
 DEFAULT_TESTING_FENS = ["rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -56,10 +62,10 @@ def full_perft_tester(perft_function_to_test, fens_to_test=DEFAULT_TESTING_FENS,
 
 
     :param perft_function_to_test: A function that takes 2 arguments, the first being a board's FEN representation
-    as a string, and the second being the depth of the perft test to be done.
+     as a string, and the second being the depth of the perft test to be done.
     :param fens_to_test: An iterable of strings, each a FEN representation of a board.
     :param perft_results: A list of the same length as fens_to_test, containing lists of integers, each corresponding
-    to the expected PERFT result if tested at a depth of it's index
+     to the expected PERFT result if tested at a depth of it's index
     :param max_expected_boards_to_test: The maximum expected PERFT result to test for a given board
     :return: True if all tests were passed, False if not
     """
@@ -80,15 +86,15 @@ def zobrist_hash_test(hash_getter, fen_to_start=None, num_sequences_to_test=1000
 
 
     :param hash_getter: The hashing function to test, it must accept 3 parameters, the fen to start the
-    move sequences from, the list of lists of python-chess Moves to make from the starting board, and the maximum
-    number of moves per test. The function must return an ndarray of the board hashes at each position in the random
-    move sequences (zero if the sequence terminates early), it's shape will be
-    [num_sequences_to_test, max_moves_per_test]
+     move sequences from, the list of lists of python-chess Moves to make from the starting board, and the maximum
+     number of moves per test. The function must return an ndarray of the board hashes at each position in the random
+     move sequences (zero if the sequence terminates early), it's shape will be
+     [num_sequences_to_test, max_moves_per_test]
     :param fen_to_start: The fen (as a string) representing the board to start making random moves from.  If None is
-    given, the fen for the start of a normal game is used
+     given, the fen for the start of a normal game is used
     :param num_sequences_to_test: The number of random move sequences (each starting from the given initial fen) to test
     :param max_moves_per_test: The maximum number of random moves to be made for each testing sequence.  This is a
-    maximum because some random move sequences result in a premature win/loss/draw
+     maximum because some random move sequences result in a premature win/loss/draw
     :return: True if all tests were passed, False if not
     """
     if fen_to_start is None:
@@ -126,39 +132,28 @@ def zobrist_hash_test(hash_getter, fen_to_start=None, num_sequences_to_test=1000
     return np.all(same_hashes)
 
 
-
-
-def inference_input_pipeline_test(input_pipe_fn, boards_to_input_list_fn, fens_to_test, uses_unoccupied, piece_to_filter_fn, ep_filter_index, castling_filter_indices, flip_files=False):
+def get_expected_features(boards, piece_to_filter_fn, ep_filter_index, castling_filter_indices):
     """
-    A function used to test the conversion of a board to a representation consumed by ANNs during inference.
-    It creates an array of features (one-hot inputs potentially with empty squares) by using the
-    python-chess package, and confirms that the given pipeline produces matching inputs.
+    Gets an array of feature indices for the given chess boards.
 
 
-    :param input_pipe_fn: A function with no parameters, returning a size 2 tuple, with the first element being
-    a tuple of Placeholders to feed values to, and the second being the tensor for the one-hot representation
-    of the boards to be given to the ANN for inference
-    :param boards_to_input_list_fn: A function taking as it's input a list of python-chess Board objects, and returning
-    an iterable of arrays to be fed to the TensorFlow part of the pipe to test
-    :param fens_to_test: The list of fen representations of game boards, as strings
-    :param uses_unoccupied: A boolean value, indicating if the input to the ANNs should have a filter for
-    unoccupied squares
+    :param boards: A list of of python-chess Board objects.  These are the boards the expected features
+     will be computed for
     :param piece_to_filter_fn: A function taking a python-chess Piece as input, and returning the index of the input
      filter used to identify that piece (incremented by one if unoccupied is not used as a filter)
     :param ep_filter_index: The index of the input filter used to identify if a square is an ep square,
-    this is incremented by one if unoccupied is not used as a filter
-    :param castling_filter_indices:  The index of the input filter used to identify if a square contains a rook which
-    has castling rights, this is incremented by one if unoccupied is not used as a filter
-    :param flip_files: A boolean value indicating if the inputs to the ANNs should have it's files flipped
-    :return: A size 2 tuple, the first element being a boolean value signifying if the test was passed,
-    the second value is a mask of which boards passed the test
+     this is incremented by one if unoccupied is not used as a filter
+    :param castling_filter_indices: The index of the input filter used to identify if a square contains a rook which
+     has castling rights, this is incremented by one if unoccupied is not used as a filter
+    :return: An ndarray containing the given boards features, it will have size [len(boards),8,8] and dtype np.uint8
     """
     CORNER_SQUARES = np.array([bf.A1, bf.H1, bf.A8, bf.H8], np.uint8)
     CORNER_BBS = np.array([bf.BB_A1, bf.BB_H1, bf.BB_A8, bf.BB_H8], np.uint64)
 
-    desired_filters = np.empty([len(fens_to_test), 8, 8], dtype=np.uint8)
-    boards = list(map(chess.Board, fens_to_test))
-    for j, fen in enumerate(fens_to_test):
+    desired_filters = np.empty([len(boards), 8, 8], dtype=np.uint8)
+
+
+    for j in range(len(boards)):
 
         piece_map = map(boards[j].piece_at,chess.SQUARES)
 
@@ -170,7 +165,10 @@ def inference_input_pipeline_test(input_pipe_fn, boards_to_input_list_fn, fens_t
                 piece_map)))
 
         if not boards[j].ep_square is None:
-            cur_filter_squares[boards[j].ep_square] =  ep_filter_index
+            if boards[j].turn:
+                cur_filter_squares[boards[j].ep_square] =  ep_filter_index
+            else:
+                cur_filter_squares[square_mirror(np.uint8(boards[j].ep_square))] = ep_filter_index
 
 
         if boards[j].turn:
@@ -187,14 +185,40 @@ def inference_input_pipeline_test(input_pipe_fn, boards_to_input_list_fn, fens_t
         if not boards[j].turn:
             desired_filters[j] = desired_filters[j,::-1]
 
-    if flip_files:
-        desired_filters = desired_filters[...,::-1]
+    return desired_filters
 
 
+
+def inference_input_pipeline_test(inference_pipe_fn, boards_to_input_list_fn, boards, uses_unoccupied, piece_to_filter_fn, ep_filter_index, castling_filter_indices):
+    """
+    A function used to test the conversion of a board to a representation consumed by ANNs during inference.
+    It creates an array of features (one-hot inputs potentially with empty squares) by using the
+    python-chess package, and confirms that the given pipeline produces matching inputs.
+
+
+    :param inference_pipe_fn: A function with no parameters, returning a size 2 tuple, with the first element being
+     a tuple of Placeholders to feed values to, and the second being the tensor for the one-hot representation
+     of the boards to be given to the ANN for inference
+    :param boards_to_input_list_fn: A function taking as it's input a list of python-chess Board objects, and returning
+     an iterable of arrays to be fed to the TensorFlow part of the pipe to test
+    :param boards: A list of of python-chess Board objects
+    :param uses_unoccupied: A boolean value, indicating if the input to the ANNs should have a filter for
+     unoccupied squares
+    :param piece_to_filter_fn: A function taking a python-chess Piece as input, and returning the index of the input
+     filter used to identify that piece (incremented by one if unoccupied is not used as a filter)
+    :param ep_filter_index: The index of the input filter used to identify if a square is an ep square,
+     this is incremented by one if unoccupied is not used as a filter
+    :param castling_filter_indices:  The index of the input filter used to identify if a square contains a rook which
+     has castling rights, this is incremented by one if unoccupied is not used as a filter
+    :return: A size 3 tuple, the first element being a boolean value signifying if the test was passed,
+     the second element being the expected filters, and the third being the filters computed by the inference pipeline
+    """
+
+    desired_filters = get_expected_features(boards, piece_to_filter_fn, ep_filter_index, castling_filter_indices)
 
     #The TensorFlow code is written such that specific values can easily be pulled during debugging
     with tf.Session() as sess:
-        pipe_placeholders, pipe_output = input_pipe_fn()
+        pipe_placeholders, pipe_output = inference_pipe_fn()
 
         desired_square_values = tf.placeholder(tf.uint8, [None,8,8])
 
@@ -219,22 +243,15 @@ def inference_input_pipeline_test(input_pipe_fn, boards_to_input_list_fn, fens_t
 
         boards_with_issues =  tf.logical_or(board_has_square_with_incorrect_filter_sum, board_has_wrong_filter)
 
-        # expected_filters, calculated_filters = sess.run([desired_square_values,filters_used],{
-        #         desired_square_values: desired_filters,
-        #         **dict(zip(pipe_placeholders, boards_to_input_list_fn(boards))),
-        #     })
-        #
-        # print("Expected working method to flip a board succeeds:", np.all(expected_filters[4]==expected_filters[3]))
 
-        problemed_board_mask = sess.run(
-            boards_with_issues,
+        calculated_filters, problemed_board_mask = sess.run(
+            [filters_used, boards_with_issues],
             {
                 desired_square_values: desired_filters,
                 **dict(zip(pipe_placeholders, boards_to_input_list_fn(boards))),
             })
 
-
-        return not np.any(problemed_board_mask), problemed_board_mask
+        return not np.any(problemed_board_mask), desired_filters, calculated_filters
 
 
 
@@ -260,13 +277,13 @@ def move_verification_tester(move_legality_tester, board_creator_fn, fens_to_tes
 
 
     :param move_legality_tester: A function accepting two parameters, the first being a board as returned by the given
-    board_creator_fn, and the second being a size 3 ndarray representing a move. The function must return a
-    boolean value, indicating if the move is legal
+     board_creator_fn, and the second being a size 3 ndarray representing a move. The function must return a
+     boolean value, indicating if the move is legal
     :param board_creator_fn: A function which takes as input a Python-Chess Board object, and outputs the board in the
-    representation to be used when testing move legality.
+     representation to be used when testing move legality.
     :param fens_to_test: An iterable of strings, each a FEN representation of a board.
     :param moves_to_test: A uint8 ndarray of size [num_moves_to_test, 3], representing the moves to test for each
-    testing fen
+     testing fen
     :return: True if all tests were passed, False if not
     """
     for cur_fen in fens_to_test:
@@ -280,6 +297,108 @@ def move_verification_tester(move_legality_tester, board_creator_fn, fens_to_tes
 
     return True
 
+
+def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_fn, boards_to_input_for_inference, piece_to_filter_fn, ep_filter_index, castling_filter_indices, num_random_games=20,max_moves_per_game=None,uses_unoccupied=False):
+    """
+    This function can be thought of in two parts, one tests the board evaluation inference pipeline, and the other
+     tests the entire board evaluation training pipeline (from PGN to Tensor).
+
+    It works by first playing a number of chess games, choosing moves randomly and storing each board configuration.
+     It then uses inference_input_pipeline_test to both test the inference pipeline, and produce the expected
+     feature arrays for the training pipeline.  A temporary pgn file is created from the games played,
+     and sent through the pipeline used to create and consume the board evaluation database.  If every feature array
+     produced by the training pipeline is contained within the expected feature arrays,
+     then the training pipeline passes the test.
+
+
+
+    :param tfrecords_writer: A function to write a tfrecords file in the same way done when creating the board
+     evaluation ANN training data.  It must accept two parameters, the first is the filename of the pgn file,
+     and the second the desired output tfrecords filename.  The function doesn't need to return anything
+    :param feature_getter: A function accepting the filename of the tfrecords file created for testing,
+     and returning the tensor for the one-hot representation of the boards to be given to the ANN
+     for training (unoccupied filter may be omitted if not used)
+    :param inference_pipe_fn: See inference_input_pipeline_test
+    :param boards_to_input_for_inference: See inference_input_pipeline_test
+    :param piece_to_filter_fn: See inference_input_pipeline_test
+    :param ep_filter_index: See inference_input_pipeline_test
+    :param castling_filter_indices: See inference_input_pipeline_test
+    :param num_random_games: The number of chess games to be played/tested (choosing random moves).  This is used for
+     creating the PGN file to test the training pipe, or in generating the list of boards to test the inference pipe
+    :param max_moves_per_game: The maximum number of moves (halfmoves) to be made before a game should be stopped.
+     If None is given, there will be no limit on how many moves can be made
+    :param uses_unoccupied: See inference_input_pipeline_test
+    :return: A tuple of two boolean values, the first indicating if the training pipeline tests were passed,
+     and the second indicating if the inference pipeline tests were passed
+
+
+    TODO:
+    1) Have this test not only the first board (validating it's configuration), but also the other two (ones after
+    real/random moves are made).  It should be tested that the moves made to get to them are legal
+    2) Ideally a temporary file would be used for writing/reading the tfrecords database
+    """
+    if max_moves_per_game == None:
+        max_moves_per_game = 1<<64  #An arbitrarily large integer
+
+    tf_records_filename = "THIS_COULD-SHOULD_BE_A_TEMPORARY_FILE.tfrecords"
+
+    temp_pgn, temp_filename = tempfile.mkstemp()
+
+    boards = [chess.Board()]
+    for j in range(num_random_games):
+
+        cur_board = chess.Board()
+        for _ in range(max_moves_per_game):
+            possible_next_moves = list(cur_board.generate_legal_moves())
+
+            cur_board.push(possible_next_moves[random.randrange(len(possible_next_moves))])
+
+            boards.append(cur_board.copy())
+
+            if cur_board.is_game_over():
+                break
+
+        #Writing the game to the pgn file
+        os.write(temp_pgn, str.encode(str(chess.pgn.Game.from_board(cur_board))))
+
+    #Create the tfrecords file as it would be created for training
+    tfrecords_writer(temp_filename, tf_records_filename)
+
+    os.close(temp_pgn)
+
+
+    input_features = feature_getter(tf_records_filename)
+
+    one_hot_features = np.argmax(np.concatenate((np.expand_dims(1-np.sum(input_features, axis=3),axis=3),input_features), axis=3),axis=3)
+
+
+    inference_pipe_results, desired_filters, inference_filters = inference_input_pipeline_test(
+        inference_pipe_fn,
+        boards_to_input_for_inference,
+        boards,
+        uses_unoccupied,
+        piece_to_filter_fn,
+        ep_filter_index=ep_filter_index,
+        castling_filter_indices=castling_filter_indices)
+
+
+    no_training_pipe_issues = True
+    for filter in one_hot_features:
+        num_correct_squares = np.sum(filter == desired_filters, (1,2))
+        if np.all(64 != num_correct_squares):
+
+
+            print(filter)
+            max_correct = np.max(num_correct_squares)
+            print(desired_filters[num_correct_squares==max_correct])
+            in_boards = np.array(boards)[num_correct_squares == max_correct][0]
+            print(in_boards, "\n")
+
+            no_training_pipe_issues = False
+            # return False, inference_pipe_results
+
+    return no_training_pipe_issues, inference_pipe_results
+    # return True, inference_pipe_results
 
 
 
@@ -295,7 +414,7 @@ def cur_hash_getter(fen_to_start,move_lists,max_possible_moves):
 
 
 def cur_boards_to_input_list_fn(boards):
-    return struct_array_to_ann_input_all_white(
+    return struct_array_to_ann_inputs(
         np.concatenate([
             create_node_info_from_python_chess_board(board) for board in boards]))
 
@@ -308,7 +427,40 @@ def cur_piece_to_filter_fn(piece):
         return 15-piece.piece_type
 
 
+def cur_tfrecords_writer(pgn_filename, output_filename):
+    create_database_from_pgn(
+        [pgn_filename],
+        data_writer=board_eval_data_writer_creator(
+            [1],
+            [True],
+            # For current use a dummy move generation would likely work and be much faster
+            comparison_move_generator=standard_comparison_move_generator,
+            print_frequency=None),
+        output_filenames=[output_filename],
+        print_info=False)
+
+
+def cur_tfrecords_to_features(filename):
+    input_generator,_ = one_hot_create_tf_records_input_data_fn(filename, 1, include_unoccupied=False, repeat=False)()
+    with tf.Session() as sess:
+        inputs = []
+        try:
+            while True:
+                inputs.append(sess.run(input_generator)[:,0,...])
+        except tf.errors.OutOfRangeError:
+            return np.concatenate(inputs)
+
+
 def full_test():
+    """
+    Runs every test relevant to Batch First's performance.
+
+    :return: A boolean value indicating if all tests were passed
+
+    TODO:
+    1) Add test to verify zero-window negamax search returns same result (bool) with or without use of the
+    Transposition Table (Currently checked manually by commenting out functions used to add boards to the TT)
+    """
 
     result_str = ["Failed", "Passed"]
 
@@ -316,59 +468,44 @@ def full_test():
 
     constants_results = test_constants_are_different_jitted()
 
-    print("Constants test:                             %s"%result_str[constants_results])
+    print("Constants test:                                               %s"%result_str[constants_results])
     
     jitclass_perft_results = full_perft_tester(
         lambda fen, depth: traditional_perft_test(create_board_state_from_fen(fen), depth))
 
-    print("PERFT test using JitClass:                  %s"%result_str[jitclass_perft_results])
-
+    print("PERFT test using JitClass:                                    %s"%result_str[jitclass_perft_results])
 
     scalar_perft_results = full_perft_tester(
-        lambda fen, depth: structured_scalar_perft_test(create_node_info_from_fen(fen, 0, 0), depth), max_expected_boards_to_test=20000000)
+        lambda fen, depth: structured_scalar_perft_test(create_node_info_from_fen(fen, 0, 0), depth))
 
-    print("PERFT test using NumPy structured scalar:   %s"%result_str[scalar_perft_results])
-
+    print("PERFT test using NumPy structured scalar:                     %s"%result_str[scalar_perft_results])
 
     move_verification_results = move_verification_tester(
         scalar_is_legal_move,
         lambda b: create_node_info_from_python_chess_board(b)[0])
 
-    print("Move legality verification test:            %s"%result_str[move_verification_results])
+    print("Move legality verification test:                              %s"%result_str[move_verification_results])
 
-    zobrist_hash_results = zobrist_hash_test(cur_hash_getter,num_sequences_to_test=5000, max_moves_per_test=40)
+    zobrist_hash_results = zobrist_hash_test(cur_hash_getter)
 
-    print("Incremental Zobrist hash test:              %s"%result_str[zobrist_hash_results])
+    print("Incremental Zobrist hash test:                                %s"%result_str[zobrist_hash_results])
 
-    input_pipe_results = inference_input_pipeline_test(
-        new_get_board_data,
-        cur_boards_to_input_list_fn,
-        DEFAULT_TESTING_FENS,
-        False,
-        cur_piece_to_filter_fn,
+    training_pipe_results, inference_pipe_results = complete_board_eval_tester(
+        tfrecords_writer=cur_tfrecords_writer,
+        feature_getter=cur_tfrecords_to_features,
+        inference_pipe_fn=get_board_data,
+        boards_to_input_for_inference=cur_boards_to_input_list_fn,
+        piece_to_filter_fn=cur_piece_to_filter_fn,
         ep_filter_index=1,
         castling_filter_indices=[8, 15])
 
-    if not input_pipe_results[0]:
-        flipped_input_pipe_results = inference_input_pipeline_test(
-            new_get_board_data,
-            cur_boards_to_input_list_fn,
-            DEFAULT_TESTING_FENS,
-            False,
-            cur_piece_to_filter_fn,
-            ep_filter_index=1,
-            castling_filter_indices=[8, 15],
-            flip_files=True)
-
-        print("Input pipeline test:                        %s but..."%result_str[input_pipe_results[0]])
-        print("Input pipeline with flipped files test:     %s"%result_str[flipped_input_pipe_results[0]])
-        input_pipe_results = flipped_input_pipe_results
-    else:
-        print("Input pipeline test:                        %s" % result_str[input_pipe_results[0]])
+    print("Board evaluation data creation and training pipeline test:    %s" % result_str[training_pipe_results])
+    print("Board evaluation inference pipeline test:                     %s" % result_str[inference_pipe_results])
 
 
 
-    if constants_results and jitclass_perft_results and scalar_perft_results and move_verification_results and zobrist_hash_results and input_pipe_results[0]:
+
+    if constants_results and jitclass_perft_results and scalar_perft_results and move_verification_results and zobrist_hash_results and training_pipe_results and inference_pipe_results:
         print("\nAll tests were passed!")
         return True
     else:
@@ -378,12 +515,5 @@ def full_test():
 
 
 
-
-
-
-
-
-
-
-
-full_test()
+if __name__ == "__main__":
+    full_test()

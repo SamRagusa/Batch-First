@@ -281,10 +281,9 @@ def power_set(iterable):
 
 
 def get_castling_lookup_tables():
-    possible_castling_rights = np.empty(2**4, dtype=np.uint64)
+    possible_castling_rights = np.zeros(2**4, dtype=np.uint64)
     for j, set in enumerate(power_set([BB_A1, BB_H1, BB_A8, BB_H8])):
         possible_castling_rights[j] = np.uint64(functools.reduce(lambda x,y: x | y, set, np.uint64(0)))
-
 
     white_turn_castling_tables = create_index_table(possible_castling_rights)
     black_turn_castling_tables = create_index_table(vectorized_flip_vertically(possible_castling_rights))

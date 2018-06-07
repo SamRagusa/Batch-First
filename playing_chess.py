@@ -104,7 +104,7 @@ class StockFishEngine(ChessEngine):
 #     model_path=move_scoring_model_path,
 #     output_model_path=move_scoring_model_path,
 #     output_filename="tensorrt_move_scoring_graph.pb",
-#     output_node_name="GatherNd_1")
+#     output_node_name="GatherNd_2")
 
 
 BOARD_EVAL_GRAPHDEF_FILENAME = "/srv/tmp/encoder_evaluation/conv_train_wide_and_deep_4/1526978123/tensorrt_eval_graph.pb"
