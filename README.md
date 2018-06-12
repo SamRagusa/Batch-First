@@ -1,22 +1,20 @@
 # Batch First
-In the Wu-Tang Clan song [Da Mystery Of Chessboxin'](https://youtu.be/pJk0p-98Xzc "YouTube Link"), you can find the following quote:
+Batch First is a JIT compiled chess engine which traverses the search tree in batches in a best-first manner, allowing for neural network batching, asynchronous GPU use, and vectorized CPU computations.  Utilizing NumPy's powerful ndarray for representing boards, TensorFlow for neural networks computations, and Numba to JIT compile it all, Batch First balances the rapid prototyping desired in artificial intelligence with the runtime efficiency needed for a competitive chess engine.
 
-> The game of chess, is like a sword fight.  You must think first, before you move.  Toad style is immensely strong, and immune to nearly any weapon.  When it's properly used, it's almost invincible.
+## Engine Characteristics
+The following table highlights a few key aspects of the Batch First engine. 
 
-The Batch First engine will embody these ideas.
+*Characteristic* | *Explanation / Reasoning* 
+:---: | ---
+**Written in Python** | Python is both easily readable and extremely flexible, but it's runtime speed has historically prevented it's use in competitive chess engines.  Through the use of high level packages, Batch First balances runtime speed and code readability
+**JIT Compiled** | To avoid the execution time of Python, Numba is used to JIT compile the Python code to native machine instructions using the LLVM compiler infrastructure
+**Batched ANN Inference** | By using a `K-best-first search` algorithm, evaluation of boards and moves can be done in batches, both minimizing the effect of latency and maximizing the throughput for GPUs
+**Priority Bins** | Best-first algorithms such as SSS* are often disregarded due to the cost of maintaining a global list of open nodes in priority order.  This is addressed by instead using a pseudo-priority order, separating nodes based on their binned heuristic values
+**Vectorized Asynchronous CPU Operations** | Through a combination of NumPy and Numba, the array oriented computations are vectorized and compiled to run while the ANNs are being evaluated, and with the Python GIL released
+ 
 
-# Current Methods
-- Using a **convolutional neural network architecture inspired by the movement of chess pieces** for both board evaluation and move scoring
-- Implementing a **zero-window k-best-first negamax search** algorithm to utilize batching for neural network inference run asynchronously on GPU, as well as better utilize multiple CPU cores
-- Using Numba to compile all Python code used for move generation to machine code with the LLVM compiler
-- Using a framework similar to MTD(f) to converge towards a boards negamax value
-
-# Things Being Working On 
-- Vectorizing array operations by means of the LLVM compiler's loop lifting
-- A semi-formal explanation of the engine's core components (e.g. a simple description of the negamax algorithm, and reasoning behind the neural network architecture used)
-
-# Dependencies
-The versions listed are the versions I'm currently using, but are not necessarily the only versions which will work.
+## Dependencies
+The versions listed are known to work, but are not necessarily the only versions which will work.
 - [TensorFlow](https://github.com/tensorflow/tensorflow) v1.8.0
 - [NumPy](https://github.com/numpy/numpy) v1.14.3
 - [Numba](https://github.com/numba/numba) v0.38.0
@@ -25,13 +23,15 @@ The versions listed are the versions I'm currently using, but are not necessaril
 
 The tools listed below can be used, but are not needed.  They provide speed improvements to the engine.
 - [TensorRT](https://developers.googleblog.com/2018/03/tensorrt-integration-with-tensorflow.html) to optimize ANN inference
-- [Intel Python Distribution](https://software.intel.com/en-us/distribution-for-python) for speed improvements to NumPy and Numba.
-   
+- [Intel Python Distribution](https://software.intel.com/en-us/distribution-for-python) for speed improvements to NumPy and Numba
 
-# Notes For Awesome Developers/People
-- This engine is still in development, and thus needs work.  If you have any ideas, questions, are interested in potentially working on the engine, or anything else, I encourage you to send me an email!
 
-# Other Information
-- Trained neural networks will be uploaded when hyperparameter tuning has been completely implemented/completed
-- Special thanks to the [python-chess](https://github.com/niklasf/python-chess) package which the tests rely on, and most of the move generation code is based on 
+## Miscellaneous Information
+- If you use this engine or the ideas it's built around to build or experiment with something interesting, please be vocal about it!
+- If you have any questions, ideas, or just want to say hi, feel free to get in contact with me!
+- Trained neural networks are not yet included (they still have some room to improve), but can/will be added if requested
+- Special thanks to the [python-chess](https://github.com/niklasf/python-chess) package which is heavily relied upon throughout the engine, and which most of the move generation code is based on
 
+
+## License
+Batch First is licensed under the GPL 3.  The full text can be found in the LICENSE.txt file.
