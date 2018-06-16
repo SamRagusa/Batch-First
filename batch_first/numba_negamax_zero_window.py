@@ -3,12 +3,10 @@ from collections import OrderedDict
 import chess.uci
 import time
 
-
 from .numba_board import *
 
-from .global_open_priority_nodes import PriorityBins
 from .board_jitclass import BoardState, generate_move_to_enumeration_dict, has_legal_move, is_in_check
-from .transposition_table import get_empty_hash_table, add_board_and_move_to_tt, choose_move
+from .transposition_table import add_board_and_move_to_tt, choose_move
 
 
 
@@ -20,7 +18,7 @@ from .transposition_table import get_empty_hash_table, add_board_and_move_to_tt,
 
 
 
-#(IMPORTANT) the constants below are only here to support older ANNs which use an the older mapping of moves
+#(IMPORTANT) the constants below are only here to support older ANNs which use the older mapping of moves
 #(defined in board_jitclass). They use the same names as those in engine_constants.py,
 # so if using the newer mapping, this must be prevented.
 MOVE_TO_INDEX_ARRAY = np.zeros(shape=[64,64],dtype=np.int32)
@@ -37,9 +35,7 @@ new_gamenode_type = nb.deferred_type()
 
 new_gamenode_spec = OrderedDict()
 
-#Ideally this would be a single Record, but I couldn't get that to compile yet
 new_gamenode_spec["board_struct"] = numba_node_info_type[:]
-
 new_gamenode_spec["parent"] = nb.optional(new_gamenode_type)
 
 
@@ -60,7 +56,6 @@ new_gamenode_type.define(GameNode.class_type.instance_type)
 
 @njit(nogil=True)
 def struct_array_to_ann_inputs(struct_array):
-
     byte_info = np.empty((4,len(struct_array)), dtype=np.uint8)  #[[ep_squares], [castling_lookup_indices], [white_kings], [black_kings]]
 
     potential_reversal = np.empty((7,len(struct_array)), dtype=np.uint64)
@@ -70,7 +65,6 @@ def struct_array_to_ann_inputs(struct_array):
     potential_reversal[2] = struct_array['bishops']
     potential_reversal[3] = struct_array['knights']
     potential_reversal[4] = struct_array['pawns']
-
 
     for j in range(len(struct_array)):
 
@@ -111,7 +105,6 @@ def struct_array_to_ann_inputs(struct_array):
     return np.expand_dims(potential_reversal[:5].transpose(), 1), np.expand_dims(potential_reversal[5:].transpose(),2), byte_info[0,:], byte_info[1,:], byte_info[2:,:].transpose()
 
 
-
 @njit
 def set_up_next_best_move(board_struct):
     board_struct['next_move_index'] = np.argmax(board_struct['unexplored_move_scores'])
@@ -123,31 +116,21 @@ def set_up_next_best_move(board_struct):
     return best_move_score
 
 
-
-@njit(nogil=True)
-def jitted_assign_move_scores(children, not_children, children_indices, not_children_indices, size_array, results, child_best_move_scores, not_child_best_move_scores):
-    num_children = len(children_indices)
-    child_cum_sum_sizes = np.cumsum(size_array[:num_children])
-    not_child_cum_sum_sizes = np.cumsum(size_array[num_children:])
-
-    for j in range(len(children_indices)):
-        children[children_indices[j]]['unexplored_move_scores'][:size_array[j]] = results[child_cum_sum_sizes[j] - size_array[j]:child_cum_sum_sizes[j]]
-        child_best_move_scores[j] = set_up_next_best_move(children[children_indices[j]])
-
-    for j in range(len(not_children_indices)):
-        not_children[not_children_indices[j]]['unexplored_move_scores'][:size_array[j + num_children]] = results[not_child_cum_sum_sizes[j] -size_array[j + num_children]:not_child_cum_sum_sizes[j]]
-        not_child_best_move_scores[j] = set_up_next_best_move(not_children[not_children_indices[j]])
-
-
 @njit(nogil=True)
 def move_scoring_helper(children, not_children, children_indices, not_children_indices):
-    if len(children_indices) != 0:
-        children_to_score = children[children_indices]
+    if len(children_indices) == 0:
+        if len(not_children_indices) == 0:
+            raise Exception(
+                "The function move_scoring_helper was just called but no nodes are designated to have their moves scored.  This shouldn't happen!")
+        else:
+            combined_to_score = not_children[not_children_indices]
+    else:
+        if len(not_children_indices) == 0:
+            combined_to_score = children[children_indices]
+        else:
+            combined_to_score = np.concatenate((children[children_indices], not_children[not_children_indices]))
 
-    if len(not_children_indices) != 0:
-        not_children_to_score = not_children[not_children_indices]
 
-    combined_to_score = np.concatenate((children_to_score, not_children_to_score))
     piece_bbs, occupied_bbs, ep_squares, castling_lookup_indices, kings = struct_array_to_ann_inputs(combined_to_score)
 
     # This should REALLY be using views of combined_to_score['children_left'], since there will never be 0 children_left or more than 255 (meaning a uint8 should work to represent the data)
@@ -169,21 +152,27 @@ def move_scoring_helper(children, not_children, children_indices, not_children_i
     return piece_bbs, occupied_bbs, ep_squares, castling_lookup_indices, kings, from_to_squares, size_array
 
 
-
 def start_move_scoring(children, not_children, children_indices, not_children_indices, move_eval_fn):
-    child_best_move_scores = np.zeros(len(children_indices), dtype=np.float32)
-    not_child_best_move_scores = np.zeros(len(not_children_indices), dtype=np.float32)
+    if len(children_indices) == 0:
+        if len(not_children_indices) == 0:
+            raise Exception(
+                "The function start_move_scoring was just called but no nodes are designated to have their moves scored.  This shouldn't happen!")
+        else:
+            combined_to_score = not_children[not_children_indices]
+    else:
+        if len(not_children_indices) == 0:
+            combined_to_score = children[children_indices]
+        else:
+            combined_to_score = np.concatenate((children[children_indices], not_children[not_children_indices]))
 
+    result_getter = [None]
     def set_move_scores():
-        for_ann = move_scoring_helper(children, not_children, children_indices, not_children_indices)
-        results = move_eval_fn(*for_ann)
-
-        jitted_assign_move_scores(children, not_children, children_indices, not_children_indices, for_ann[-1], results,
-                                  child_best_move_scores, not_child_best_move_scores)
+        result_getter[0] = move_eval_fn(*struct_array_to_ann_inputs(combined_to_score))
 
     t = threading.Thread(target=set_move_scores)
     t.start()
-    return t, child_best_move_scores, not_child_best_move_scores
+    return t, result_getter, combined_to_score
+
 
 
 @njit
@@ -196,14 +185,13 @@ def set_evaluation_scores(struct_array, to_set_mask, results):
 
 
 
-def start_board_evaluations(struct_array, to_score_mask, board_eval_fn):
+def start_board_evaluations(struct_array, to_score_mask, board_eval_fn, testing=False):
     """
     Start the evaluation of the depth zero nodes which were not previously terminated, and set their results to their
     best_value field.
 
     :return: The thread responsible for evaluating and setting the struct's best_value fields to the results
     """
-
     def evaluate_and_set():
         results = board_eval_fn(
             *struct_array_to_ann_inputs(
@@ -283,8 +271,8 @@ def depth_zero_should_terminate_array(struct_array, hash_table):
     4) Win/loss by checkmate
     5) Termination by information contained in the TT
 
-    MUST IMPLEMENT:
-    1) Draw by threefold repetition
+    TODO:
+    1) Check for draw by threefold repetition  (once complete it will abide by every rule of chess)
     """
     for j in range(len(struct_array)):
         if struct_array[j]['depth'] == 0:
@@ -345,8 +333,6 @@ def has_legal_tt_move(board_struct, hash_table):
                     return True
 
     return False
-
-
 
 
 @njit
@@ -516,20 +502,6 @@ def jitted_temp_set_node_from_altered_struct(node, board_struct):
 
 
 
-@njit
-def jitted_temp_set_node_move_score_info(node, board_struct):
-    """
-    NOTES:
-    1) This is VERY slow, and it's removal is a top priority.
-    2) Sometimes this is called when no values actually differ, I have a fix for this that seems to work on every
-    test I try, but the reasoning as to why it works isn't good enough for me to trust it completely.  Finishing that
-    up is likely one of the next things to be done.
-    """
-    node.board_struct[0]['unexplored_move_scores'][:] = board_struct['unexplored_move_scores'][:]
-    node.board_struct[0]['next_move_index'] = board_struct['next_move_index']
-
-
-
 def temp_set_nodes_to_altered_structs(node_array, struct_array):
     """
     NOTES:
@@ -539,15 +511,65 @@ def temp_set_nodes_to_altered_structs(node_array, struct_array):
         jitted_temp_set_node_from_altered_struct(node_array[j], struct_array[j])
 
 
+@njit
+def set_child_move_scores(child_structs, scored_child_indices, scores, score_size_array, cum_sum_sizes):
+    next_move_scores = np.empty(len(scored_child_indices),dtype=np.float32)
+    for j in range(len(scored_child_indices)):
+        child_structs[scored_child_indices[j]]['unexplored_move_scores'][:score_size_array[j]] = scores[cum_sum_sizes[j] - score_size_array[j]:cum_sum_sizes[j]]
+        next_move_scores[j] = set_up_next_best_move(child_structs[scored_child_indices[j]])
+    return next_move_scores
 
 
-def temp_set_tt_move_scores(node_array, struct_array):
-    """
-    NOTES:
-    1) This is VERY slow, and it's removal is a top priority.
-    """
-    for j in range(len(node_array)):
-        jitted_temp_set_node_move_score_info(node_array[j], struct_array[j])
+@njit
+def get_move_size_array_and_from_to_squares(combined_to_score, num_children):
+    # This should REALLY be using views of combined_to_score['children_left'], since there will never be 0
+    # children_left or more than 255 (meaning a uint8 should work to represent the data).  Also it's already a copy so
+    # altering the data is okay
+    size_array = combined_to_score[:]['children_left'].astype(np.int16)
+    size_array[num_children:][:] -= 1
+    from_to_squares = np.empty((np.sum(size_array), 2), dtype=np.int32)
+    cur_start_index = 0
+    for j in range(len(combined_to_score)):
+        if combined_to_score[j]['turn']:
+            from_to_squares[cur_start_index:cur_start_index + size_array[j], :] = combined_to_score[j]['unexplored_moves'][:size_array[j], :2]
+        else:
+            # These two lines should be done in 1 using slicing like above but Numba doesn't like it
+            from_to_squares[cur_start_index:cur_start_index + size_array[j], 0] = REVERSED_SQUARES[
+                combined_to_score[j]['unexplored_moves'][:size_array[j], 0]]
+
+            from_to_squares[cur_start_index:cur_start_index + size_array[j], 1] = REVERSED_SQUARES[
+                combined_to_score[j]['unexplored_moves'][:size_array[j], 1]]
+        cur_start_index += size_array[j]
+
+    return size_array, from_to_squares
+
+def complete_move_evaluation(combined_to_score, result_getter_fn, child_structs, adult_nodes, scored_child_indices, scored_adult_indices):
+    num_children = len(scored_child_indices)
+    adult_next_move_scores = np.empty(len(scored_adult_indices), dtype=np.float32)
+
+    size_array, from_to_squares = get_move_size_array_and_from_to_squares(combined_to_score, num_children)
+    cum_sum_sizes = np.cumsum(size_array)
+
+    scores = result_getter_fn([from_to_squares, size_array])
+
+    child_next_move_scores = set_child_move_scores(
+        child_structs,
+        scored_child_indices,
+        scores,
+        size_array[:num_children],
+        cum_sum_sizes[:num_children])
+
+    for j in range(len(scored_adult_indices)):
+        adult_index = j+num_children
+        cur_size = size_array[adult_index]
+        cur_cum_sum_size = cum_sum_sizes[adult_index]
+        cur_node = adult_nodes[scored_adult_indices[j]]
+
+        cur_node.board_struct[0]['unexplored_move_scores'][:cur_size] = scores[cur_cum_sum_size -  cur_size: cur_cum_sum_size]
+        adult_next_move_scores[j] = set_up_next_best_move(cur_node.board_struct[0])
+
+    return child_next_move_scores, adult_next_move_scores
+
 
 
 
@@ -599,13 +621,18 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
     to_score_not_child_moves_indices = np.arange(len(struct_batch))[child_was_from_tt_move_mask][tt_move_nodes_with_more_kids_indices]
 
 
+    # Now that staging has been implemented for move scoring, this must be started as soon as it knows exactly which
+    # nodes have moves to be scored.  This likely involves stopping the move generation when the first move for each
+    # board is discovered, and resuming after the boards which have moves to score have been given to TensorFlow
+    # (or after a thread with that task has been started)
     if len(to_score_child_moves_indices) != 0 or len(to_score_not_child_moves_indices) != 0:
-        move_thread, child_next_move_scores, not_child_next_move_scores = start_move_scoring(
+        move_thread, result_getter, moves_being_scored_structs = start_move_scoring(
             child_struct,
             struct_batch,
             to_score_child_moves_indices,
             to_score_not_child_moves_indices,
             move_eval_fn)
+
     else:
         move_thread = None
         child_next_move_scores = None
@@ -632,13 +659,16 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
         testing=testing)
 
 
-
     if not move_thread is None:
         move_thread.join()
 
-        # Set the boards who used TT moves to generate a child move scores in their respective nodes
-        temp_set_tt_move_scores(node_batch[to_score_not_child_moves_indices],struct_batch[to_score_not_child_moves_indices])
-
+        child_next_move_scores, not_child_next_move_scores = complete_move_evaluation(
+            moves_being_scored_structs,
+            result_getter[0],
+            child_struct,
+            node_batch,
+            to_score_child_moves_indices,
+            to_score_not_child_moves_indices)
 
 
     new_child_nodes = create_nodes_for_struct(
@@ -660,18 +690,12 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
     if not child_next_move_scores is None and len(child_next_move_scores) != 0:
             scores_to_return[num_not_child_scores:][child_struct[non_zero_depth_child_not_term_indices]['children_left'] != NEXT_MOVE_IS_FROM_TT_VAL] = child_next_move_scores
 
-
     return to_insert, scores_to_return
 
 
 
 
-def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, board_eval_fn, move_eval_fn, hash_table=None, print_info=False, full_testing=False):
-    open_node_holder = PriorityBins(bins_to_use, max_batch_size, testing=full_testing) #This will likely be put outside of this function long term
-
-    if hash_table is None:
-        hash_table = get_empty_hash_table()
-
+def do_alpha_beta_search_with_bins(root_game_node, open_node_holder, board_eval_fn, move_eval_fn, hash_table, print_info=False, full_testing=False):
     next_batch = np.array([root_game_node], dtype=np.object)
 
     if print_info or full_testing:
@@ -679,6 +703,10 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
         total_nodes_computed = 0
         given_for_insert = 0
         start_time = time.time()
+
+        if full_testing:
+            if open_node_holder.is_empty() and len(open_node_holder) != 0:
+                print("The open node holder given for the zero-window search has %d elements in it and .is_empty() returns: %s"%(len(open_node_holder), open_node_holder.is_empty()))
 
     while len(next_batch) != 0:
         if print_info or full_testing:
@@ -745,43 +773,37 @@ def do_alpha_beta_search_with_bins(root_game_node, max_batch_size, bins_to_use, 
 
 
 
-
-
 def create_root_game_node_from_fen(fen, depth=255, seperator=0):
     return GameNode(create_node_info_from_fen(fen, depth, seperator), None)
 
 
 def set_up_root_node(move_eval_fn, fen, depth=255, separator=0):
     root_node = create_root_game_node_from_fen(fen, depth, separator)
-    set_up_move_array(root_node.board_struct[0])
 
-    thread, _, _ =  start_move_scoring(
-        root_node.board_struct,
-        root_node.board_struct, #This isn't used but is needed to run
-        np.arange(1, dtype=np.int32),
-        np.arange(0, dtype=np.int32),
-        move_eval_fn)
+    node_array = root_node.board_struct
 
-    thread.join()
+    set_up_move_array(node_array[0])
+
+    for_ann = move_scoring_helper(
+        node_array,
+        node_array,  # doesn't do anything, but needed to work
+        np.arange(len(node_array), dtype=np.int32),
+        np.array([], dtype=np.int32))
+
+    move_scores = move_eval_fn(*for_ann[:-2])(for_ann[-2:])
+
+    root_node.board_struct[0]['unexplored_move_scores'][:len(move_scores)] = move_scores
     set_up_next_best_move(root_node.board_struct[0])
+
     return root_node
 
 
-
-
-def mtd_f(fen, depth, first_guess, min_window_to_confirm, board_eval_fn, move_eval_fn, guess_increment=.5, search_batch_size=1000, bins_to_use=None, hash_table=None, win_threshold=1000000, loss_threshold=-1000000, print_info=False, full_testing=False):
-    if hash_table is None:
-        hash_table = get_empty_hash_table()
-
-    if bins_to_use is None:
-        bins_to_use = np.arange(15, -15, -.025)
-
-
+def mtd_f(fen, depth, first_guess, min_window_to_confirm, open_node_holder, board_eval_fn, move_eval_fn, hash_table, guess_increment=.5, win_threshold=1000000, loss_threshold=-1000000, print_info=False, full_testing=False):
     counter = 0
     cur_guess = first_guess
     upper_bound = MAX_FLOAT32_VAL
     lower_bound = MIN_FLOAT32_VAL
-    while upper_bound -  min_window_to_confirm > lower_bound:
+    while upper_bound - min_window_to_confirm > lower_bound:
         if upper_bound == MAX_FLOAT32_VAL and lower_bound >= win_threshold:
             print("BREAKING MTD(F) LOOP FROM WIN THRESHOLD")
             break
@@ -800,17 +822,31 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, board_eval_fn, move_ev
         else:
             beta = lower_bound + (upper_bound - lower_bound) / 2
 
+
+        if full_testing:
+            if beta == beta - 1000 * np.finfo(np.float32).eps:
+                print("The beta decrement is ######LOST IN THE FLOAT POINT MATH#######", beta, beta - 1000 * np.finfo(np.float32).eps)################################################################################################################################################################################################################################################
         #This would ideally share the same tree, but updated for the new seperation value
         cur_root_node = set_up_root_node(move_eval_fn, fen, depth, beta - 1000*np.finfo(np.float32).eps)
 
-        cur_guess = do_alpha_beta_search_with_bins(cur_root_node, search_batch_size, bins_to_use, board_eval_fn, move_eval_fn, hash_table=hash_table, print_info=print_info, full_testing=full_testing)
+        cur_guess = do_alpha_beta_search_with_bins(
+            cur_root_node,
+            open_node_holder,
+            board_eval_fn,
+            move_eval_fn,
+            hash_table=hash_table,
+            print_info=print_info,
+            full_testing=full_testing)
+        # print(cur_guess)
+
         if cur_guess < beta:
             upper_bound = cur_guess
         else:
             lower_bound = cur_guess
 
         if print_info:
-            print("Finished iteration %d with lower and upper bounds (%f,%f)" % (counter+1, lower_bound, upper_bound))
+            print("Finished iteration %d with lower and upper bounds (%f,%f) after search returned %f" % (counter+1, lower_bound, upper_bound, cur_guess))
+
 
         counter += 1
 
@@ -822,30 +858,31 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, board_eval_fn, move_ev
 
 
 
-def iterative_deepening_mtd_f(fen, depths_to_search, batch_sizes, min_windows_to_confirm, board_eval_fn, move_eval_fn, first_guess=0, guess_increments=None, bin_sets=None, hash_table=None, win_threshold=1000000, loss_threshold=-1000000, print_info=False, full_testing=False):
-    if hash_table is None:
-        hash_table = get_empty_hash_table()
-
-    if bin_sets is None:
-        bin_sets = (np.arange(15, -15, -.025) for _ in range(len(depths_to_search)))
-
+def iterative_deepening_mtd_f(fen, depths_to_search, min_windows_to_confirm, open_node_holder, board_eval_fn, move_eval_fn, hash_table, first_guess=0, guess_increments=None, win_threshold=1000000, loss_threshold=-1000000, print_info=False, full_testing=False):
     if guess_increments is None:
         guess_increments = [5]*len(depths_to_search)
 
-    for depth, batch_size, window, increment, bins in zip(depths_to_search, batch_sizes, min_windows_to_confirm, guess_increments, bin_sets):
-        # print("Starting depth %d search"%depth)
+    for depth, window, increment in zip(depths_to_search, min_windows_to_confirm, guess_increments):
+        if print_info:
+            print("Starting depth %d search"%depth)
+
+
+        if first_guess >= win_threshold:
+            first_guess = win_threshold
+        elif first_guess <= loss_threshold:
+            first_guess = loss_threshold
+
         start_time = time.time()
         first_guess, tt_move, hash_table = mtd_f(
             fen,
             depth,
             first_guess,
             window,
+            open_node_holder,
             board_eval_fn,
             move_eval_fn,
-            guess_increment=increment,
-            search_batch_size=batch_size,
-            bins_to_use=bins,
             hash_table=hash_table,
+            guess_increment=increment,
             win_threshold=win_threshold,
             loss_threshold=loss_threshold,
             print_info=print_info,

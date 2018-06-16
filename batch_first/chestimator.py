@@ -11,7 +11,6 @@ from tensorflow.contrib import tensorrt as trt
 
 
 
-
 def get_predictor_from_graphdef(session, graphdef_filename, output_tensor, input_tensors, name_prefix=None, is_binary=True):
     with gfile.FastGFile(graphdef_filename, 'rb' if is_binary else 'r') as f:
         model_graph_def = tf.GraphDef()
@@ -28,12 +27,32 @@ def get_predictor_from_graphdef(session, graphdef_filename, output_tensor, input
         return test_predictor
 
 
+def get_move_predictor(session, graphdef_filename, output_stages_tensor_names, input_tensor_names, name_prefix=None, is_binary=True):
+    with gfile.FastGFile(graphdef_filename, 'rb' if is_binary else 'r') as f:
+        model_graph_def = tf.GraphDef()
+        model_graph_def.ParseFromString(compat.as_bytes(f.read()))
+
+        desired_tensors = tf.import_graph_def(
+            model_graph_def,
+            return_elements= output_stages_tensor_names + input_tensor_names,
+            name=name_prefix)
+
+        def start_move_prediction(*board_inputs):
+            handle = session.partial_run_setup(desired_tensors[:2], desired_tensors[2:])
+
+            #############THIS IS NOT RETURNING None, INSTEAD ITS RETURNING (all logits) AND THEYRE JUST BEING IGNORED, BUT THIS IS VERY CRUCIAL FOR SPEED###############
+            session.partial_run(handle, desired_tensors[0], dict(zip(desired_tensors[2: 7], board_inputs)))
+
+            return lambda move_info: session.partial_run(handle,
+                                                         desired_tensors[1],
+                                                         dict(zip(desired_tensors[7:], move_info)))
+
+        return start_move_prediction
+
+
+
 
 def get_inference_functions(eval_graphdef_file, move_graphdef_file):
-    """
-    The code relevant to move scoring has been commented out as it's not ready yet.
-    """
-
     sess = tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.3)))
 
     eval_output_tensor_name = "logit_layer/MatMul:0"
@@ -44,7 +63,7 @@ def get_inference_functions(eval_graphdef_file, move_graphdef_file):
         "castling_lookup_indices:0",
         "kings:0"]
 
-    move_scoring_output_tensor_name = "GatherNd_2:0"
+    move_scoring_stages_names = ["logit_layer/MatMul:0", "GatherNd_2:0"]
     move_scoring_input_tensor_names = eval_input_tensor_names + ["move_placeholder:0", "moves_per_board_placeholder:0"]
 
     evaluation_predictor = get_predictor_from_graphdef(
@@ -52,23 +71,21 @@ def get_inference_functions(eval_graphdef_file, move_graphdef_file):
         eval_graphdef_file,
         eval_output_tensor_name,
         eval_input_tensor_names,
-        "board_eval",
-        True)
+        "board_eval")
 
-    move_predictor = get_predictor_from_graphdef(
+    move_predictor = get_move_predictor(
         sess,
         move_graphdef_file,
-        move_scoring_output_tensor_name,
+        move_scoring_stages_names,
         move_scoring_input_tensor_names,
-        "move_scoring",
-        True)
+        "move_scoring")
+
+
 
 
     closer_fn = lambda: sess.close()
 
     return evaluation_predictor, move_predictor, closer_fn
-
-
 
 
 

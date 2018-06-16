@@ -512,9 +512,15 @@ def _attackers_mask(board_state, color, square, occupied):
     attackers = (
         (BB_KING_ATTACKS[square] & board_state.kings) |
         (BB_KNIGHT_ATTACKS[square] & board_state.knights) |
-        (RANK_ATTACK_ARRAY[square, khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[square] & occupied, 0)] & queens_and_rooks) |
-        (FILE_ATTACK_ARRAY[square, khash_get(FILE_ATTACK_INDEX_LOOKUP_TABLE, BB_FILE_MASKS[square] & occupied, 0)] & queens_and_rooks) |
-        (DIAG_ATTACK_ARRAY[square, khash_get(DIAG_ATTACK_INDEX_LOOKUP_TABLE, BB_DIAG_MASKS[square] & occupied, 0)] & queens_and_bishops) |
+        (RANK_ATTACK_ARRAY[
+             square,
+             khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[square] & occupied, 0)] & queens_and_rooks) |
+        (FILE_ATTACK_ARRAY[
+             square,
+             khash_get(FILE_ATTACK_INDEX_LOOKUP_TABLE, BB_FILE_MASKS[square] & occupied, 0)] & queens_and_rooks) |
+        (DIAG_ATTACK_ARRAY[
+             square,
+             khash_get(DIAG_ATTACK_INDEX_LOOKUP_TABLE, BB_DIAG_MASKS[square] & occupied, 0)] & queens_and_bishops) |
         (BB_PAWN_ATTACKS[color_index, square] & board_state.pawns))
 
     if color == TURN_WHITE:
@@ -640,7 +646,8 @@ def set_pseudo_legal_ep(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
             BB_PAWN_ATTACKS[WHITE, board_state['ep_square']] & BB_RANKS[3])
 
     for capturer in scan_reversed(capturers):
-        board_state['unexplored_moves'][board_state.children_left] = np.array([capturer, board_state['ep_square'], 0],dtype=np.uint8)
+        board_state['unexplored_moves'][board_state.children_left] = np.array([capturer, board_state['ep_square'], 0],
+                                                                              dtype=np.uint8)
         board_state['children_left'] += 1
 
 
@@ -686,7 +693,8 @@ def set_castling_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
         if not ((board_state['occupied'] ^ king ^ rook) & (empty_for_king | empty_for_rook) or
                 _attacked_for_king(board_state, empty_for_king, board_state['occupied'] ^ king) or
                 _castling_uncovers_rank_attack(board_state, rook, king_to)):
-            board_state['unexplored_moves'][board_state.children_left, :] = _from_chess960_tuple(board_state, msb(king), candidate)
+            board_state['unexplored_moves'][board_state.children_left, :] = _from_chess960_tuple(board_state, msb(king),
+                                                                                                 candidate)
             board_state['children_left'] += 1
 
 
@@ -714,7 +722,8 @@ def set_pseudo_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
 
         moves = attacks_mask(board_state, from_square) & ~our_pieces & to_mask
         for to_square in scan_reversed(moves):
-            board_state['unexplored_moves'][board_state.children_left, :] = np.array([from_square, to_square, 0],dtype=np.uint8)
+            board_state['unexplored_moves'][board_state.children_left, :] = np.array([from_square, to_square, 0],
+                                                                                     dtype=np.uint8)
             board_state['children_left'] += 1
 
     # Generate castling moves.
@@ -738,10 +747,12 @@ def set_pseudo_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
             if square_rank(to_square) in [0, 7]:
                 board_state['unexplored_moves'][board_state.children_left:board_state.children_left+4, 0] = from_square
                 board_state['unexplored_moves'][board_state.children_left:board_state.children_left+4, 1] = to_square
-                board_state['unexplored_moves'][board_state.children_left:board_state.children_left+4, 2] = (QUEEN, ROOK, BISHOP, KNIGHT)
+                board_state['unexplored_moves'][board_state.children_left:board_state.children_left + 4, 2] = (
+                QUEEN, ROOK, BISHOP, KNIGHT)
                 board_state['children_left'] += 4
             else:
-                board_state['unexplored_moves'][board_state.children_left, :] = np.array([from_square, to_square, 0],dtype=np.uint8)
+                board_state['unexplored_moves'][board_state.children_left, :] = np.array([from_square, to_square, 0],
+                                                                                         dtype=np.uint8)
                 board_state['children_left'] += 1
 
     # Prepare pawn advance generation.
@@ -765,10 +776,12 @@ def set_pseudo_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
         if square_rank(to_square) in [0, 7]:
             board_state['unexplored_moves'][board_state.children_left:board_state.children_left + 4, 0] = from_square
             board_state['unexplored_moves'][board_state.children_left:board_state.children_left + 4, 1] = to_square
-            board_state['unexplored_moves'][board_state.children_left:board_state.children_left + 4, 2] = (QUEEN, ROOK, BISHOP, KNIGHT)
+            board_state['unexplored_moves'][board_state.children_left:board_state.children_left + 4, 2] = (
+            QUEEN, ROOK, BISHOP, KNIGHT)
             board_state['children_left'] += 4
         else:
-            board_state['unexplored_moves'][board_state.children_left, :] = np.array([from_square, to_square, 0],dtype=np.uint8)
+            board_state['unexplored_moves'][board_state.children_left, :] = np.array([from_square, to_square, 0],
+                                                                                     dtype=np.uint8)
             board_state['children_left'] += 1
 
     # Generate double pawn moves.
@@ -778,7 +791,8 @@ def set_pseudo_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
         else:
             from_square = to_square - 16
 
-        board_state['unexplored_moves'][board_state.children_left,:] = np.array([from_square, to_square, 0],dtype=np.uint8)
+        board_state['unexplored_moves'][board_state.children_left, :] = np.array([from_square, to_square, 0],
+                                                                                 dtype=np.uint8)
         board_state['children_left'] += 1
 
     # Generate en passant captures.

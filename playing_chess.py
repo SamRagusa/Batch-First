@@ -11,8 +11,6 @@ from batch_first.chestimator import get_inference_functions
 
 
 
-
-
 def play_one_game(engine1, engine2, print_info=False):
     """
     Given two objects which inherit the ChessEngine class this function will officiate one game of chess between the
@@ -75,63 +73,70 @@ class StockFishEngine(ChessEngine):
         return  self.stockfish_ai.go(movetime=self.move_time).bestmove
 
 
+if __name__ == "__main__":
+
+    # temp_piece_values = np.array([900, 500, 300, 300, 100], dtype=np.float32)
+    # @nb.njit(nogil=True)
+    # def piece_sum_eval(pieces, occupied_bbs, unused_1, unused_2, unused_3):
+    #     """
+    #     NOTES:
+    #     1) This doesn't take into account castling rooks anymore, but it's really only used to test stuff so no no biggie
+    #     """
+    #     piece_counts = vectorized_popcount(np.bitwise_and(pieces, occupied_bbs))
+    #     return np.expand_dims(np.sum(
+    #         temp_piece_values * (piece_counts[:, 0].view(np.int8) - piece_counts[:, 1].view(np.int8)).astype(
+    #             np.float32), axis=1), axis=1)
+    #
+    #
+    # @nb.njit(nogil=True)
+    # def random_move_eval(unused_1, unused_2, unused_3, unused_4, unused_5, unused_6, num_moves_per_board):
+    #     return np.random.rand(np.sum(num_moves_per_board))
 
 
 
-# temp_piece_values = np.array([900,500,300,300,100,500],dtype=np.float32)
-# @nb.njit(nogil=True)
-# def piece_sum_eval(pieces, occupied_bbs, unused):
-#     piece_counts = vectorized_popcount(np.bitwise_and(pieces[...,1:], occupied_bbs))
-#     return np.expand_dims(np.sum(temp_piece_values*(piece_counts[:,0].view(np.int8) - piece_counts[:,1].view(np.int8)).astype(np.float32),axis=1),axis=1)
-#
-# @nb.njit(nogil=True)
-# def random_move_eval(unused_1, unused_2, unused_3, unused_4, num_moves_per_board):
-#     return np.random.rand(np.sum(num_moves_per_board))
+    # board_eval_model_path = "/srv/tmp/encoder_evaluation_helper/sf_data_attempts/sf_data_crazy_network_13/1529028437"
+    # save_model_as_graphdef_for_serving(
+    #     model_path=board_eval_model_path,
+    #     output_model_path=board_eval_model_path,
+    #     output_filename="tensorrt_eval_graph.pb",
+    #     output_node_name="logit_layer/MatMul",
+    #     max_batch_size=40000)
+
+    # move_scoring_model_path = "/srv/tmp/move_scoring_1/pre_commit_test_1/1528363445"
+    # save_model_as_graphdef_for_serving(
+    #     model_path=move_scoring_model_path,
+    #     output_model_path=move_scoring_model_path,
+    #     output_filename="tensorrt_move_scoring_graph.pb",
+    #     output_node_name="GatherNd_2",
+    #     # trt_memory_fraction=.45,
+    #     max_batch_size=40000)
 
 
 
 
+    BOARD_EVAL_GRAPHDEF_FILENAME = "/srv/tmp/encoder_evaluation_helper/sf_data_attempts/sf_data_crazy_network_13/1529028437/tensorrt_eval_graph.pb"
+    MOVE_SCORING_GRAPHDEF_FILENAME = "/srv/tmp/move_scoring_1/pre_commit_test_1/1528363445/tensorrt_move_scoring_graph.pb"
 
-# board_eval_model_path = "/srv/tmp/encoder_evaluation/conv_train_wide_and_deep_4/1526978123"
-# save_model_as_graphdef_for_serving(
-#     model_path=board_eval_model_path,
-#     output_model_path=board_eval_model_path,
-#     output_filename="tensorrt_eval_graph.pb",
-#     output_node_name="add")#"logit_layer/MatMul")
-
-# move_scoring_model_path = "/srv/tmp/move_scoring_1/pre_commit_test_1/1527820525"
-# save_model_as_graphdef_for_serving(
-#     model_path=move_scoring_model_path,
-#     output_model_path=move_scoring_model_path,
-#     output_filename="tensorrt_move_scoring_graph.pb",
-#     output_node_name="GatherNd_2")
-
-
-BOARD_EVAL_GRAPHDEF_FILENAME = "/srv/tmp/encoder_evaluation/conv_train_wide_and_deep_4/1526978123/tensorrt_eval_graph.pb"
-MOVE_SCORING_GRAPHDEF_FILENAME = "/srv/tmp/move_scoring_1/pre_commit_test_1/1527820525/tensorrt_move_scoring_graph.pb"
-
-BOARD_PREDICTOR, MOVE_PREDICTOR, PREDICTOR_CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILENAME, MOVE_SCORING_GRAPHDEF_FILENAME)
+    BOARD_PREDICTOR, MOVE_PREDICTOR, PREDICTOR_CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILENAME, MOVE_SCORING_GRAPHDEF_FILENAME)
 
 
 
 
-first_move_scoring_testing_filename = "/srv/databases/chess_engine/one_rand_per_board_data/move_scoring_testing_set_1.npy"
+    first_move_scoring_testing_filename = "/srv/databases/chess_engine/one_rand_per_board_data/move_scoring_testing_set_1.npy"
 
-batch_first_engine = BatchFirstEngine(5, BOARD_PREDICTOR, MOVE_PREDICTOR, first_move_scoring_testing_filename)
+    batch_first_engine = BatchFirstEngine(4, BOARD_PREDICTOR, MOVE_PREDICTOR, first_move_scoring_testing_filename)
 
+    stockfish_engine = StockFishEngine("stockfish-8-linux/Linux/stockfish_8_x64")
 
-
-# stockfish_engine = StockFishEngine("stockfish-8-linux/Linux/stockfish_8_x64")
-
-random_engine = RandomEngine()
+    random_engine = RandomEngine()
 
 
-for j in range(1):
-    play_one_game(batch_first_engine, random_engine, True)
+    for j in range(1):
+        play_one_game(batch_first_engine, random_engine, True)
 
 
 
-PREDICTOR_CLOSER()
+    PREDICTOR_CLOSER()
 
 
 

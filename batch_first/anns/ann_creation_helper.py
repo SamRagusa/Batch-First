@@ -17,9 +17,9 @@ from tensorflow.contrib import tensorrt as trt
 
 def save_model_as_graphdef_for_serving(model_path, output_model_path, output_filename, output_node_name, model_tags="serve", trt_memory_fraction=.4, total_video_memory=1.1e10, max_batch_size=25000, as_text=False):
 
-    #This would ideally be 1 instead of .8, but the GPU that this is running on is responsible for things like graphics
-    with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.8-trt_memory_fraction))) as sess:
-        board_eval_graph = tf.train.import_meta_graph(tf.saved_model.loader.load(sess, [model_tags], model_path))
+    #This would ideally be 1 instead of .75, but the GPU that this is running on is responsible for things like graphics
+    with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.75-trt_memory_fraction))) as sess:
+        tf.saved_model.loader.load(sess, [model_tags], model_path)
 
         constant_graph_def = tf.graph_util.convert_variables_to_constants(sess, tf.get_default_graph().as_graph_def(), [output_node_name])
 
@@ -35,35 +35,69 @@ def save_model_as_graphdef_for_serving(model_path, output_model_path, output_fil
 
 
 
-
-def build_fully_connected_layers_with_batch_norm(the_input, shape, kernel_initializer, mode, num_previous_fully_connected_layers=0, activation_summaries=[], scope_prefix=""):
+def build_fully_connected_layers_with_batch_norm(the_input, shape, kernel_initializer, mode,
+                                                       activation_summaries=[], scope_prefix=""):
     """
-    a function to build the fully connected layers with batch normalization onto the computational
-    graph from given specifications.
+    Builds fully connected layers with batch normalization onto the computational graph of the desired shape.
 
-    shape of the format:
-    [num_neurons_layer_1,num_neurons_layer_2,...,num_neurons_layer_n]
+
+    The following are a few examples of the shapes that can be given, and how the layers are built
+
+    shape = [512, 256, 128]
+    result: input --> 512 --> 256 --> 128
+
+    shape = [[25, 75], [200], 100, 75]
+    result: concat((input --> 25 --> 75), (input --> 200)) --> 100 --> 75
+
+    More complicated shapes can be used by having recursive modules like the following
+    shape = [[[100], [50, 50]], [200, 50], [75], 100, 20]
     """
-    for index, size in enumerate(shape):
-        with tf.variable_scope(scope_prefix + "FC_" + str(num_previous_fully_connected_layers + index + 1)):
-            temp_pre_activation = tf.layers.dense(
-                inputs=the_input,
-                units=size,
-                use_bias=False,
-                kernel_initializer=kernel_initializer(),
-                name="layer")
+    if len(shape) == 0:
+        return the_input
 
-            temp_batch_normalized = tf.layers.batch_normalization(temp_pre_activation,
-                                                                  training=(mode == tf.estimator.ModeKeys.TRAIN),
-                                                                  fused=True)
+    module_outputs = []
+    for j, inner_modules in enumerate(shape):
+        if isinstance(inner_modules, list):
+            output, activation_summaries = build_fully_connected_layers_with_batch_norm(
+                the_input,
+                inner_modules,
+                kernel_initializer,
+                mode,
+                activation_summaries,
+                scope_prefix="%sfc_module_%d/" % (scope_prefix, j + 1),
+            )
+            module_outputs.append(output)
+        else:
+            if len(module_outputs) == 1:
+                the_input = module_outputs[0]
+            elif len(module_outputs) > 1:
+                the_input = tf.concat(module_outputs, axis=1)
 
-            temp_layer_output = tf.nn.relu(temp_batch_normalized)
+            for i, layer_shape in enumerate(shape[j:]):
 
-            the_input = temp_layer_output
+                with tf.variable_scope(scope_prefix + "FC_" + str(i + 1)):
+                    pre_activation = tf.layers.dense(
+                        inputs=the_input,
+                        units=layer_shape,
+                        use_bias=False,
+                        kernel_initializer=kernel_initializer(),
+                        name="layer")
 
-        activation_summaries.append(layers.summarize_activation(temp_layer_output))
+                    batch_normalized = tf.layers.batch_normalization(pre_activation,
+                                                                     training=(mode == tf.estimator.ModeKeys.TRAIN),
+                                                                     fused=True)
 
-    return the_input, activation_summaries
+                    the_input = tf.nn.relu(batch_normalized)
+                activation_summaries.append(layers.summarize_activation(the_input))
+
+            module_outputs = [the_input]
+            break
+
+    if len(module_outputs) == 1:
+        return module_outputs[0], activation_summaries
+
+    return tf.concat(module_outputs, axis=1), activation_summaries
+
 
 
 
@@ -186,9 +220,6 @@ def build_transposed_inception_module_with_batch_norm(the_input, module, kernel_
 
         return tf.concat([temp_input for temp_input in path_outputs], 3), activation_summaries
 
-
-
-
     
 
 
@@ -273,7 +304,6 @@ def encoder_builder_fn(features, labels, mode, params):
     loss_summary = None
 
     empty_squares = tf.expand_dims(1 - tf.reduce_sum(input_layer, axis=3), axis=3)
-    print(empty_squares)
     one_hot_piece_labels = tf.concat([input_layer, empty_squares], axis=3)
 
 
@@ -318,18 +348,14 @@ def encoder_builder_fn(features, labels, mode, params):
 
 
     # Generate predictions
-    predictions = {
-        "scores" : logits
-    }
+    predictions = {"scores" : logits}
 
     # A dictionary for scoring used when exporting model for serving.
-    the_export_outputs = {
-        "serving_default" : tf.estimator.export.RegressionOutput(value=logits)}
-
+    the_export_outputs = {"serving_default" : tf.estimator.export.RegressionOutput(value=logits)}
 
     # Create the validation metrics
     validation_metrics = None
-    if mode != tf.estimator.ModeKeys.PREDICT:
+    if mode == tf.estimator.ModeKeys.EVAL:
         piece_predictions = tf.nn.softmax(piece_logit_slices, axis=3)
 
         calculated_diff = piece_predictions - one_hot_piece_labels
@@ -394,8 +420,6 @@ def board_eval_model_fn(features, labels, mode, params):
         input_layer = tf.reshape(features, [-1, 8, 8, params['num_input_filters']])
 
 
-
-
     inception_module_outputs, activation_summaries = build_convolutional_modules(
         input_layer,
         params['inception_modules'],
@@ -441,27 +465,16 @@ def board_eval_model_fn(features, labels, mode, params):
         # There are a few other methods I've been trying out in commented out, though none seem to be as good as
         # the one proposed in Deep Pink
         with tf.variable_scope("loss"):
-            ######################################################################################################
             # adjusted_equality_sum = (original_pos + CONSTANT + desired_pos)
-            adjusted_equality_sum = 2*(original_pos + desired_pos)
+            adjusted_equality_sum = (original_pos + desired_pos)
             adjusted_real_rand_sum = (random_pos - desired_pos)
 
-
-            # real_greater_rand_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(desired_pos - random_pos)))
             real_greater_rand_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(adjusted_real_rand_sum)))
 
-
-
-
-
+            # test_new_loss_component = tf.reduce_mean(-tf.log(tf.sigmoid(random_pos + original_pos)))
             ## test_new_loss_component = tf.reduce_mean(-tf.log(tf.sigmoid(-(original_pos + random_pos))))
-            ## test_new_loss_component_summary = tf.summary.scalar("test_new_loss_component", test_new_loss_component)
+            # test_new_loss_component_summary = tf.summary.scalar("test_new_loss_component", test_new_loss_component)
 
-
-            # loss = real_greater_rand_scalar_loss +  old_new_squared_scalar_loss
-
-            ## test_equality_loss = tf.reduce_mean(
-            #     -tf.log(tf.sigmoid(adjusted_equality_sum)) - tf.log(tf.sigmoid( -adjusted_equality_sum)))
             equality_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(adjusted_equality_sum)))
             negative_equality_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid( -adjusted_equality_sum)))
 
@@ -474,27 +487,29 @@ def board_eval_model_fn(features, labels, mode, params):
             negative_equality_sum_loss_summary = tf.summary.scalar("mean_negative_original_plus_desired", negative_equality_scalar_loss)
 
 
-            # loss = real_greater_rand_scalar_loss + test_equality_loss
+            # loss = real_greater_rand_scalar_loss
+            # loss = real_greater_rand_scalar_loss + test_new_loss_component
             loss = real_greater_rand_scalar_loss + equality_scalar_loss + negative_equality_scalar_loss
             # loss = real_greater_rand_scalar_loss + equality_scalar_loss + negative_equality_scalar_loss + test_new_loss_component
+
             loss_summary = tf.summary.scalar("loss", loss)
 
             ########################################################################################################
 
-            # # to_compare =tf.squeeze(tf.concat([desired_pos, random_pos], 1))
-            # to_compare = tf.squeeze(tf.concat([random_pos,desired_pos], 1))
-            # # to_compare = tf.reshape(to_split, [-1,3])
-            # the_labels = tf.squeeze(tf.concat([tf.ones_like(desired_pos),tf.zeros_like(random_pos)], 1))
+            # the_labels = tf.tile(tf.constant([[0, 0, 1]]), [tf.shape(to_split)[0], 1])
             #
-            # old_new_squared_scalar_loss = tf.reduce_mean(tf.square((original_pos + desired_pos)))
-            # softmax_inequality_loss = tf.losses.sigmoid_cross_entropy(the_labels, to_compare)
+            # softmax_logits = to_split * tf.constant([[-1,1,1]], dtype=tf.float32)
             #
-            # loss = old_new_squared_scalar_loss + softmax_inequality_loss
-            # # loss = softmax_inequality_loss
+            # cross_entropy_loss = tf.losses.softmax_cross_entropy(the_labels, softmax_logits)
             #
-            # old_real_summary = tf.summary.scalar("old_real_squared_loss", old_new_squared_scalar_loss)
-            # softmax_summary = tf.summary.scalar("softmax_inequality_loss", softmax_inequality_loss)  #THIS SHOULD ALL ACTUALLY BE CALLED SIGMOID INEQUALITY LOSS@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+            # old_real_sum_squared_scalar_loss = tf.reduce_mean(tf.square(2*(original_pos + desired_pos)))
+            #
+            # loss = cross_entropy_loss + old_real_sum_squared_scalar_loss
+            #
+            # cross_entropy_summary = tf.summary.scalar("cross_entropy_loss", cross_entropy_loss)
+            # old_real_sum_squared_summary = tf.summary.scalar("old_real_sum_squared_loss", old_real_sum_squared_scalar_loss)
             # loss_summary = tf.summary.scalar("loss", loss)
+
 
 
     # Configure the Training Op (for TRAIN mode)
@@ -510,28 +525,18 @@ def board_eval_model_fn(features, labels, mode, params):
             summaries=params['train_summaries'])
 
 
-    # Generate predictions (should be None, but it doesn't allow for that)
-    # predictions = None
-    # if mode != tf.estimator.ModeKeys.PREDICT:
-    predictions = {
-        # "real_rand_guessing": tf.greater(desired_pos, random_pos)
-        "scores" : logits
-    }
+    # Generate predictions
+    predictions = {"scores" : logits}
 
     # A dictionary for scoring used when exporting model for serving.
-    the_export_outputs = {
-        "serving_default" : tf.estimator.export.RegressionOutput(value=logits)}
-
+    the_export_outputs = {"serving_default" : tf.estimator.export.RegressionOutput(value=logits)}
 
 
     # Create the validation metrics
     validation_metrics = None
     if mode != tf.estimator.ModeKeys.PREDICT:
-        # unstacked_input = tf.unstack(input_layer, axis=3)
-
-
+        old_plus_desired = original_pos + desired_pos
         rand_real_diff = random_pos - desired_pos
-        old_plus_desired = original_pos + desired_pos + .01
 
         abs_rand_real_diff = tf.abs(rand_real_diff)
         # mean_abs_rand_real_diff = tf.reduce_mean(abs_rand_real_diff)
@@ -542,13 +547,12 @@ def board_eval_model_fn(features, labels, mode, params):
         abs_randreal_realold_ratio = tf.reduce_mean(rand_real_diff) / mean_abs_old_plus_desired
 
 
-
         to_create_metric_dict = {
             "metrics/rand_vs_real_accuracy" : tf.cast(tf.less(desired_pos, random_pos), tf.float32),
             "metrics/mean_dist_rand_real" : rand_real_diff,
             "metrics/mean_abs_rand_real_diff" : abs_rand_real_diff,
             "metrics/mean_dist_old_real" : old_plus_desired,
-            "metrics/mean_abs_dist_old_real" : abs_old_plus_desired,
+            "metrics/mean_abs_dist_old_real" : mean_abs_old_plus_desired,#abs_old_plus_desired,
             "metrics/abs_randreal_realold_ratio" : abs_randreal_realold_ratio,
 
             "metrics/mean_old_pos" : original_pos,
@@ -558,12 +562,17 @@ def board_eval_model_fn(features, labels, mode, params):
             "metrics/mean_abs_new_pos": tf.abs(desired_pos),
             "metrics/mean_abs_random_pos": tf.abs(random_pos),
 
+            # "loss/cross_entropy_loss" : (cross_entropy_loss, cross_entropy_summary),
+            # "loss/old_real_sum_squared_loss" : (old_real_sum_squared_scalar_loss, old_real_sum_squared_summary),
+
+            # "loss/test_new_loss_component" : (test_new_loss_component, test_new_loss_component_summary),
+
             "loss/real_greater_rand_loss" : (real_greater_rand_scalar_loss, real_rand_loss_summary),
             "loss/mean_original_plus_desired_loss" : (equality_scalar_loss, equality_sum_loss_summary),
             "loss/mean_negative_original_plus_desired" : (negative_equality_scalar_loss, negative_equality_sum_loss_summary),
-            "loss/loss" : (loss, loss_summary),
-            "loss/ratio_old_new_sum_loss_to_negative_sum" : ratio_old_new_sum_loss_to_negative_sum,
+            "loss/ratio_old_new_sum_loss_to_negative_sum": ratio_old_new_sum_loss_to_negative_sum,
 
+            "loss/loss" : (loss, loss_summary),
         }
 
 
@@ -576,7 +585,6 @@ def board_eval_model_fn(features, labels, mode, params):
     summary_hook = tf.train.SummarySaverHook(save_steps=params['log_interval'],
                                              output_dir=params['model_dir'],
                                              summary_op=merged_summaries)
-
 
 
     # Return the EstimatorSpec object
@@ -609,7 +617,6 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
 
 
     if mode == tf.estimator.ModeKeys.PREDICT:
-        print(features)
         input_layer = features["data"]
 
         # legal_move_indices = features["move_indices"]
@@ -650,7 +657,6 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
 
     loss = None
     train_op = None
-
 
 
 
@@ -713,21 +719,15 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
 
 
     # Generate predictions
-    predictions = {
-        "move_values": logits,}
-        # "important_logits":important_logits}
-
+    predictions = {"move_values": logits}
 
     # A dictionary for scoring used when exporting model for serving.
-    the_export_outputs = {
-        "serving_default": tf.estimator.export.ClassificationOutput(scores=important_logits),
-    }
+    the_export_outputs = {"serving_default": tf.estimator.export.ClassificationOutput(scores=important_logits)}
 
 
     # Create the validation metrics
     validation_metrics = None
     if mode != tf.estimator.ModeKeys.PREDICT:
-
         mean_important_logits = tf.reduce_mean(important_logits)
         important_logits_minus_labels = important_logits-important_labels
         mean_important_minus_labels = tf.reduce_mean(important_logits_minus_labels)
@@ -799,7 +799,7 @@ def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, includ
             else:
                 dataset = dataset.map(lambda x: tf.one_hot(x-1, 15), num_parallel_calls=num_things_in_parallel)
 
-            dataset = dataset.prefetch(1)#num_things_in_parallel)#buffer_size=batch_size)
+            dataset = dataset.prefetch(buffer_size=num_things_in_parallel)
 
             if repeat:
                 dataset = dataset.repeat()

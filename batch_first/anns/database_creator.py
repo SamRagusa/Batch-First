@@ -117,7 +117,7 @@ def get_feature_array(white_info):
 
 
 
-class BoardData:
+class BoardData(object):
     """
     A class to store information relevant to a single game board, such as moves chosen by
     players (and their occurrences).
@@ -500,9 +500,44 @@ def board_info_numpy_file_writer(the_dict, output_filenames):
 
 
 
+def stockfish_move_generator_creator(sf_location, sf_threads, sf_time):
+
+    stockfish_ai = chess.uci.popen_engine(sf_location)
+    stockfish_ai.setoption({"threads" : sf_threads})
 
 
+    def comparison_fn(board, data):
+        py_board = chess.Board()
 
+        py_board.kings = board.kings
+        py_board.queens = board.queens
+        py_board.rooks = board.rooks
+        py_board.bishops = board.bishops
+        py_board.knights = board.knights
+        py_board.pawns = board.pawns
+
+        py_board.occupied = board.occupied
+        py_board.occupied_co[True] = board.occupied_w
+        py_board.occupied_co[False] = board.occupied_b
+
+        py_board.castling_rights = board.castling_rights
+
+        py_board.ep_square = board.ep_square
+
+        py_board.turn = board.turn
+
+        move_wasnt_in_computed_data_fn = lambda m : data.moves.get((m.from_square, m.to_square, None if m.promotion == 0 else m.promotion)) is None
+
+        moves_to_search = [move for move in py_board.generate_legal_moves() if move_wasnt_in_computed_data_fn(move)]
+
+        stockfish_ai.position(py_board)
+
+        chosen_move = stockfish_ai.go(searchmoves=moves_to_search, movetime=sf_time).bestmove
+
+        yield Move(chosen_move.from_square, chosen_move.to_square, 0 if chosen_move.promotion is None else chosen_move.promotion)
+
+
+    return comparison_fn
 
 
 
@@ -525,10 +560,7 @@ if __name__ == "__main__":
 
     pgn_file_paths = list(map(lambda year, num : "/srv/databases/from_pycharm/fics/ficsgamesdb_%d_standard2000_nomovetimes_%s.pgn"%(year, num), range(1999,2017), pgn_file_nums))
 
-    final_dataset_filenames = list(
-        map(
-            lambda x: "/srv/databases/chess_engine/full_9/" + x,
-            [
+    pickle_filenames = [
                 "encoder_training_set_0.pkl",
                 "encoder_training_set_1.pkl",
                 "encoder_training_set_2.pkl",
@@ -549,9 +581,10 @@ if __name__ == "__main__":
                 "move_scoring_training_set_4.pkl",
                 "move_scoring_validation_set_0.pkl",
                 "move_scoring_testing_set_0.pkl",
-                ]))
+                ]
+    final_dataset_filenames = list(map(lambda x: "/srv/databases/chess_engine/full_9/" + x, pickle_filenames))
 
-
+    temp_dataset_filenames = list(map(lambda x: "/srv/databases/chess_engine/sf_chosen_moves/" + x, pickle_filenames))
 
     file_ratios = [.05]*len(final_dataset_filenames)
     for_deep_pink_loss_use = [False]*len(final_dataset_filenames)
@@ -576,54 +609,55 @@ if __name__ == "__main__":
 
 
 
-    BOARD_EVAL_GRAPHDEF_FILE = "/srv/tmp/encoder_evaluation/normal_next_try_4_regulated/1528279891/tensorrt_eval_graph.pb"
-    TEMP_STR = "/srv/tmp/move_scoring_1/pre_commit_test_1/1528279921/tensorrt_move_scoring_graph.pb"
+    # BOARD_EVAL_GRAPHDEF_FILE = "/srv/tmp/encoder_evaluation/normal_next_try_4_regulated/1528279891/tensorrt_eval_graph.pb"
+    # TEMP_STR = "/srv/tmp/move_scoring_1/pre_commit_test_1/1528279921/tensorrt_move_scoring_graph.pb"
+    #
+    # BOARD_PREDICTOR, _, BOARD_PREDICTOR_CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILE, TEMP_STR)
 
-    BOARD_PREDICTOR, _, BOARD_PREDICTOR_CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILE, TEMP_STR)
 
-
-    def cur_eval_fn(node_array):
-        return BOARD_PREDICTOR(
-            *struct_array_to_ann_inputs(
-                create_struct_array_from_jitclasses(
-                    node_array))).squeeze(axis=1)
+    # def cur_eval_fn(node_array):
+    #     return BOARD_PREDICTOR(
+    #         *struct_array_to_ann_inputs(
+    #             create_struct_array_from_jitclasses(
+    #                 node_array))).squeeze(axis=1)
 
     def dummy_eval_fn(node_array):
         return np.zeros(len(node_array),dtype=np.float32)
 
 
+    STOCKFISH_LOCATION = "/home/sam/PycharmProjects/ChessAI/stockfish-8-linux/Linux/stockfish_8_x64"
 
 
+    board_eval_writer = board_eval_data_writer_creator(
+            [1],
+            [True],
+            comparison_move_generator=stockfish_move_generator_creator(STOCKFISH_LOCATION, 3, 10),
+            print_frequency=1000)
 
 
-    # board_eval_writer = board_eval_data_writer_creator(
-    #         [1],
-    #         [True],
-    #         comparison_move_generator=standard_comparison_move_generator,
-    #         print_frequency=100000)
-    #
-    #
     # encoding_writer = generate_database_with_child_values_tf_records(dummy_eval_fn)
 
-    move_scoring_writer = generate_database_with_child_values_tf_records(cur_eval_fn)
+    # move_scoring_writer = generate_database_with_child_values_tf_records(cur_eval_fn)
 
 
-    file_index = 13
+    file_index = 11
     print("Creating database for file",file_index)
     INPUT_FILENAME = final_dataset_filenames[file_index]
-    OUTPUT_FILENAME = final_dataset_filenames[file_index][:-3] + "tfrecords"#"npy"
+    # OUTPUT_FILENAME = final_dataset_filenames[file_index][:-3] + "tfrecords"#"npy"
+    OUTPUT_FILENAME = temp_dataset_filenames[file_index][:-3] + "tfrecords"  # "npy"
+
     with open(INPUT_FILENAME, "rb") as input:
         cur_dict_to_write = {cur_tuple[0]: cur_tuple[1] for cur_tuple in pickle.load(input)}
 
 
-        # board_eval_writer(cur_dict_to_write, [OUTPUT_FILENAME])
+        board_eval_writer(cur_dict_to_write, [OUTPUT_FILENAME])
 
         # encoding_writer(cur_dict_to_write, [OUTPUT_FILENAME])
 
-        move_scoring_writer(cur_dict_to_write, [OUTPUT_FILENAME])
+        # move_scoring_writer(cur_dict_to_write, [OUTPUT_FILENAME])
 
         # board_info_numpy_file_writer(cur_dict_to_write ,[OUTPUT_FILENAME])
 
-    BOARD_PREDICTOR_CLOSER()
+    # BOARD_PREDICTOR_CLOSER()
 
 

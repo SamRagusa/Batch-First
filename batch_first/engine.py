@@ -1,8 +1,9 @@
 import numpy as np
 from scipy import stats
 
-from .numba_negamax_zero_window import iterative_deepening_mtd_f, get_empty_hash_table, move_scoring_helper
-
+from .transposition_table import get_empty_hash_table
+from .numba_negamax_zero_window import iterative_deepening_mtd_f, move_scoring_helper
+from .global_open_priority_nodes import PriorityBins
 
 
 
@@ -23,13 +24,13 @@ def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False
     :return: An ndarray of the values at the given quantiles
     """
     def bin_helper_move_scoring_fn(struct_array, move_eval_fn):
-        return move_eval_fn(
-            *move_scoring_helper(
+        for_ann = move_scoring_helper(
                 struct_array,
                 struct_array,  # doesn't do anything, but needed to work
                 np.arange(len(struct_array), dtype=np.int32),
-                np.arange(0, dtype=np.int32)))
+                np.array([], dtype=np.int32))
 
+        return move_eval_fn(*for_ann[:-2])(for_ann[-2:])
 
     if quantiles is None:
         quantiles = np.arange(0, 1, .001)
@@ -64,7 +65,7 @@ def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False
 
 
 
-class ChessEngine:
+class ChessEngine(object):
 
     def pick_move(self, Board):
         """
@@ -92,7 +93,7 @@ class ChessEngine:
 
 class BatchFirstEngine(ChessEngine):
 
-    def __init__(self, search_depth, board_eval_fn, move_eval_fn, bin_database_file, win_threshold=10000, loss_threshold=-10000, first_guess_fn=None):
+    def __init__(self, search_depth, board_eval_fn, move_eval_fn, bin_database_file, win_threshold=100000, loss_threshold=-100000, first_guess_fn=None):
         if first_guess_fn is None:
             self.first_guess_fn = lambda x : 0
         else:
@@ -104,43 +105,48 @@ class BatchFirstEngine(ChessEngine):
         self.board_evaluator = board_eval_fn
         self.move_evaluator = move_eval_fn
 
-        self.bin_set = generate_bin_ranges(bin_database_file, self.move_evaluator)
+        self.open_node_holder = PriorityBins(
+            generate_bin_ranges(bin_database_file, self.move_evaluator),
+            10000,
+            testing=False)
 
         self.win_threshold = win_threshold
         self.loss_threshold = loss_threshold
 
 
     def pick_move(self, board):
+
+
         returned_score, move_to_return, self.hash_table = iterative_deepening_mtd_f(
             fen=board.fen(),
             depths_to_search=np.arange(self.search_depth)+1,
-            batch_sizes=[10000]*self.search_depth,
             min_windows_to_confirm=[.001]*self.search_depth,
+            open_node_holder=self.open_node_holder,
             board_eval_fn=self.board_evaluator,
             move_eval_fn=self.move_evaluator,
-            bin_sets=[self.bin_set for _ in range(self.search_depth)],
             hash_table=self.hash_table,
             win_threshold=self.win_threshold,
-            loss_threshold=self.loss_threshold
+            loss_threshold=self.loss_threshold,
+            # print_info=True,
+            # full_testing=True,
             )
 
         return move_to_return
 
 
-    # def no_ann_pick_move(self, board):
-    #     returned_score, move_to_return, self.hash_table = iterative_deepening_mtd_f(
-    #         fen=board.fen(),
-    #         depths_to_search=np.arange(self.search_depth)+1,
-    #         batch_sizes=[10000 for _ in range(self.search_depth)],
-    #         min_windows_to_confirm=[99 for _ in range(self.search_depth)],
-    #         board_eval_fn=self.board_evaluator,
-    #         move_eval_fn=self.move_evaluator,
-    #         guess_increments=[100 for _ in range(self.search_depth)],
-    #         bin_sets=[self.bin_set for _ in range(self.search_depth)],
-    #         hash_table=self.hash_table,
-    #         win_threshold=self.win_threshold,
-    #         loss_threshold=self.loss_threshold
-    #         )
-    #
-    #     return move_to_return
+    def no_ann_pick_move(self, board):
+        returned_score, move_to_return, self.hash_table = iterative_deepening_mtd_f(
+            fen=board.fen(),
+            depths_to_search=np.arange(self.search_depth)+1,
+            min_windows_to_confirm=[99 for _ in range(self.search_depth)],
+            open_node_holder=self.open_node_holder,
+            board_eval_fn=self.board_evaluator,
+            move_eval_fn=self.move_evaluator,
+            hash_table=self.hash_table,
+            guess_increments=[100 for _ in range(self.search_depth)],
+            win_threshold=self.win_threshold,
+            loss_threshold=self.loss_threshold
+            )
+
+        return move_to_return
 

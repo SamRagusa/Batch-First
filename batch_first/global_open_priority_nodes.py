@@ -42,7 +42,30 @@ def split_by_bins(to_insert, bin_indices):
 
 
 
-class PriorityBins:
+
+
+class GlobalNodeList(object):
+    def is_empty(self):
+        """
+        Checks if the node list is empty.
+
+        :return: A boolean value indicating if the list is empty.
+        """
+        raise NotImplementedError("This method must be implemented!")
+
+    def insert_nodes_and_get_next_batch(self, to_insert, scores):
+        """
+        Inserts the given nodes into the stored list, and gets the next batch of nodes to be computed.
+
+        :param to_insert: An ndarray of the nodes to be inserted into the list
+        :param scores: An ndarray of the values used for prioritization, corresponding to the given nodes to insert
+        :return: An ndarray of the nodes to be computed in the next batch
+        """
+        raise NotImplementedError("This method must be implemented!")
+
+
+
+class PriorityBins(GlobalNodeList):
     def __init__(self, bins, min_batch_size_to_accept, testing=False):
         self.bins = bins
 
