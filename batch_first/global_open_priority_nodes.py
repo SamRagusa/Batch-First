@@ -17,15 +17,22 @@ def should_not_terminate_node_array(node_array):
     return list(map(should_not_terminate, node_array))
 
 
-def should_not_terminate_node_array_with_counting(node_array):
+
+def should_not_terminate_node_array_with_counting(node_array, max_to_get):
     num_not_terminating = 0
+    nodes_checked = len(node_array)
     should_not_terminate_mask = np.zeros(len(node_array), dtype=np.bool_)
     for j in range(len(node_array)):
         if should_not_terminate(node_array[j]):
             should_not_terminate_mask[j] = True
             num_not_terminating += 1
 
-    return should_not_terminate_mask, num_not_terminating
+            if num_not_terminating == max_to_get:
+                nodes_checked = j + 1
+                should_not_terminate_mask = should_not_terminate_mask[:nodes_checked]
+                break
+
+    return should_not_terminate_mask, num_not_terminating, nodes_checked
 
 
 def split_by_bins(to_insert, bin_indices):
@@ -66,21 +73,19 @@ class GlobalNodeList(object):
 
 
 class PriorityBins(GlobalNodeList):
-    def __init__(self, bins, min_batch_size_to_accept, testing=False):
+    def __init__(self, bins, max_batch_size_to_accept, testing=False):
         self.bins = bins
 
         self.bin_arrays = [np.array([], dtype=np.object) for _ in range(len(bins)+1)]
-        self.min_batch_size_to_accept = min_batch_size_to_accept
+        self.max_batch_size_to_accept = max_batch_size_to_accept
 
         self.non_empty_mask = np.zeros([len(self.bin_arrays)],dtype=np.bool_)
         self.testing = testing
 
         self.temp_aranged_array = np.arange(len(self.bin_arrays))
 
-
     def __len__(self):
         return sum(len(self.bin_arrays[bin_index]) for bin_index in self.temp_aranged_array[self.non_empty_mask])
-
 
     def is_empty(self):
         return not np.any(self.non_empty_mask)
@@ -93,16 +98,10 @@ class PriorityBins(GlobalNodeList):
             return max((len(self.bin_arrays[index]) for index in np.arange(len(self.bin_arrays))[self.non_empty_mask]))
         return 0
 
-
     def empty_bin_arrays(self):
         """
         Set all the bin arrays to empty (by use of a mask), and return an array of all the nodes currently
         in a bin array that should not terminate.
-
-        NOTES:
-        1) I'm not 100% sure this function has actually been run (since it's only used when no nodes are to be inserted
-        but there still exists nodes in the bins), so it's possible there's an issue (though i really don't think so).
-        I'll try and verify this implementation soon.
         """
         to_return = np.concatenate([
             self.bin_arrays[j][
@@ -111,7 +110,6 @@ class PriorityBins(GlobalNodeList):
 
         self.non_empty_mask[:] = False
         return to_return
-
 
     def best_bin_iterator(self, bins_to_insert):
         """
@@ -134,23 +132,26 @@ class PriorityBins(GlobalNodeList):
             yield (True, non_empty_bins[index_in_non_empty_bins])
             index_in_non_empty_bins += 1
 
-
     def insert_nodes_and_get_next_batch(self, to_insert, scores):
         """
         SPEED IMPROVEMENTS TO MAKE:
-        1) At any point if the number of known not terminated nodes plus the number of possible non_terminating nodes is
-        less than self.min_batch_size_to_accept, then default to returning all nodes(which shouldn't terminate) without
-        regard to their order
-        2) Stop using self.min_batch_size_to_accept, instead use an exact number.  Storing the newly cut array would be
-        done super fast (just a view), but I'm concerned about taking half of a bin.  It could be forced to expand many
-        paths which are worse than the best node in the bin, which may have not been picked.
+        1) At any point if the number of known not terminated nodes plus the number of possible non_terminating nodes
+        is less than self.max_batch_size_to_accept, then default to returning all nodes(which shouldn't terminate)
+        without regard to their order
+
+
+        NOTES:
+        1) Should consider checking if performance is impacted by taking only part of a bin.  The concern here is that
+        after the next iteration, it could discover enough nodes with a high enough priority to hide the bin
+        which was partially chosen, and potentially prevent better options from being explored sooner
         """
         own_len = len(self)
 
-        # This should not be using self.min_batch_size_to_accept for the initial check (here), instead should be using
-        # a value greater than that, because even if 0 nodes are terminating, the time saved will likely be more than
-        # the time spent computing the extra nodes (though it's unlikely that 0 nodes will be terminated in actual play)
-        if len(to_insert) + own_len < self.min_batch_size_to_accept:
+        # This should not be using self.max_batch_size_to_accept for the initial check (here), instead should probably
+        # be using a value greater than that, because even if 0 nodes are terminating, the time saved will likely
+        # be more than the time spent computing the extra nodes (though it's unlikely that 0 nodes will be terminated
+        # in actual play)
+        if len(to_insert) + own_len < self.max_batch_size_to_accept:
             if len(to_insert) == 0:
                 return self.empty_bin_arrays()
 
@@ -162,12 +163,10 @@ class PriorityBins(GlobalNodeList):
 
         bin_indices = np.digitize(scores, self.bins)
 
-
         if len(to_insert) == 0:
             bins_to_insert = []
         else:
             bins_to_insert = split_by_bins(to_insert, bin_indices)
-
 
         last_bin_index_used_in_batch = -1
         for_completion = []
@@ -180,12 +179,34 @@ class PriorityBins(GlobalNodeList):
                 bin_to_look_at = bins_to_insert[next_array_info[1]][1]
                 last_bin_index_used_in_batch += 1
 
-            not_terminated_mask, num_not_terminating = should_not_terminate_node_array_with_counting(bin_to_look_at)
+
+            not_terminated_mask, num_not_terminating, nodes_checked = should_not_terminate_node_array_with_counting(
+                bin_to_look_at,
+                self.max_batch_size_to_accept - nodes_chosen)
 
             nodes_chosen += num_not_terminating
-            for_completion.append((bin_to_look_at, not_terminated_mask)) #Confirm these are views not copys
 
-            if nodes_chosen >= self.min_batch_size_to_accept:
+            # If the maximum number of nodes was found before completing current array termination check
+            if nodes_checked == len(bin_to_look_at):
+                for_completion.append((bin_to_look_at, not_terminated_mask))
+            else:
+
+                for_completion.append((bin_to_look_at[:nodes_checked], not_terminated_mask))
+
+                if next_array_info[0]:
+                    self.bin_arrays[next_array_info[1]] = bin_to_look_at[nodes_checked:]
+                    self.non_empty_mask[next_array_info[1]] = True
+                else:#If the bin being looked at was supposed to be inserted
+                    if self.non_empty_mask[next_array_info[1]]:
+                        self.bin_arrays[next_array_info[1]] = np.append(
+                            self.bin_arrays[next_array_info[1]],
+                            bin_to_look_at[nodes_checked:])
+                    else:
+                        self.bin_arrays[next_array_info[1]] = bin_to_look_at[nodes_checked:]
+                        self.non_empty_mask[next_array_info[1]] = True
+
+
+            if nodes_chosen >= self.max_batch_size_to_accept:
                 # Insert every node not used in the next batch
                 for bin_index, for_insertion in bins_to_insert[last_bin_index_used_in_batch + 1:]:
                     if self.non_empty_mask[bin_index]:
@@ -193,8 +214,6 @@ class PriorityBins(GlobalNodeList):
                     else:
                         self.bin_arrays[bin_index] = for_insertion
                         self.non_empty_mask[bin_index] = True
-
                 break
 
         return np.concatenate([ary[mask] for ary, mask in for_completion])
-

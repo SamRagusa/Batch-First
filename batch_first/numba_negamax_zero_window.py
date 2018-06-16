@@ -175,33 +175,24 @@ def start_move_scoring(children, not_children, children_indices, not_children_in
 
 
 
-@njit
-def set_evaluation_scores(struct_array, to_set_mask, results):
-    index_in_results = 0
-    for j in range(len(struct_array)):
-        if to_set_mask[j]:
-            struct_array[j]['best_value'] = results[index_in_results]
-            index_in_results += 1
-
-
 
 def start_board_evaluations(struct_array, to_score_mask, board_eval_fn, testing=False):
     """
-    Start the evaluation of the depth zero nodes which were not previously terminated, and set their results to their
-    best_value field.
+    Start the evaluation of the depth zero nodes which were not previously terminated.
 
     :return: The thread responsible for evaluating and setting the struct's best_value fields to the results
     """
+    structs_to_score = struct_array[to_score_mask]
+    evaluation_scores = np.empty(len(structs_to_score), dtype=np.float32)
     def evaluate_and_set():
-        results = board_eval_fn(
+        evaluation_scores[:] = board_eval_fn(
             *struct_array_to_ann_inputs(
-                struct_array[to_score_mask])).squeeze(axis=1)
-        set_evaluation_scores(struct_array, to_score_mask, results)
+                structs_to_score)).squeeze(axis=1)
 
     t = threading.Thread(target=evaluate_and_set)
 
     t.start()
-    return t
+    return t, evaluation_scores
 
 
 @njit
@@ -447,15 +438,7 @@ def update_node_from_value(node, value, following_move, hash_table):
                     update_node_from_value(node.parent, - node.board_struct[0]['best_value'], node.board_struct[0]['prev_move'], hash_table)
 
 
-@njit
-def temp_jitted_start_tree_update_from_node(parent_node, child_struct, hash_table):
-    update_node_from_value(parent_node,
-                           - child_struct['best_value'],
-                           child_struct['prev_move'],
-                           hash_table)
-
-
-def update_tree_from_terminating_nodes(parent_nodes, struct_array, hash_table, testing=False):
+def update_tree_from_terminating_nodes(parent_nodes, struct_array, hash_table, was_evaluated_mask, eval_results, testing=False):
     """
     Updates the search tree from the nodes in the current batch which are terminating, this includes all nodes which
     have been marked terminated, or are depth zero.  It also updates the transposition table as needed.
@@ -480,9 +463,25 @@ def update_tree_from_terminating_nodes(parent_nodes, struct_array, hash_table, t
     # vectorized versions of the looped functions
     # add_boards_to_tt(struct_array[should_update_mask],hash_table)
 
+    if not eval_results is None:
+        eval_results_for_parents = - eval_results
+
+    index_in_evaluations = 0
     for j in range(len(struct_array)):
-        if should_update_mask[j]:
-            temp_jitted_start_tree_update_from_node(parent_nodes[j], struct_array[j], hash_table)
+        if was_evaluated_mask[j]:
+            update_node_from_value(
+                parent_nodes[j],
+                eval_results_for_parents[index_in_evaluations],
+                struct_array[j]['prev_move'],
+                hash_table)
+            index_in_evaluations += 1
+
+        elif should_update_mask[j]:
+            update_node_from_value(
+                parent_nodes[j],
+                - struct_array[j]['best_value'],
+                struct_array[j]['prev_move'],
+                hash_table)
 
 
 
@@ -594,9 +593,13 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
 
 
     if np.any(depth_zero_not_scored_mask):
-        evaluation_thread = start_board_evaluations(child_struct, depth_zero_not_scored_mask, board_eval_fn)
+        evaluation_thread, evaluation_scores = start_board_evaluations(
+            child_struct,
+            depth_zero_not_scored_mask,
+            board_eval_fn)
     else:
         evaluation_thread = None
+        evaluation_scores = None
 
 
     #(This should likely be put directly into it's only use below to prevent storing it in memory)
@@ -656,8 +659,9 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
         node_batch,
         child_struct,
         hash_table,
+        depth_zero_not_scored_mask,
+        evaluation_scores,
         testing=testing)
-
 
     if not move_thread is None:
         move_thread.join()
