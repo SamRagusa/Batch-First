@@ -18,18 +18,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ann_creation_helper import line_counter
 
-from batch_first import TURN_WHITE, BB_SQUARES, MIN_FLOAT32_VAL, MAX_MOVES_LOOKED_AT, INITIAL_BOARD_FEN,BB_ALL
+from batch_first import TURN_WHITE, BB_SQUARES, MIN_FLOAT32_VAL, MAX_MOVES_LOOKED_AT, INITIAL_BOARD_FEN,BB_ALL, generate_move_to_enumeration_dict
 
-from batch_first.numba_board import vectorized_flip_vertically, msb,  popcount, numpy_node_info_dtype, set_up_move_array
+from batch_first.numba_board import vectorized_flip_vertically, msb,  popcount, numpy_node_info_dtype, set_up_move_array, push_moves, create_python_chess_board_from_node_info
 
 from batch_first.board_jitclass import BoardState, Move, create_board_state_from_fen, generate_legal_moves, \
-    generate_move_to_enumeration_dict, copy_push, push_with_hash_update
+    copy_push, push_with_hash_update
 
-from batch_first.numba_negamax_zero_window import struct_array_to_ann_inputs
+from batch_first.numba_negamax_zero_window import struct_array_to_ann_inputs, create_node_info_from_fen
 
 from batch_first.chestimator import get_inference_functions
-
-
 
 
 def create_struct_array_from_jitclasses(boards, depth=255, separator=0):
@@ -101,7 +99,8 @@ def get_feature_array(white_info):
     occupied_colors = np.array([[white_info[8]], [white_info[9]]])
     piece_info = np.array([white_info[:7]])
 
-    masks = np.unpackbits(np.bitwise_and(occupied_colors, piece_info).reshape(14).view(np.uint8)).reshape([14, 8, 8]).view(np.bool_)[...,::-1].reshape(14,64)
+    masks = np.unpackbits(np.bitwise_and(occupied_colors, piece_info).reshape(14).view(np.uint8)).reshape(
+        [14, 8, 8]).view(np.bool_)[..., ::-1].reshape(14, 64)
 
 
     for j, mask in enumerate(masks):
@@ -142,7 +141,7 @@ class BoardData(object):
 
 
 
-def create_database_from_pgn(filenames, to_collect_filters=[], post_collection_filters=[], data_writer=None,
+def create_database_from_pgn(filenames, game_filters=[], to_collect_filters=[], post_collection_filters=[], data_writer=None,
                              num_first_moves_to_skip=0, output_filenames=["board_config_database.csv"], print_info=True):
     """
     A function used to generate customized chess databases from a set of pgn files.  It does so using the python-chess
@@ -151,6 +150,8 @@ def create_database_from_pgn(filenames, to_collect_filters=[], post_collection_f
 
 
     :param filenames: An array of filenames (paths) for the png files of chess games to read data from.
+    :param game_filters: A list of functions used to filter out games.  Each function mast accept a python-chess Game
+     game object and return a boolean value indicating weather the game should be filtered out or not
     :param to_collect_filters: A list of functions used to filter out (board, move) pairs during the parsing of the pgn files. Each function in
      the array must accept two parameters, the first being the current BoardState object, and the second being the next
      move to be made, as a Python-Chess Move object.  They should return True if the (board, move) pair should be
@@ -172,6 +173,13 @@ def create_database_from_pgn(filenames, to_collect_filters=[], post_collection_f
     1) Parsing errors are handled internally within the python-chess package, and the logs are being stored
     in the Game object's error array.
     """
+    def game_is_okay(game):
+        for filter in game_filters:
+            if filter(game):
+                return False
+        return True
+
+
     configs = {}
     for index, filename in enumerate(filenames):
         if print_info:
@@ -180,6 +188,9 @@ def create_database_from_pgn(filenames, to_collect_filters=[], post_collection_f
         pgn_file = open(filename)
 
         cur_game = chess.pgn.read_game(pgn_file)
+        while not cur_game is None and not game_is_okay(cur_game):
+            cur_game = chess.pgn.read_game(pgn_file)
+
         while not cur_game is None:
             the_board = create_board_state_from_fen(INITIAL_BOARD_FEN)
 
@@ -204,7 +215,11 @@ def create_database_from_pgn(filenames, to_collect_filters=[], post_collection_f
 
                 push_with_hash_update(the_board, Move(move.from_square, move.to_square, 0 if move.promotion is None else move.promotion))
 
+
             cur_game = chess.pgn.read_game(pgn_file)
+            while not cur_game is None and not game_is_okay(cur_game):
+                cur_game = chess.pgn.read_game(pgn_file)
+
         pgn_file.close()
 
     if print_info:
@@ -235,8 +250,6 @@ def create_database_from_pgn(filenames, to_collect_filters=[], post_collection_f
 
 
 
-
-
 def during_search_n_man_filter_creator(n):
     """
     Creates and returns a filter function for use in the create_database_from_pgn function, to be used during data acquisition.
@@ -248,8 +261,6 @@ def during_search_n_man_filter_creator(n):
         return False
 
     return filter
-
-
 
 
 def standard_comparison_move_generator(board, data):
@@ -390,12 +401,15 @@ def board_eval_data_writer_creator(file_ratios, for_deep_pink_loss, comparison_m
     return writer_fn
 
 
+@nb.njit
+def jitted_set_up_struct_moves(struct_array):
+    for j in range(len(struct_array)):
+        set_up_move_array(struct_array[j])
 
 
 
 
-
-def generate_database_with_child_values_tf_records(node_batch_eval_fn, print_interval=100, batch_size=200, num_workers=None):
+def generate_tf_records_with_child_values(node_batch_eval_fn, print_interval=100, batch_size=200, num_workers=None):
     """
     A function to generate a TFRecords dataset for the training of the move scoring neural network.  It is designed in
     a way such that it could be given to create_database_from_pgn as it's data_writer.
@@ -405,47 +419,44 @@ def generate_database_with_child_values_tf_records(node_batch_eval_fn, print_int
     :param batch_size: The number of examples to be prepared at a time by each thread
     :param num_workers: The number of workers to be created/used by the ThreadPoolExecutor (used when generating
      batches of data to write)
+
+    NOTES:
+    1) If a board has more than the amount of moves that a board_info scalar can hold it will cause an error
     """
-
-
-
-    move_to_str_dict = generate_move_to_enumeration_dict()
-
-
     def create_serialized_example(white_info, moves, results):
-        context = tf.train.Features(feature={
-            "board": tf.train.Feature(int64_list=tf.train.Int64List(value=get_feature_array(white_info))),
-        })
+        example = tf.train.Example(features=tf.train.Features(feature={
+            "board" : tf.train.Feature(int64_list=tf.train.Int64List(value=get_feature_array(white_info))),
+            "from_squares": tf.train.Feature(int64_list=tf.train.Int64List(value=moves[:,0])),
+            "to_squares": tf.train.Feature(int64_list=tf.train.Int64List(value=moves[:,1])),
+            "move_scores" : tf.train.Feature(float_list=tf.train.FloatList(value=results)),
+            "num_moves" : tf.train.Feature(int64_list=tf.train.Int64List(value=[len(moves)])),
+        }))
 
-        feature_lists = tf.train.FeatureLists(feature_list={
-            "moves" : tf.train.FeatureList(feature=[tf.train.Feature(int64_list=tf.train.Int64List(value=[move])) for move in moves]),
-            "move_scores" : tf.train.FeatureList(feature=[tf.train.Feature(float_list=tf.train.FloatList(value=[value])) for value in results]),
-            })
-
-        sequence_example = tf.train.SequenceExample(
-            context = context,
-            feature_lists=feature_lists
-        )
-
-        return sequence_example.SerializeToString()
-
-
+        return example.SerializeToString()
 
     def keys_to_serialized_example(dict_keys):
+        boards = board_info_array_from_dict_keys(dict_keys)
 
-        boards = list(map(board_state_from_dict_key, dict_keys))
+        jitted_set_up_struct_moves(boards)
 
-        moves = list(map(lambda x : np.array([move for move in generate_legal_moves(x, BB_ALL, BB_ALL)]), boards))
-        lengths = np.cumsum(list(map(len, moves)))
+        lengths = boards['children_left']
 
-        children = np.concatenate(list(map(lambda b, m : np.array([copy_push(b, move) for move in m]), boards, moves)))
+        moves_lists = list(map(lambda b: b['unexplored_moves'][:b['children_left']], boards))
 
+        moves = np.concatenate(moves_lists)
 
-        the_results = np.split(node_batch_eval_fn(children), lengths[:-1])
-        the_moves = map(lambda x: move_to_str_dict[x.from_square, x.to_square], np.concatenate(moves))
+        children = np.repeat(boards, lengths)
 
+        push_moves(children, moves)
 
-        return list(map(create_serialized_example, dict_keys, np.split(list(the_moves), lengths[:-1]), the_results))
+        evaluated_results = node_batch_eval_fn(children)
+
+        result_splitters = np.r_[0, np.cumsum(lengths,dtype=np.int32)]
+
+        the_results = list(evaluated_results[start:end] for start, end in zip(result_splitters[:-1],result_splitters[1:]))
+
+        return list(map(create_serialized_example, dict_keys, moves_lists, the_results))
+
 
     def the_writer(the_dict, output_filenames):
         """
@@ -458,8 +469,10 @@ def generate_database_with_child_values_tf_records(node_batch_eval_fn, print_int
         start_time = time.time()
         futures = []
         with ThreadPoolExecutor(num_workers) as executor:
-            for index, key in enumerate(the_dict.keys()):
+            for index, key in enumerate(the_dict):
                 cur_keys.append(key)
+
+
                 if index % batch_size == 0 and index != 0:
                     futures.append(executor.submit(keys_to_serialized_example, cur_keys))
                     cur_keys = []
@@ -478,9 +491,6 @@ def generate_database_with_child_values_tf_records(node_batch_eval_fn, print_int
 
 
     return the_writer
-
-
-
 
 
 
@@ -541,6 +551,30 @@ def stockfish_move_generator_creator(sf_location, sf_threads, sf_time):
 
 
 
+def game_length_filter_creator(max_ply):
+    def filter(game):
+        if int(game.headers['PlyCount'])  > max_ply:
+            return True
+        return False
+
+    return filter
+
+
+def excessive_promotion_filter_creator(max_promotions):
+    def filter(game):
+        num_promotions = 0
+        for move in game.main_line():
+            if not move.promotion is None:
+                if num_promotions >= max_promotions:
+                    return True
+                num_promotions += 1
+        return False
+
+    return filter
+
+
+
+
 if __name__ == "__main__":
 
     """
@@ -582,9 +616,9 @@ if __name__ == "__main__":
                 "move_scoring_validation_set_0.pkl",
                 "move_scoring_testing_set_0.pkl",
                 ]
-    final_dataset_filenames = list(map(lambda x: "/srv/databases/chess_engine/full_9/" + x, pickle_filenames))
+    final_dataset_filenames = list(map(lambda x: "/srv/databases/chess_engine/full_10/" + x, pickle_filenames))
 
-    temp_dataset_filenames = list(map(lambda x: "/srv/databases/chess_engine/sf_chosen_moves/" + x, pickle_filenames))
+    temp_dataset_filenames = list(map(lambda x: "/srv/databases/chess_engine/sf_chosen_moves_4/" + x, pickle_filenames))
 
     file_ratios = [.05]*len(final_dataset_filenames)
     for_deep_pink_loss_use = [False]*len(final_dataset_filenames)
@@ -594,69 +628,76 @@ if __name__ == "__main__":
     # with the generation of the move scoring database to prevent any overlap in boards between the datasets.
     start_time = time.time()
     create_database_from_pgn(
-        pgn_file_paths[:-1],
-        to_collect_filters=[during_search_n_man_filter_creator(6)],
+        pgn_file_paths[:-1],#[pgn_file_paths[2]],
+        game_filters=[game_length_filter_creator(170),
+                      excessive_promotion_filter_creator(3)],
+        to_collect_filters=[during_search_n_man_filter_creator(3)],
         data_writer=board_eval_data_writer_creator(
             file_ratios,
             for_deep_pink_loss_use,
             comparison_move_generator=standard_comparison_move_generator,
             print_frequency=10000),
-        num_first_moves_to_skip=5,
-        output_filenames=final_dataset_filenames)
+        num_first_moves_to_skip=4,
+        output_filenames=temp_dataset_filenames)#=#final_dataset_filenames)
 
     print("Time taken to create databases:", time.time() - start_time)
 
 
 
 
-    # BOARD_EVAL_GRAPHDEF_FILE = "/srv/tmp/encoder_evaluation/normal_next_try_4_regulated/1528279891/tensorrt_eval_graph.pb"
-    # TEMP_STR = "/srv/tmp/move_scoring_1/pre_commit_test_1/1528279921/tensorrt_move_scoring_graph.pb"
-    #
-    # BOARD_PREDICTOR, _, BOARD_PREDICTOR_CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILE, TEMP_STR)
+
+    BOARD_EVAL_GRAPHDEF_FILENAME = "/srv/tmp/encoder_evaluation_helper/sf_data_attempts/encoder_new_data_2.6/1529409998/tensorrt_eval_graph.pb"
+    BOARD_PREDICTOR, _, PREDICTOR_CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILENAME, None, session_gpu_memory=.1)
 
 
-    # def cur_eval_fn(node_array):
-    #     return BOARD_PREDICTOR(
-    #         *struct_array_to_ann_inputs(
-    #             create_struct_array_from_jitclasses(
-    #                 node_array))).squeeze(axis=1)
+    def cur_eval_fn(node_array):
+        return BOARD_PREDICTOR(
+            *struct_array_to_ann_inputs(
+                node_array)).squeeze(axis=1)
 
     def dummy_eval_fn(node_array):
         return np.zeros(len(node_array),dtype=np.float32)
 
 
-    STOCKFISH_LOCATION = "/home/sam/PycharmProjects/ChessAI/stockfish-8-linux/Linux/stockfish_8_x64"
+    # STOCKFISH_LOCATION = "/home/sam/PycharmProjects/ChessAI/stockfish-8-linux/Linux/stockfish_8_x64"
+    #
+    #
+    # board_eval_writer = board_eval_data_writer_creator(
+    #         [1],
+    #         [True],
+    #         comparison_move_generator=stockfish_move_generator_creator(STOCKFISH_LOCATION, 1, 1), #Using very little resources so that it won't find a better move than the GM had
+    #         print_frequency=1000)
 
 
-    board_eval_writer = board_eval_data_writer_creator(
-            [1],
-            [True],
-            comparison_move_generator=stockfish_move_generator_creator(STOCKFISH_LOCATION, 3, 10),
-            print_frequency=1000)
+    # encoding_writer = generate_tf_records_with_child_values(dummy_eval_fn)
+
+    move_scoring_writer = generate_tf_records_with_child_values(cur_eval_fn, num_workers=1)#, print_interval=50,batch_size=400)
+
+    # VERY IMPORTANT NOTE:
+    # I'm not sure the exact reason, but for some reason using multiple workers in the below data writer
+    # will caused strange errors which seem to stem from something to do with TensorRT.
+    # move_scoring_writer = generate_tf_records_with_child_values(cur_eval_fn, num_workers=1, print_interval=10000,batch_size=1)
 
 
-    # encoding_writer = generate_database_with_child_values_tf_records(dummy_eval_fn)
-
-    # move_scoring_writer = generate_database_with_child_values_tf_records(cur_eval_fn)
-
-
-    file_index = 11
+    file_index = 13
     print("Creating database for file",file_index)
-    INPUT_FILENAME = final_dataset_filenames[file_index]
+    # INPUT_FILENAME = final_dataset_filenames[file_index]
+    INPUT_FILENAME = temp_dataset_filenames[file_index]
     # OUTPUT_FILENAME = final_dataset_filenames[file_index][:-3] + "tfrecords"#"npy"
     OUTPUT_FILENAME = temp_dataset_filenames[file_index][:-3] + "tfrecords"  # "npy"
 
     with open(INPUT_FILENAME, "rb") as input:
-        cur_dict_to_write = {cur_tuple[0]: cur_tuple[1] for cur_tuple in pickle.load(input)}
+        # cur_dict_to_write = {cur_tuple[0]: cur_tuple[1] for cur_tuple in pickle.load(input)}
+        cur_dict_to_write = {cur_tuple[0] for cur_tuple in pickle.load(input)}
 
 
-        board_eval_writer(cur_dict_to_write, [OUTPUT_FILENAME])
+    # board_eval_writer(cur_dict_to_write, [OUTPUT_FILENAME])
 
-        # encoding_writer(cur_dict_to_write, [OUTPUT_FILENAME])
+    # encoding_writer(cur_dict_to_write, [OUTPUT_FILENAME])
 
-        # move_scoring_writer(cur_dict_to_write, [OUTPUT_FILENAME])
+    move_scoring_writer(cur_dict_to_write, [OUTPUT_FILENAME])
 
-        # board_info_numpy_file_writer(cur_dict_to_write ,[OUTPUT_FILENAME])
+    # board_info_numpy_file_writer(cur_dict_to_write ,[OUTPUT_FILENAME])
 
     # BOARD_PREDICTOR_CLOSER()
 

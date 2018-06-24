@@ -3,9 +3,11 @@ from collections import OrderedDict
 import chess.uci
 import time
 
+import batch_first as bf
+
 from .numba_board import *
 
-from .board_jitclass import BoardState, generate_move_to_enumeration_dict, has_legal_move, is_in_check
+from .board_jitclass import BoardState, has_legal_move, is_in_check
 from .transposition_table import add_board_and_move_to_tt, choose_move
 
 
@@ -13,21 +15,6 @@ from .transposition_table import add_board_and_move_to_tt, choose_move
 
 # import llvmlite.binding as llvm
 # llvm.set_option('', '--debug-only=loop-vectorize')
-
-
-
-
-
-#(IMPORTANT) the constants below are only here to support older ANNs which use the older mapping of moves
-#(defined in board_jitclass). They use the same names as those in engine_constants.py,
-# so if using the newer mapping, this must be prevented.
-MOVE_TO_INDEX_ARRAY = np.zeros(shape=[64,64],dtype=np.int32)
-REVERSED_MOVE_TO_INDEX_ARRAY = np.zeros(shape=[64,64],dtype=np.int32)
-for key, value in generate_move_to_enumeration_dict().items():
-    MOVE_TO_INDEX_ARRAY[key[0],key[1]] = value
-    REVERSED_MOVE_TO_INDEX_ARRAY[square_mirror(key[0]), square_mirror(key[1])] = value
-
-
 
 
 
@@ -110,7 +97,7 @@ def set_up_next_best_move(board_struct):
     board_struct['next_move_index'] = np.argmax(board_struct['unexplored_move_scores'])
     best_move_score = board_struct['unexplored_move_scores'][board_struct['next_move_index']]
     if best_move_score == MIN_FLOAT32_VAL:
-        board_struct['next_move_index'] = 255
+        board_struct['next_move_index'] = bf.NO_MORE_MOVES_VALUE
     else:
         board_struct['unexplored_move_scores'][board_struct['next_move_index']] = MIN_FLOAT32_VAL
     return best_move_score
@@ -365,6 +352,7 @@ def create_child_structs(struct_array, testing=False):
     moves_to_push = np.zeros((len(struct_array), 3), dtype=np.uint8)
 
     for j in range(len(struct_array)):
+
         child_array[j]['unexplored_moves'][:] = 255
         child_array[j]['unexplored_move_scores'][:] = MIN_FLOAT32_VAL
         child_array[j]['prev_move'][:] = struct_array[j]['unexplored_moves'][struct_array[j]['next_move_index']]
@@ -373,7 +361,7 @@ def create_child_structs(struct_array, testing=False):
         moves_to_push[j] = struct_array[j]['unexplored_moves'][struct_array[j]['next_move_index']]
 
         if testing:
-            if np.any(child_array[j]['prev_move'][:]==255):
+            if np.any(struct_array[j]['unexplored_moves'][struct_array[j]['next_move_index']] == 255):
                 print("THE FOLLOWING MOVE IS ATTEMPTING TO BE PUSHED:", child_array[j]['prev_move'])
 
         if struct_array[j]['children_left'] != NEXT_MOVE_IS_FROM_TT_VAL:
@@ -415,7 +403,7 @@ def create_nodes_for_struct(struct_array, parent_nodes):
     to_return = [None for _ in range(len(struct_array))]
     for j in range(len(struct_array)):
         to_return[j] = GameNode(np.array([struct_array[j]], dtype=numpy_node_info_dtype), parent_nodes[j])
-    return to_return
+    return np.array(to_return)
 
 
 def get_struct_array_from_node_array(node_array):
@@ -453,9 +441,14 @@ def update_tree_from_terminating_nodes(parent_nodes, struct_array, hash_table, w
     should_update_mask = np.logical_or(struct_array['depth'] == 0, struct_array['terminated'])
 
     if testing:
-        if np.any(np.logical_or(struct_array[should_update_mask]['best_value'] == MIN_FLOAT32_VAL,
-                                struct_array[should_update_mask]['best_value'] == MAX_FLOAT32_VAL)):
-            print("The tree is about to be updated with an value which should be unreachable!")
+        to_update_not_evaluated_mask = np.logical_and(
+            np.logical_not(was_evaluated_mask),
+            should_update_mask)
+
+        if np.any(struct_array[to_update_not_evaluated_mask]['best_value'] == MIN_FLOAT32_VAL) or np.any(
+                struct_array[to_update_not_evaluated_mask]['best_value'] == MAX_FLOAT32_VAL):
+            print("The tree is about to be updated with values which should be unreachable! The following are the unreachable values attempting to be used to update: (%s)" %
+                  np.unique(str(struct_array[to_update_not_evaluated_mask]['best_value'])))
 
 
     # Since no node being given to this function will have terminated from a child, none of them will have moves to store in the TT.
@@ -549,7 +542,7 @@ def complete_move_evaluation(combined_to_score, result_getter_fn, child_structs,
     size_array, from_to_squares = get_move_size_array_and_from_to_squares(combined_to_score, num_children)
     cum_sum_sizes = np.cumsum(size_array)
 
-    scores = result_getter_fn([from_to_squares, size_array])
+    scores = - result_getter_fn([from_to_squares, size_array])
 
     child_next_move_scores = set_child_move_scores(
         child_structs,
@@ -647,7 +640,6 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
         struct_batch["next_move_index"] != 255,
         SUPER_TEMP_MASK)
 
-
     temp_set_nodes_to_altered_structs(
         node_batch[have_children_left_mask],
         struct_batch[have_children_left_mask])
@@ -696,10 +688,9 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
 
     return to_insert, scores_to_return
 
+def do_alpha_beta_search_with_bins(root_game_node, open_node_holder, board_eval_fn, move_eval_fn, hash_table,
+                                   print_info=False, full_testing=False):
 
-
-
-def do_alpha_beta_search_with_bins(root_game_node, open_node_holder, board_eval_fn, move_eval_fn, hash_table, print_info=False, full_testing=False):
     next_batch = np.array([root_game_node], dtype=np.object)
 
     if print_info or full_testing:
@@ -709,7 +700,7 @@ def do_alpha_beta_search_with_bins(root_game_node, open_node_holder, board_eval_
         start_time = time.time()
 
         if full_testing:
-            if open_node_holder.is_empty() and len(open_node_holder) != 0:
+            if not open_node_holder.is_empty() or len(open_node_holder) != 0:
                 print("The open node holder given for the zero-window search has %d elements in it and .is_empty() returns: %s"%(len(open_node_holder), open_node_holder.is_empty()))
 
     while len(next_batch) != 0:
@@ -724,6 +715,11 @@ def do_alpha_beta_search_with_bins(root_game_node, open_node_holder, board_eval_
 
         to_insert, to_insert_scores = do_iteration(next_batch, hash_table, board_eval_fn, move_eval_fn, full_testing)
 
+        if root_game_node.board_struct[0]['terminated']:
+            open_node_holder.clear_list()
+            if print_info or full_testing:
+                iteration_counter += 1
+            break
 
         if print_info or full_testing:
             given_for_insert += len(to_insert)
@@ -736,9 +732,13 @@ def do_alpha_beta_search_with_bins(root_game_node, open_node_holder, board_eval_
                         print("Found none in array being inserted into global nodes!")
                     if to_insert[j].board_struct[0]['depth'] == 0:
                         print("Found a node with depth zero being inserted into global nodes!")
+                    if np.all(to_insert[j].board_struct[0]['unexplored_moves'] == 255):
+                        print("Found a node with no stored legal moves being inserted into global nodes!")
+                    if to_insert[j].board_struct[0]['next_move_index'] == bf.NO_MORE_MOVES_VALUE:
+                        print("Found a node with no next move index being inserted into global nodes!")
 
-                if root_game_node.board_struct[0]['terminated'] or root_game_node.board_struct[0]['best_value'] > root_game_node.board_struct[0]['separator'] or root_game_node.board_struct[0]['children_left'] == 0:
-                    print("ROOT NODE WAS TERMINATED OR SHOULD BE TERMINATED BEFORE INSERTING NODES INTO BINS")
+                if root_game_node.board_struct[0]['best_value'] > root_game_node.board_struct[0]['separator'] or root_game_node.board_struct[0]['children_left'] == 0:
+                    print("Root node should be terminated before inserting nodes into bins")
 
         if print_info or full_testing:
             print("Iteration", iteration_counter, "completed producing", len(to_insert), "nodes to insert.")
@@ -801,19 +801,17 @@ def set_up_root_node(move_eval_fn, fen, depth=255, separator=0):
 
     return root_node
 
-
-def mtd_f(fen, depth, first_guess, min_window_to_confirm, open_node_holder, board_eval_fn, move_eval_fn, hash_table, guess_increment=.5, win_threshold=1000000, loss_threshold=-1000000, print_info=False, full_testing=False):
+def mtd_f(fen, depth, first_guess, min_window_to_confirm, open_node_holder, board_eval_fn, move_eval_fn, hash_table,
+          guess_increment=.5, win_threshold=1000000, loss_threshold=-1000000, print_info=False, full_testing=False):
     counter = 0
     cur_guess = first_guess
     upper_bound = MAX_FLOAT32_VAL
     lower_bound = MIN_FLOAT32_VAL
     while upper_bound - min_window_to_confirm > lower_bound:
         if upper_bound == MAX_FLOAT32_VAL and lower_bound >= win_threshold:
-            print("BREAKING MTD(F) LOOP FROM WIN THRESHOLD")
             break
 
         if lower_bound == MIN_FLOAT32_VAL and upper_bound <= loss_threshold:
-            print("BREAKING MTD(F) LOOP FROM LOSS THRESHOLD")
             break
 
         if lower_bound == MIN_FLOAT32_VAL:
@@ -829,7 +827,8 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, open_node_holder, boar
 
         if full_testing:
             if beta == beta - 1000 * np.finfo(np.float32).eps:
-                print("The beta decrement is ######LOST IN THE FLOAT POINT MATH#######", beta, beta - 1000 * np.finfo(np.float32).eps)################################################################################################################################################################################################################################################
+                print("The beta decrement is disappears in the float point math", beta, beta - 1000 * np.finfo(np.float32).eps)
+
         #This would ideally share the same tree, but updated for the new seperation value
         cur_root_node = set_up_root_node(move_eval_fn, fen, depth, beta - 1000*np.finfo(np.float32).eps)
 
@@ -841,7 +840,6 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, open_node_holder, boar
             hash_table=hash_table,
             print_info=print_info,
             full_testing=full_testing)
-        # print(cur_guess)
 
         if cur_guess < beta:
             upper_bound = cur_guess
@@ -898,4 +896,7 @@ def iterative_deepening_mtd_f(fen, depths_to_search, min_windows_to_confirm, ope
 
 
     return first_guess, tt_move, hash_table
+
+
+
 

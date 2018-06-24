@@ -71,6 +71,30 @@ def create_node_info_from_python_chess_board(board, depth=255, separator=0):
 
 
 
+def create_python_chess_board_from_node_info(struct):
+    py_board = chess.Board()
+
+    py_board.kings = int(np.int64(struct['kings']))
+    py_board.queens = int(np.int64(struct['queens']))
+    py_board.rooks = int(np.int64(struct['rooks']))
+    py_board.bishops = int(np.int64(struct['bishops']))
+    py_board.knights = int(np.int64(struct['knights']))
+    py_board.pawns = int(np.int64(struct['pawns']))
+
+    py_board.occupied = int(np.int64(struct['occupied']))
+    py_board.occupied_co[True] = int(np.int64(struct['occupied_w']))
+    py_board.occupied_co[False] = int(np.int64(struct['occupied_b']))
+
+    py_board.castling_rights = int(np.int64(struct['castling_rights']))
+
+    py_board.ep_square = struct['ep_square'] if struct['ep_square']==0 else None
+
+    py_board.turn = struct['turn']
+
+    return py_board
+
+
+
 flip_vert_const_1 = np.uint64(0x00FF00FF00FF00FF)
 flip_vert_const_2 = np.uint64(0x0000FFFF0000FFFF)
 
@@ -173,7 +197,7 @@ def vectorized_square_mirror(square):
 @njit(nb.uint8(nb.uint8))
 def square_mirror(square):
     """Mirrors the square vertically."""
-    return square
+    return square ^ 0x38
 
 @njit
 def any(iterable):
@@ -1068,8 +1092,9 @@ def set_evasions(board_state, king, checkers, from_mask=BB_ALL, to_mask=BB_ALL):
                     set_pseudo_legal_ep(board_state, from_mask, to_mask)
 
 
+
 @njit
-def new_is_castling(board_state, from_square, to_square):
+def is_castling(board_state, from_square, to_square):
     """
     Checks if the given pseudo-legal move is a castling move.
     """
@@ -1087,9 +1112,6 @@ def new_is_castling(board_state, from_square, to_square):
             return diff > 1 or bool(board_state.rooks & board_state.occupied_b & BB_SQUARES[to_square])
 
     return False
-
-
-
 
 
 @njit
@@ -1147,10 +1169,11 @@ def _new_ep_skewered(board_state, king, capturer):
 
 
 
+
 @njit
 def new_is_safe(board_state, king, blockers, from_square, to_square):
     if from_square == king:
-        if new_is_castling(board_state, from_square, to_square):
+        if is_castling(board_state, from_square, to_square):
             return True
         else:
             return not bool(_attackers_mask(board_state, not board_state.turn, to_square, board_state.occupied))
@@ -1177,20 +1200,8 @@ def set_up_move_array(board_struct):
     # If in check
     if checkers:
         set_evasions(board_struct, king, checkers, BB_ALL, BB_ALL)
-
-        if board_struct['children_left']==0:
-            board_struct['terminated'] = True
-            board_struct['best_value'] = LOSS_RESULT_SCORE
-            #LOOK INTO IF IT CAN RETURN HERE (not set illigal moves to 255)
-
     else:
         set_pseudo_legal_moves(board_struct, BB_ALL, BB_ALL)
-
-        if board_struct['children_left']==0:
-            board_struct['terminated'] = True
-            board_struct['best_value'] = TIE_RESULT_SCORE
-            # LOOK INTO IF IT CAN RETURN HERE (not set illigal moves to 255)
-
 
 
     legal_move_index = 0
@@ -1202,6 +1213,9 @@ def set_up_move_array(board_struct):
     board_struct['unexplored_moves'][legal_move_index:board_struct['children_left'],:] = 255
     board_struct['children_left'] = legal_move_index
 
+    if board_struct['children_left'] == 0:
+        board_struct['terminated'] = True
+        board_struct['best_value'] = LOSS_RESULT_SCORE if checkers else TIE_RESULT_SCORE
 
 @njit
 def set_up_move_array_except_move(board_struct, move_to_avoid):

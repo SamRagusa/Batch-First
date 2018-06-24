@@ -52,8 +52,8 @@ def get_move_predictor(session, graphdef_filename, output_stages_tensor_names, i
 
 
 
-def get_inference_functions(eval_graphdef_file, move_graphdef_file):
-    sess = tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.3)))
+def get_inference_functions(eval_graphdef_file, move_graphdef_file, session_gpu_memory=.3):
+    sess = tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=session_gpu_memory)))
 
     eval_output_tensor_name = "logit_layer/MatMul:0"
     eval_input_tensor_names = [
@@ -73,12 +73,15 @@ def get_inference_functions(eval_graphdef_file, move_graphdef_file):
         eval_input_tensor_names,
         "board_eval")
 
-    move_predictor = get_move_predictor(
-        sess,
-        move_graphdef_file,
-        move_scoring_stages_names,
-        move_scoring_input_tensor_names,
-        "move_scoring")
+    if move_graphdef_file is None:
+        move_predictor = None
+    else:
+        move_predictor = get_move_predictor(
+            sess,
+            move_graphdef_file,
+            move_scoring_stages_names,
+            move_scoring_input_tensor_names,
+            "move_scoring")
 
 
 

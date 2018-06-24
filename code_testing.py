@@ -165,11 +165,7 @@ def get_expected_features(boards, piece_to_filter_fn, ep_filter_index, castling_
                 piece_map)))
 
         if not boards[j].ep_square is None:
-            if boards[j].turn:
-                cur_filter_squares[boards[j].ep_square] =  ep_filter_index
-            else:
-                cur_filter_squares[square_mirror(np.uint8(boards[j].ep_square))] = ep_filter_index
-
+            cur_filter_squares[boards[j].ep_square] = ep_filter_index
 
         if boards[j].turn:
             CORNER_FILTER_NUMS = np.array([castling_filter_indices[j] for j in [0, 0, 1, 1]], dtype=np.uint8)
@@ -252,8 +248,6 @@ def inference_input_pipeline_test(inference_pipe_fn, boards_to_input_list_fn, bo
             })
 
         return not np.any(problemed_board_mask), desired_filters, calculated_filters
-
-
 
 
 
@@ -389,9 +383,11 @@ def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_
 
 
             print(filter)
+
             max_correct = np.max(num_correct_squares)
             print(desired_filters[num_correct_squares==max_correct])
             in_boards = np.array(boards)[num_correct_squares == max_correct][0]
+            print(in_boards.fen())
             print(in_boards, "\n")
 
             no_training_pipe_issues = False

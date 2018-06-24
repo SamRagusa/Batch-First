@@ -1,7 +1,7 @@
 # Batch First
 Batch First is a JIT compiled chess engine which traverses the search tree in batches in a best-first manner, allowing for neural network batching, asynchronous GPU use, and vectorized CPU computations.  Utilizing NumPy's powerful ndarray for representing boards, TensorFlow for neural networks computations, and Numba to JIT compile it all, Batch First balances the rapid prototyping desired in artificial intelligence with the runtime efficiency needed for a competitive chess engine.
 
-## Engine Characteristics
+### Engine Characteristics
 The following table highlights a few key aspects of the Batch First engine. 
 
 *Characteristic* | *Explanation / Reasoning* 
@@ -22,7 +22,7 @@ The versions listed are known to work, but are not necessarily the only versions
 - [khash_numba](https://github.com/synapticarbors/khash_numba)
 
 The tools listed below can be used, but are not needed.  They provide speed improvements to the engine.
-- [TensorRT](https://developers.googleblog.com/2018/03/tensorrt-integration-with-tensorflow.html) to optimize ANN inference
+- [TensorRT](https://developers.googleblog.com/2018/03/tensorrt-integration-with-tensorflow.html) to optimize TensorFlow graphs for inference
 - [Intel Python Distribution](https://software.intel.com/en-us/distribution-for-python) for speed improvements to NumPy and Numba
 
 

@@ -1,12 +1,12 @@
-import tensorflow as tf
 import numpy as np
+import tensorflow as tf
 from tensorflow.contrib import layers
 from tensorflow.python import training
 
 from functools import reduce
 
+from batch_first import generate_move_to_enumeration_dict
 from batch_first.chestimator import get_board_data
-from batch_first.board_jitclass import generate_move_to_enumeration_dict
 
 
 #If you don't have TensorRT installed, you can just comment out it's use. Here it's only used in the
@@ -15,13 +15,21 @@ from tensorflow.contrib import tensorrt as trt
 
 
 
-def save_model_as_graphdef_for_serving(model_path, output_model_path, output_filename, output_node_name, model_tags="serve", trt_memory_fraction=.4, total_video_memory=1.1e10, max_batch_size=25000, as_text=False):
+def save_model_as_graphdef_for_serving(model_path, output_model_path, output_filename, output_node_name,
+                                       model_tags="serve", trt_memory_fraction=.4, total_video_memory=1.1e10,
+                                       max_batch_size=25000, as_text=False):
+
 
     #This would ideally be 1 instead of .75, but the GPU that this is running on is responsible for things like graphics
-    with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.75-trt_memory_fraction))) as sess:
+    with tf.Session(config=tf.ConfigProto(
+            gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.75 - trt_memory_fraction))) as sess:
+
         tf.saved_model.loader.load(sess, [model_tags], model_path)
 
-        constant_graph_def = tf.graph_util.convert_variables_to_constants(sess, tf.get_default_graph().as_graph_def(), [output_node_name])
+        constant_graph_def = tf.graph_util.convert_variables_to_constants(
+            sess,
+            tf.get_default_graph().as_graph_def(),
+            [output_node_name])
 
         trt_graph = trt.create_inference_graph(
             constant_graph_def,
@@ -30,9 +38,7 @@ def save_model_as_graphdef_for_serving(model_path, output_model_path, output_fil
             precision_mode="FP32",
             max_workspace_size_bytes=int(trt_memory_fraction*total_video_memory))
 
-
         tf.train.write_graph(trt_graph, output_model_path, output_filename, as_text=as_text)
-
 
 
 def build_fully_connected_layers_with_batch_norm(the_input, shape, kernel_initializer, mode,
@@ -99,24 +105,12 @@ def build_fully_connected_layers_with_batch_norm(the_input, shape, kernel_initia
     return tf.concat(module_outputs, axis=1), activation_summaries
 
 
-
-
-
-def build_inception_module_with_batch_norm(the_input, module, kernel_initializer, mode, activation_summaries=[], num_previously_built_inception_modules=0, padding='same', force_no_concat=False,make_trainable=True, weight_regularizer=None):
+def build_inception_module_with_batch_norm(the_input, module, kernel_initializer, mode, activation_summaries=[],
+                                           num_previously_built_inception_modules=0, padding='same',
+                                           force_no_concat=False, make_trainable=True, weight_regularizer=None):
     """
-    NOTE:
-    1) This comment no longer fully describes the functionality of the function.  It will be updated in the near future
-    when I have a bit more time to focus on this type of stuff.
-
-    Builds an inception module based on the design given to the function.  It returns the final layer in the module,
+    Builds an convolutional module based on the design given to the function.  It returns the final layer in the module,
     and the activation summaries generated for the layers within the inception module.
-
-    The layers will be named "module_N_path_M/layer_P", where N is the inception module number, M is what path number it is on,
-    and P is what number layer it is in that path.
-
-    Module of the format:
-    [[[filters1_1,kernal_size1_1],... , [filters1_M,kernal_size1_M]],... ,
-        [filtersN_1,kernal_sizeN_1],... , [filtersN_P,kernal_sizeN_P]]
     """
     if weight_regularizer is None:
         weight_regularizer = lambda:None
@@ -167,9 +161,11 @@ def build_inception_module_with_batch_norm(the_input, module, kernel_initializer
         return tf.concat([temp_input for temp_input in path_outputs], 3), activation_summaries
 
 
-
-
-def build_transposed_inception_module_with_batch_norm(the_input, module, kernel_initializer, mode, activation_summaries=[], num_previously_built_inception_modules=0, padding='same', force_no_concat=False,make_trainable=True, weight_regularizer=None):
+def build_transposed_inception_module_with_batch_norm(the_input, module, kernel_initializer, mode,
+                                                      activation_summaries=[],
+                                                      num_previously_built_inception_modules=0,
+                                                      padding='same', force_no_concat=False, make_trainable=True,
+                                                      weight_regularizer=None):
     if weight_regularizer is None:
         weight_regularizer = lambda:None
 
@@ -220,8 +216,6 @@ def build_transposed_inception_module_with_batch_norm(the_input, module, kernel_
 
         return tf.concat([temp_input for temp_input in path_outputs], 3), activation_summaries
 
-    
-
 
 def build_convolutional_modules(input, modules, mode, kernel_initializer, kernel_regularizer, make_trainable):
     activation_summaries = []
@@ -253,9 +247,6 @@ def build_convolutional_modules(input, modules, mode, kernel_initializer, kernel
     return cur_inception_module, activation_summaries
 
 
-
-
-
 def metric_dict_creator(the_dict):
     metric_dict = {}
     for key, value in the_dict.items():
@@ -266,9 +257,6 @@ def metric_dict_creator(the_dict):
             metric_dict[key] = (mean_value, tf.summary.scalar(key, mean_value))
 
     return metric_dict
-
-
-
 
 
 def encoder_builder_fn(features, labels, mode, params):
@@ -404,10 +392,6 @@ def encoder_builder_fn(features, labels, mode, params):
         eval_metric_ops=validation_metrics)
 
 
-
-
-
-
 def board_eval_model_fn(features, labels, mode, params):
     """
     Generates an EstimatorSpec for the model.
@@ -539,16 +523,16 @@ def board_eval_model_fn(features, labels, mode, params):
         rand_real_diff = random_pos - desired_pos
 
         abs_rand_real_diff = tf.abs(rand_real_diff)
-        # mean_abs_rand_real_diff = tf.reduce_mean(abs_rand_real_diff)
 
         abs_old_plus_desired = tf.abs(old_plus_desired)
         mean_abs_old_plus_desired = tf.reduce_mean(abs_old_plus_desired)
 
         abs_randreal_realold_ratio = tf.reduce_mean(rand_real_diff) / mean_abs_old_plus_desired
 
+        rand_vs_real_accuracy = tf.cast(tf.less(desired_pos, random_pos), tf.float32)
 
         to_create_metric_dict = {
-            "metrics/rand_vs_real_accuracy" : tf.cast(tf.less(desired_pos, random_pos), tf.float32),
+            "metrics/rand_vs_real_accuracy" : rand_vs_real_accuracy,
             "metrics/mean_dist_rand_real" : rand_real_diff,
             "metrics/mean_abs_rand_real_diff" : abs_rand_real_diff,
             "metrics/mean_dist_old_real" : old_plus_desired,
@@ -598,34 +582,17 @@ def board_eval_model_fn(features, labels, mode, params):
         eval_metric_ops=validation_metrics)
 
 
-
 def move_gen_cnn_model_fn(features, labels, mode, params):
     """
     Generates an EstimatorSpec for the model.
     """
-    def index_tensor_to_index_pairs(index_tensor):
-        """
-        Takes an array of indices and returns an array defined by the following (not perfectly descriptive
-        but you get the idea):
-        output[j] = [j,index_matrix[j]]
-        """
-        replicated_first_indices = tf.tile(
-            tf.expand_dims(tf.range(tf.shape(index_tensor, out_type=tf.int64)[0], dtype=tf.int64), dim=1),
-            [1, tf.shape(index_tensor)[1]])
-        return tf.stack([replicated_first_indices, index_tensor], axis=2)
-
-
-
-    if mode == tf.estimator.ModeKeys.PREDICT:
-        input_layer = features["data"]
-
-        # legal_move_indices = features["move_indices"]
-    else:
-        input_layer = features
+    def numpy_style_repeat_1d(input, multiples):
+        tiled_input = tf.multiply(tf.ones([100, 1]), input)
+        return tf.boolean_mask(tiled_input, tf.sequence_mask(multiples))
 
 
     inception_module_outputs, activation_summaries = build_convolutional_modules(
-        input_layer,
+        features["board"],
         params['inception_modules'],
         mode,
         params['kernel_initializer'],
@@ -654,54 +621,17 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
                              name="logit_layer")
 
 
-
     loss = None
     train_op = None
 
 
+    legal_move_logits = tf.gather_nd(logits, features["legal_move_indices"])
 
     # Calculate loss (for both TRAIN and EVAL modes)
     if mode != tf.estimator.ModeKeys.PREDICT:
-        #THE USE OF tf.scatter_nd FUNCTION WOULD LIKELY SIMPLIFY ALL OF THIS
-
-        weight_mask = labels
-
-        bool_mask = tf.cast(weight_mask, tf.bool)
-        weight_mask = tf.to_float(bool_mask)
-
-        opposite_bool_mask = tf.logical_not(bool_mask)
-        important_logits = tf.boolean_mask(logits, bool_mask)
-        important_labels = tf.boolean_mask(labels, bool_mask)
-
-
-        total_possible_moves = tf.reduce_sum(weight_mask)
-        # mean_possible_moves = tf.reduce_mean(tf.reduce_sum(total_possible_moves, axis=1))
-
-
-
-        min_float_tensor = tf.fill(tf.shape(labels), np.finfo(np.float32).min)
-
-        labels_with_illegal_moves_set_to_min_value = tf.where(bool_mask, labels, min_float_tensor)
-        logits_with_illegal_moves_set_to_min_value = tf.where(bool_mask, logits, min_float_tensor)
-
-        indices_of_desired_moves = tf.argmax(labels_with_illegal_moves_set_to_min_value, axis=1)
-
-        index_pairs = index_tensor_to_index_pairs(tf.expand_dims(indices_of_desired_moves, axis=1))
-
-        max_legal_calculated_move_values = tf.gather_nd(logits, index_pairs)
-
-        move_scored_higher_than_desired_move = tf.greater_equal(logits_with_illegal_moves_set_to_min_value,
-                                                                max_legal_calculated_move_values)
-
-        total_moves_above_desired_moves = tf.reduce_sum(tf.cast(move_scored_higher_than_desired_move, dtype=tf.float32))
-
-
         with tf.variable_scope("loss"):
-
-            loss = tf.losses.mean_squared_error(labels, logits, weights=weight_mask)
+            loss = tf.losses.mean_squared_error(legal_move_logits, features["desired_scores"])
             loss_scalar_summary = tf.summary.scalar("loss", loss)
-    else:
-        important_logits = tf.gather_nd(logits, features["legal_move_indices"])
 
 
 
@@ -719,30 +649,37 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
 
 
     # Generate predictions
-    predictions = {"move_values": logits}
+    predictions = {"the_move_values": logits}
 
     # A dictionary for scoring used when exporting model for serving.
-    the_export_outputs = {"serving_default": tf.estimator.export.ClassificationOutput(scores=important_logits)}
+    the_export_outputs = {"serving_default": tf.estimator.export.ClassificationOutput(scores=legal_move_logits)}
 
 
     # Create the validation metrics
     validation_metrics = None
     if mode != tf.estimator.ModeKeys.PREDICT:
-        mean_important_logits = tf.reduce_mean(important_logits)
-        important_logits_minus_labels = important_logits-important_labels
-        mean_important_minus_labels = tf.reduce_mean(important_logits_minus_labels)
+        calculated_best_move_scores = tf.gather(legal_move_logits, features['desired_move_indices'])
+
+        repeated_best_scores = numpy_style_repeat_1d(calculated_best_move_scores, features['num_moves'])
+
+        ratio_moves_below_best = tf.reduce_mean(tf.cast(tf.greater_equal(repeated_best_scores, legal_move_logits), dtype=np.float32))
+
+        diff_from_desired = legal_move_logits - features["desired_scores"]
+
+
+        mean_diff_from_desired = tf.reduce_mean(diff_from_desired)
+        mean_calculated_value = tf.reduce_mean(legal_move_logits)
 
         to_create_metric_dict = {
             "loss/loss" : (loss, loss_scalar_summary),
-            "metrics/total_moves_above_desired_moves" : total_moves_above_desired_moves,
-            "metrics/ratio_moves_above_desired_moves" : total_moves_above_desired_moves/total_possible_moves,
-            "metrics/mean_evaluation_value" : mean_important_logits ,
-            "metrics/mean_expected_value" : important_labels,
-            "metrics/mean_abs_expected_value" : abs(important_labels),
-            "metrics/distance_from_desired" : mean_important_minus_labels,
-            "metrics/abs_distance_from_desired" : tf.abs(important_logits_minus_labels),
-            "metrics/distance_from_not_desired" : tf.boolean_mask(logits, opposite_bool_mask) - tf.boolean_mask(labels, opposite_bool_mask),
-            "metrics/relative_distance_from_desired": tf.abs(mean_important_minus_labels / mean_important_logits),
+            "metrics/ratio_moves_below_best" : ratio_moves_below_best,
+            "metrics/mean_evaluation_value" : mean_calculated_value,
+            "metrics/mean_abs_evaluation_value": tf.abs(legal_move_logits),
+            "metrics/mean_expected_value" : features["desired_scores"],
+            "metrics/mean_abs_expected_value" : abs(features["desired_scores"]),
+            "metrics/distance_from_desired": mean_diff_from_desired,
+            "metrics/abs_distance_from_desired" : tf.abs(diff_from_desired),
+            "metrics/relative_distance_from_desired": tf.abs(mean_diff_from_desired / mean_calculated_value),
         }
 
         validation_metrics = metric_dict_creator(to_create_metric_dict)
@@ -767,9 +704,9 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
         eval_metric_ops=validation_metrics)
 
 
-
 #Should combine this functionality with the one below it (for creating the encoder),(just add ability to subtract one before one_hot)
-def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, include_unoccupied=True, shuffle_buffer_size=None, repeat=True):
+def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, include_unoccupied=True,
+                                            shuffle_buffer_size=None, repeat=True, num_things_in_parallel=12):
     def tf_records_input_data_fn():
         with tf.device('/cpu:0'):
 
@@ -790,8 +727,6 @@ def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, includ
             if not shuffle_buffer_size is None:
                 dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
 
-
-            num_things_in_parallel = 12
             dataset = dataset.apply(tf.contrib.data.map_and_batch(map_func=parser, batch_size=batch_size, num_parallel_batches=num_things_in_parallel))
 
             if include_unoccupied:
@@ -811,11 +746,8 @@ def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, includ
 
     return tf_records_input_data_fn
 
-
-
-def encoder_tf_records_input_data_fn(filename_pattern, batch_size, shuffle_buffer_size=100000, include_unoccupied=True, repeat=True, shuffle=True):
-    num_things_in_parallel = 12
-
+def encoder_tf_records_input_data_fn(filename_pattern, batch_size, shuffle_buffer_size=100000, include_unoccupied=True,
+                                     repeat=True, shuffle=True, num_things_in_parallel=12):
     def tf_records_input_data_fn():
 
         filenames = tf.data.Dataset.list_files(filename_pattern)
@@ -860,11 +792,32 @@ def encoder_tf_records_input_data_fn(filename_pattern, batch_size, shuffle_buffe
     return tf_records_input_data_fn
 
 
+def move_index_getter(moves, moves_per_board, max_batch_size=20000, max_moves_per_board=100):
+    board_index_repeated_array = tf.transpose(
+        tf.reshape(
+            tf.tile(tf.range(max_moves_per_board), [max_batch_size]),
+            [max_batch_size, max_moves_per_board]),
+        [1, 0])
+
+    move_to_index_array = np.zeros(shape=[64, 64], dtype=np.int32)
+    for key, value in generate_move_to_enumeration_dict().items():
+        move_to_index_array[key[0], key[1]] = value
+
+    move_to_index_tensor = tf.constant(move_to_index_array, shape=[64, 64])
+
+    board_indices_for_moves = tf.boolean_mask(board_index_repeated_array,
+                                              tf.sequence_mask(tf.cast(moves_per_board, tf.int32)))
+
+    move_nums = tf.gather_nd(move_to_index_tensor, tf.cast(moves, tf.int32))
+
+    return tf.stack([board_indices_for_moves, move_nums], axis=-1)
 
 
-def move_gen_one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, shuffle_buffer_size=100000, include_unoccupied=True, repeat=True, shuffle=True):
-    def tf_records_input_data_fn():
 
+def move_gen_create_tf_records_input_data_fn(filename_pattern, batch_size, shuffle_buffer_size=100000,
+                                             include_unoccupied=True, repeat=True, shuffle=True,
+                                             num_things_in_parallel=12, max_moves_per_board=100):
+    def input_fn():
         filenames = tf.data.Dataset.list_files(filename_pattern)
         dataset = filenames.apply(
             tf.contrib.data.parallel_interleave(
@@ -873,38 +826,51 @@ def move_gen_one_hot_create_tf_records_input_data_fn(filename_pattern, batch_siz
                 sloppy=True,
             ))
 
-        def parser(record):
-            context_features = {
+
+        def parser(records):
+            features = {
                 "board": tf.FixedLenFeature([64], tf.int64),
+                "from_squares" : tf.VarLenFeature(tf.int64),
+                "to_squares": tf.VarLenFeature(tf.int64),
+                "move_scores": tf.VarLenFeature(tf.float32),
+                "num_moves" : tf.FixedLenFeature([], tf.int64)
             }
 
-            sequence_features = {
-                "moves": tf.FixedLenSequenceFeature([], tf.int64, allow_missing=True),
-                "move_scores": tf.FixedLenSequenceFeature([], tf.float32, allow_missing=True),
-            }
+            parsed_record = tf.parse_example(records, features)
 
+            to_from_squares = tf.stack([parsed_record["from_squares"].values,
+                                        parsed_record["to_squares"].values], axis=1)
 
-            parsed_record = tf.parse_single_sequence_example(record, context_features=context_features,sequence_features=sequence_features)
+            move_lookup_indices = move_index_getter(to_from_squares,
+                                                    parsed_record['num_moves'],
+                                                    batch_size,
+                                                    max_moves_per_board)
 
-            reshaped_board = tf.reshape(parsed_record[0]["board"],[8,8])
-            sparse_tensor = tf.sparse_tensor_to_dense(tf.SparseTensor(tf.expand_dims(parsed_record[1]["moves"],1), parsed_record[1]["move_scores"],[1792]),validate_indices=False)
+            reshaped_board = tf.reshape(parsed_record["board"], [-1, 8, 8])
 
-            return reshaped_board, sparse_tensor
+            if include_unoccupied:
+                one_hot_board = tf.one_hot(reshaped_board, 16)
+            else:
+                one_hot_board = tf.one_hot(reshaped_board - 1, 15)
 
+            dense_desired_moves = tf.sparse_tensor_to_dense(parsed_record['move_scores'], default_value=tf.float32.min)
+            most_desired_moves = tf.argmax(dense_desired_moves, axis=1)
 
-        dataset = dataset.map(parser, num_parallel_calls=12)
+            adjusted_desired_moves = most_desired_moves +  tf.cumsum(parsed_record['num_moves'], exclusive=True)
+
+            move_scores = parsed_record['move_scores'].values
+
+            return one_hot_board, move_lookup_indices, move_scores, adjusted_desired_moves, parsed_record['num_moves']
+
 
         if shuffle:
             dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
 
         dataset = dataset.batch(batch_size)
 
-        if include_unoccupied:
-            dataset = dataset.map(lambda x,y:(tf.one_hot(x,16),y))
-        else:
-            dataset = dataset.map(lambda x,y:(tf.one_hot(x-1,15),y))
+        dataset = dataset.map(parser, num_parallel_calls=num_things_in_parallel)
 
-        dataset = dataset.prefetch(1)
+        dataset = dataset.prefetch(num_things_in_parallel)
 
         if repeat:
             dataset = dataset.repeat()
@@ -913,9 +879,13 @@ def move_gen_one_hot_create_tf_records_input_data_fn(filename_pattern, batch_siz
 
         features = iterator.get_next()
 
-        return features[0],features[1]
+        feature_names = ["board", "legal_move_indices", "desired_scores", "desired_move_indices", "num_moves"]
 
-    return tf_records_input_data_fn
+        for_model = dict(zip(feature_names, features))
+
+        return for_model, None
+
+    return input_fn
 
 
 def no_chestimator_serving_input_reciever():
@@ -930,33 +900,13 @@ def no_chestimator_serving_input_reciever():
     return tf.estimator.export.ServingInputReceiver(formatted_data, receiver_tensors)
 
 
-def no_chestimator_serving_move_scoring_input_reciever(max_batch_size=50000, max_moves_for_a_board=100):
+def no_chestimator_serving_move_scoring_input_reciever(max_batch_size=50000, max_moves_per_board=100):
     (piece_bbs, color_occupied_bbs, ep_squares, castling_lookup_indices, kings), formatted_data = get_board_data()
 
     moves_per_board = tf.placeholder(tf.uint8, shape=[None], name="moves_per_board_placeholder")
     moves = tf.placeholder(tf.uint8, shape=[None, 2], name="move_placeholder")
 
-    board_index_repeated_array = tf.transpose(
-        tf.reshape(
-            tf.tile(
-                tf.range(max_moves_for_a_board),
-                [max_batch_size]),
-            [max_batch_size, max_moves_for_a_board]),
-        [1, 0])
-
-    move_to_index_array = np.zeros(shape=[64, 64], dtype=np.int32)
-    for key, value in generate_move_to_enumeration_dict().items():
-        move_to_index_array[key[0], key[1]] = value
-
-    move_to_index_tensor = tf.constant(move_to_index_array, shape=[64, 64])
-
-    board_indices_for_moves = tf.boolean_mask(board_index_repeated_array,
-                                              tf.sequence_mask(tf.cast(moves_per_board, tf.int32)))
-
-    move_nums = tf.gather_nd(move_to_index_tensor, tf.cast(moves, tf.int32))
-
-    the_moves = tf.stack([board_indices_for_moves, move_nums], axis=-1)
-
+    the_moves = move_index_getter(moves, moves_per_board, max_batch_size, max_moves_per_board)
 
     receiver_tensors = {"piece_bbs" : piece_bbs,
                         "color_occupied_bbs" : color_occupied_bbs,
@@ -966,11 +916,10 @@ def no_chestimator_serving_move_scoring_input_reciever(max_batch_size=50000, max
                         "moves_per_board" : moves_per_board,
                         "moves" : moves}
 
-    dict_for_model_fn = {"data" : formatted_data,
+    dict_for_model_fn = {"board" : formatted_data,
                          "legal_move_indices" : the_moves}
 
     return tf.estimator.export.ServingInputReceiver(dict_for_model_fn , receiver_tensors)
-
 
 
 def line_counter(filename):

@@ -128,6 +128,9 @@ TIE_RESULT_SCORE = np.float32(0)
 #expand prior to it's full move generation and scoring.
 NEXT_MOVE_IS_FROM_TT_VAL = np.uint8(254)
 
+#This value is used for indicating that the next move index of a board is actually a dummy variable, and there are no more moves left
+NO_MORE_MOVES_VALUE = np.uint8(255)
+
 #This value is used for indicating that a move in a transposition table entry is not being stored.
 NO_TT_MOVE_VALUE = np.uint8(255)
 
@@ -221,7 +224,7 @@ ONES_IN_RELEVANT_BITS_FOR_TT_INDEX = np.uint64(2**(SIZE_EXPONENT_OF_TWO_FOR_TT_I
 
 
 
-def new_generate_move_to_enumeration_dict():
+def generate_move_to_enumeration_dict():
     """
     Generates a dictionary where the keys are (from_square, to_square) and their values are the move number
     that move has been assigned.  It is done in a way such that for move number N from board B, if you were to flip B
@@ -264,7 +267,7 @@ for square in SQUARES:
     REVERSED_SQUARES[square] = switch_square_fn(square)
 
 
-for key, value in new_generate_move_to_enumeration_dict().items():
+for key, value in generate_move_to_enumeration_dict().items():
     MOVE_TO_INDEX_ARRAY[key[0],key[1]] = value
     REVERSED_MOVE_TO_INDEX_ARRAY[switch_square_fn(key[0]), switch_square_fn(key[1])] = value
 

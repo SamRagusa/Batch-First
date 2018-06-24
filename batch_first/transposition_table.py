@@ -52,9 +52,9 @@ def choose_move(hash_table, node):
     """
     root_tt_entry = hash_table[np.uint64(node.board_struct[0]['hash']) & ONES_IN_RELEVANT_BITS_FOR_TT_INDEX]
     return chess.Move(
-        root_tt_entry["stored_from_square"],
-        root_tt_entry["stored_to_square"],
-        root_tt_entry["stored_promotion"])
+        np.int8(root_tt_entry["stored_from_square"]),
+        np.int8(root_tt_entry["stored_to_square"]),
+        np.int8(root_tt_entry["stored_promotion"]) if root_tt_entry["stored_promotion"]!=0 else None)
 
 
 

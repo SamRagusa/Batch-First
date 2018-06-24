@@ -71,6 +71,13 @@ class GlobalNodeList(object):
         raise NotImplementedError("This method must be implemented!")
 
 
+    def clear_list(self):
+        """
+        Clears the list so that it is empty.
+        """
+        raise NotImplementedError("This method must be implemented!")
+
+
 
 class PriorityBins(GlobalNodeList):
     def __init__(self, bins, max_batch_size_to_accept, testing=False):
@@ -98,7 +105,13 @@ class PriorityBins(GlobalNodeList):
             return max((len(self.bin_arrays[index]) for index in np.arange(len(self.bin_arrays))[self.non_empty_mask]))
         return 0
 
-    def empty_bin_arrays(self):
+    def clear_list(self):
+        for index in self.temp_aranged_array[self.non_empty_mask]:
+            self.bin_arrays[index] = np.array([], dtype=np.object)
+        self.non_empty_mask = np.zeros([len(self.bin_arrays)],  dtype=np.bool_)
+
+
+    def pop_all_non_terminating(self):
         """
         Set all the bin arrays to empty (by use of a mask), and return an array of all the nodes currently
         in a bin array that should not terminate.
@@ -153,12 +166,12 @@ class PriorityBins(GlobalNodeList):
         # in actual play)
         if len(to_insert) + own_len < self.max_batch_size_to_accept:
             if len(to_insert) == 0:
-                return self.empty_bin_arrays()
+                return self.pop_all_non_terminating()
 
             if own_len == 0:
                 return to_insert[should_not_terminate_node_array(to_insert)]
 
-            return np.concatenate([to_insert[should_not_terminate_node_array(to_insert)], self.empty_bin_arrays()])
+            return np.concatenate([to_insert[should_not_terminate_node_array(to_insert)], self.pop_all_non_terminating()])
 
 
         bin_indices = np.digitize(scores, self.bins)

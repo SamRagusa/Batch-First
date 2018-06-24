@@ -737,50 +737,12 @@ def generate_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
                 yield move
 
 
-
-
 @njit(boolean(BoardState.class_type.instance_type), nogil=True)
 def has_legal_move(board_state):
     """
     Checks if there exists a legal move
     """
     return any(generate_legal_moves(board_state, BB_ALL, BB_ALL))
-
-def generate_move_to_enumeration_dict():
-    """
-    Generates a dictionary where the keys are (from_square, to_square) and their values are the move number
-    that move has been assigned.  It is done in a way such that for move number N from board B, if you were to flip B
-    vertically, the same move would have number 1792-N. (there are 1792 moves recognized)
-
-
-    IMPORTANT NOTES:
-    1) This ignores the fact that not all pawn promotions are the same, this effects the number of logits
-    in the move scoring ANN
-    2) This will be phased out as the ANNs in use start to use the new mapping in engine_constants.py
-    """
-    possible_moves = {}
-
-    board_state = create_board_state_from_fen('8/8/8/8/8/8/8/8 w - - 0 1')
-    for square in SQUARES[:len(SQUARES)//2]:
-        for piece in (KNIGHT, QUEEN):
-            _set_piece_at(board_state, square, piece, TURN_WHITE)
-            for move in generate_legal_moves(board_state,BB_ALL, BB_ALL):
-                if possible_moves.get((move.from_square, move.to_square)) is None:
-                    possible_moves[move.from_square, move.to_square] = len(possible_moves)
-            _remove_piece_at(board_state, square)
-
-    switch_square_fn = lambda x : x ^ 0x38
-
-    total_possible_moves = len(possible_moves)*2 - 1
-
-    for (from_square, to_square), move_num in list(possible_moves.items()):
-        possible_moves[switch_square_fn(from_square), switch_square_fn(to_square)] = total_possible_moves - move_num
-
-    return possible_moves
-
-
-
-
 
 
 
