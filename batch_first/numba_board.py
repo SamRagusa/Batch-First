@@ -1,7 +1,6 @@
 from chess.polyglot import zobrist_hash
 
 from batch_first import *
-# from engine_constants import *
 
 
 # import llvmlite.binding as llvm
@@ -69,8 +68,6 @@ def create_node_info_from_python_chess_board(board, depth=255, separator=0):
                      ],dtype=numpy_node_info_dtype)
 
 
-
-
 def create_python_chess_board_from_node_info(struct):
     py_board = chess.Board()
 
@@ -98,17 +95,16 @@ def create_python_chess_board_from_node_info(struct):
 flip_vert_const_1 = np.uint64(0x00FF00FF00FF00FF)
 flip_vert_const_2 = np.uint64(0x0000FFFF0000FFFF)
 
-@nb.vectorize([nb.uint64(nb.uint64)])
-def vectorized_flip_vertically(bb):
+@nb.vectorize([nb.uint64(nb.uint64)], nopython=True)
+def flip_vertically(bb):
     bb = ((bb >>  8) & flip_vert_const_1) | ((bb & flip_vert_const_1) <<  8)
     bb = ((bb >> 16) & flip_vert_const_2) | ((bb & flip_vert_const_2) << 16)
     bb = ( bb >> 32) | ( bb << 32)
     return bb
 
 
-
 # Obviously needs to be refactored
-@njit(nb.uint8(nb.uint64))
+@nb.vectorize([nb.uint8(nb.uint64)], nopython=True)
 def msb(n):
     r = 0
     n = n >> 1
@@ -116,20 +112,6 @@ def msb(n):
         r += 1
         n = n >> 1
     return r
-
-
-# Obviously needs to be refactored
-@nb.vectorize([nb.uint8(nb.uint64)],nopython=True)
-def vectorized_msb(n):
-    r = 0
-    n = n >> 1
-    while n:  # >>= 1:
-        r += 1
-        n = n >> 1
-    return r
-
-
-
 
 # Obviously needs to be refactored
 @njit
@@ -147,23 +129,13 @@ popcount_const_2 = np.uint64(0x3333333333333333)
 popcount_const_3 = np.uint64(0x0f0f0f0f0f0f0f0f)
 popcount_const_4 = np.uint64(0x0101010101010101)
 
-@njit(nb.uint8(nb.uint64))
-def popcount(n):
-    n = n - (n >> 1) & popcount_const_1
-    n = (n & popcount_const_2) + ((n >> 2) & popcount_const_2)
-    n = (n + (n >> 4)) & popcount_const_3
-    n = (n * popcount_const_4) >> 56
-    return n
-
-
 @nb.vectorize([nb.uint8(nb.uint64)], nopython=True)
-def vectorized_popcount(n):
-    n = n - (n >> 1) & popcount_const_1
+def popcount(n):
+    n = n - ((n >> 1) & popcount_const_1)
     n = (n & popcount_const_2) + ((n >> 2) & popcount_const_2)
     n = (n + (n >> 4)) & popcount_const_3
     n = (n * popcount_const_4) >> 56
     return n
-
 
 @njit(nb.uint8(nb.uint8))
 def square_file(square):
@@ -181,23 +153,22 @@ def shift_down(b):
 def shift_up(b):
     return b << 8
 
+NOT_BB_FILE_A = ~BB_FILE_A
+NOT_BB_FILE_H = ~BB_FILE_H
+
 @njit(nb.uint64(nb.uint64))
 def shift_right(b):
-    return (b << 1) & ~BB_FILE_A
+    return (b << 1) & NOT_BB_FILE_A
 
 @njit(nb.uint64(nb.uint64))
 def shift_left(b):
-    return (b >> 1) & ~BB_FILE_H
+    return (b >> 1) & NOT_BB_FILE_H
 
 @nb.vectorize([nb.uint8(nb.uint8)], nopython=True)
-def vectorized_square_mirror(square):
-    """Mirrors the square vertically."""
-    return square ^ 0x38
-
-@njit(nb.uint8(nb.uint8))
 def square_mirror(square):
     """Mirrors the square vertically."""
     return square ^ 0x38
+
 
 @njit
 def any(iterable):

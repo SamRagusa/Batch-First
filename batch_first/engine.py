@@ -2,15 +2,12 @@ import numpy as np
 from scipy import stats
 
 from .transposition_table import get_empty_hash_table
-from .numba_negamax_zero_window import iterative_deepening_mtd_f, move_scoring_helper
+from .numba_negamax_zero_window import iterative_deepening_mtd_f, start_move_scoring
 from .global_open_priority_nodes import PriorityBins
 
 
 
-
-
-
-def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False, num_batches=1000):
+def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False, num_batches=125):
     """
     Generate values representing the boundaries for the bins in the PriorityBins class based on a given
     move evaluation function.
@@ -24,13 +21,19 @@ def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False
     :return: An ndarray of the values at the given quantiles
     """
     def bin_helper_move_scoring_fn(struct_array, move_eval_fn):
-        for_ann = move_scoring_helper(
-                struct_array,
-                struct_array,  # doesn't do anything, but needed to work
-                np.arange(len(struct_array), dtype=np.int32),
-                np.array([], dtype=np.int32))
+        move_thread, move_score_getter, _, _ = start_move_scoring(
+            struct_array,
+            struct_array[:1],
+            np.ones(len(struct_array), dtype=np.bool_),
+            np.zeros(1, dtype=np.bool_),
+            move_eval_fn)
 
-        return move_eval_fn(*for_ann[:-2])(for_ann[-2:])
+        from_to_squares = np.concatenate([struct['unexplored_moves'][:struct['children_left'], :2] for struct in struct_array])
+
+        move_thread.join()
+
+        return - move_score_getter[0]([from_to_squares, struct_array['children_left']])
+
 
     if quantiles is None:
         quantiles = np.arange(0, 1, .001)
@@ -60,11 +63,6 @@ def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False
     return stats.mstats.mquantiles(combined_results, quantiles)
 
 
-
-
-
-
-
 class ChessEngine(object):
 
     def pick_move(self, Board):
@@ -85,10 +83,6 @@ class ChessEngine(object):
         Release the resources currently used by the engine (like GPU memory or large chunks of RAM).
         """
         pass
-
-
-
-
 
 
 class BatchFirstEngine(ChessEngine):
@@ -113,10 +107,7 @@ class BatchFirstEngine(ChessEngine):
         self.win_threshold = win_threshold
         self.loss_threshold = loss_threshold
 
-
     def pick_move(self, board):
-
-
         returned_score, move_to_return, self.hash_table = iterative_deepening_mtd_f(
             fen=board.fen(),
             depths_to_search=np.arange(self.search_depth)+1,
@@ -127,26 +118,12 @@ class BatchFirstEngine(ChessEngine):
             hash_table=self.hash_table,
             win_threshold=self.win_threshold,
             loss_threshold=self.loss_threshold,
-            # print_info=True,
-            # full_testing=True,
+            # print_partial_info=True,
+            # print_all_info=True,         #If this is True, print_partial_info must also be True!
+            # testing=True,
             )
 
-        return move_to_return
 
 
-    def no_ann_pick_move(self, board):
-        returned_score, move_to_return, self.hash_table = iterative_deepening_mtd_f(
-            fen=board.fen(),
-            depths_to_search=np.arange(self.search_depth)+1,
-            min_windows_to_confirm=[99 for _ in range(self.search_depth)],
-            open_node_holder=self.open_node_holder,
-            board_eval_fn=self.board_evaluator,
-            move_eval_fn=self.move_evaluator,
-            hash_table=self.hash_table,
-            guess_increments=[100 for _ in range(self.search_depth)],
-            win_threshold=self.win_threshold,
-            loss_threshold=self.loss_threshold
-            )
 
         return move_to_return
-

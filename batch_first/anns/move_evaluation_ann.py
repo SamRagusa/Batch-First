@@ -7,7 +7,7 @@ tf.logging.set_verbosity(tf.logging.INFO)
 
 
 
-def main(using_to_serve):
+def main(unused_par):
     """
     Set up the data pipelines, create the computational graph, train the model, and evaluate the results.
     """
@@ -32,12 +32,12 @@ def main(using_to_serve):
 
     INCEPTION_MODULES = [
         [
-            [[15, 2], [20, 2]],
-            [[15, 3]]],
+            [(15, 2), (20, 2)],
+            [(15, 3)]],
         [
-            [[25, 1]],
-            [[15, 1], [25, 1, 6]],
-            [[15, 1], [25, 6, 1]]]]
+            [(25, 1)],
+            [(15, 1), (25, 1, 6)],
+            [(15, 1), (25, 6, 1)]]]
 
     BATCHES_IN_TRAINING_EPOCH = (5*2009392) // (TRAINING_BATCH_SIZE)
     BATCHES_IN_VALIDATION_EPOCH = 2009392 // VALIDATION_BATCH_SIZE
@@ -105,11 +105,11 @@ def main(using_to_serve):
     )
 
     # Save the model for serving
-    the_estimator.export_savedmodel(SAVE_MODEL_DIR, ann_h.no_chestimator_serving_move_scoring_input_reciever)
+    the_estimator.export_savedmodel(SAVE_MODEL_DIR, ann_h.move_scoring_serving_input_receiver)
 
 
 
 
 
 if __name__ == "__main__":
-    tf.app.run(argv=[False])
+    tf.app.run()

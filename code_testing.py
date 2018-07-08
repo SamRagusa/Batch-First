@@ -16,18 +16,19 @@ import batch_first as bf
 
 from batch_first.anns.ann_creation_helper import one_hot_create_tf_records_input_data_fn
 
-from batch_first.anns.database_creator import create_database_from_pgn, board_eval_data_writer_creator, standard_comparison_move_generator
+from batch_first.anns.database_creator import create_database_from_pgn, board_eval_data_writer_creator, standard_comparison_move_generator, sf_scoring_writer_creator
 
 from batch_first.chestimator import get_board_data
 
 from batch_first.board_jitclass import create_board_state_from_fen, traditional_perft_test
 
 from batch_first.numba_board import create_node_info_from_fen, structured_scalar_perft_test, scalar_is_legal_move, \
-    numpy_node_info_dtype, create_node_info_from_python_chess_board, push_moves, square_mirror
+    numpy_node_info_dtype, create_node_info_from_python_chess_board, push_moves
 
 from batch_first.numba_negamax_zero_window import struct_array_to_ann_inputs
 
 
+#These fens come from the ChessProgramming Wiki, and can be found here: https://chessprogramming.wikispaces.com/Perft+Results
 DEFAULT_TESTING_FENS = ["rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
                         "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
                         "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
@@ -47,6 +48,9 @@ DEFAULT_FEN_PERFT_RESULTS = [[20,400,8902,197281,4865609,119060324,3195901860,84
                              [46,2079,89890,3894594,164075551,6923051137,287188994746,11923589843526,490154852788714]]
 
 
+# This array represents moves, some illegal or impossible, for use in testing.  It contains all possible combinations
+# of from squares, to squares, and promotion pieces.  The array is of the form:
+# [..., [move_from_square, move_to_square, move_promotion], ...]
 DEFAULT_MOVES_TO_CHECK = np.array(
     [[squares[0][0], squares[0][1], squares[1]] for squares in itertools.product(
         itertools.permutations(chess.SQUARES,r=2),
@@ -62,7 +66,7 @@ def full_perft_tester(perft_function_to_test, fens_to_test=DEFAULT_TESTING_FENS,
 
 
     :param perft_function_to_test: A function that takes 2 arguments, the first being a board's FEN representation
-     as a string, and the second being the depth of the perft test to be done.
+     as a string, and the second being the depth of the PERFT test to be done.
     :param fens_to_test: An iterable of strings, each a FEN representation of a board.
     :param perft_results: A list of the same length as fens_to_test, containing lists of integers, each corresponding
      to the expected PERFT result if tested at a depth of it's index
@@ -99,7 +103,6 @@ def zobrist_hash_test(hash_getter, fen_to_start=None, num_sequences_to_test=1000
     """
     if fen_to_start is None:
         fen_to_start = DEFAULT_TESTING_FENS[0]
-
 
     correct_hashes = np.zeros((num_sequences_to_test, max_moves_per_test), dtype=np.uint64)
     move_lists = [[] for _ in range(num_sequences_to_test)]
@@ -250,8 +253,6 @@ def inference_input_pipeline_test(inference_pipe_fn, boards_to_input_list_fn, bo
         return not np.any(problemed_board_mask), desired_filters, calculated_filters
 
 
-
-
 @nb.njit
 def test_constants_are_different_jitted():
     """
@@ -260,7 +261,6 @@ def test_constants_are_different_jitted():
     :return: True if the test is passed, False if not
     """
     return  bf.MIN_FLOAT32_VAL != bf.ALMOST_MIN_FLOAT_32_VAL and bf.MAX_FLOAT32_VAL != bf.ALMOST_MAX_FLOAT_32_VAL
-
 
 
 def move_verification_tester(move_legality_tester, board_creator_fn, fens_to_test=DEFAULT_TESTING_FENS, moves_to_test=DEFAULT_MOVES_TO_CHECK):
@@ -391,10 +391,13 @@ def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_
             print(in_boards, "\n")
 
             no_training_pipe_issues = False
-            # return False, inference_pipe_results
 
     return no_training_pipe_issues, inference_pipe_results
-    # return True, inference_pipe_results
+
+
+
+
+
 
 
 
@@ -410,9 +413,15 @@ def cur_hash_getter(fen_to_start,move_lists,max_possible_moves):
 
 
 def cur_boards_to_input_list_fn(boards):
+    struct_array = np.concatenate([create_node_info_from_python_chess_board(board) for board in boards])
+
     return struct_array_to_ann_inputs(
-        np.concatenate([
-            create_node_info_from_python_chess_board(board) for board in boards]))
+        struct_array,
+        np.array([], dtype=numpy_node_info_dtype),
+        np.ones(len(struct_array), dtype=np.bool_),
+        np.array([], dtype=np.bool_),
+        len(struct_array))
+
 
 def cur_piece_to_filter_fn(piece):
     if piece is None:
@@ -423,33 +432,35 @@ def cur_piece_to_filter_fn(piece):
         return 15-piece.piece_type
 
 
-def cur_tfrecords_writer(pgn_filename, output_filename):
-    create_database_from_pgn(
-        [pgn_filename],
-        data_writer=board_eval_data_writer_creator(
-            [1],
-            [True],
-            # For current use a dummy move generation would likely work and be much faster
-            comparison_move_generator=standard_comparison_move_generator,
-            print_frequency=None),
-        output_filenames=[output_filename],
-        print_info=False)
+def stockfish_records_writer_creator(sf_location):
+        def cur_tfrecords_writer(pgn_filename, output_filename):
+            create_database_from_pgn(
+                [pgn_filename],
+                data_writer=sf_scoring_writer_creator(
+                    sf_location=sf_location,
+                    sf_threads=1,
+                    sf_time=1,
+                    print_info=False),
+                output_filenames=[output_filename],
+                print_info=False)
+
+        return cur_tfrecords_writer
 
 
 def cur_tfrecords_to_features(filename):
-    input_generator,_ = one_hot_create_tf_records_input_data_fn(filename, 1, include_unoccupied=False, repeat=False)()
+    input_generator, _ = one_hot_create_tf_records_input_data_fn(filename, include_unoccupied=False, repeat=False)()
     with tf.Session() as sess:
         inputs = []
         try:
             while True:
-                inputs.append(sess.run(input_generator)[:,0,...])
+                inputs.append(sess.run(input_generator['board']))
         except tf.errors.OutOfRangeError:
-            return np.concatenate(inputs)
+            return np.stack(inputs)
 
 
 def full_test():
     """
-    Runs every test relevant to Batch First's performance.
+    Runs every test relevant to Batch First's performance or correctness (that's been created so far).
 
     :return: A boolean value indicating if all tests were passed
 
@@ -465,7 +476,7 @@ def full_test():
     constants_results = test_constants_are_different_jitted()
 
     print("Constants test:                                               %s"%result_str[constants_results])
-    
+
     jitclass_perft_results = full_perft_tester(
         lambda fen, depth: traditional_perft_test(create_board_state_from_fen(fen), depth))
 
@@ -486,14 +497,17 @@ def full_test():
 
     print("Incremental Zobrist hash test:                                %s"%result_str[zobrist_hash_results])
 
+
+    sf_location = "/home/sam/PycharmProjects/ChessAI/stockfish-8-linux/Linux/stockfish_8_x64"  #This will hopefully be refactored out of this soon (and a dummy function will be used instead of StockFish)
     training_pipe_results, inference_pipe_results = complete_board_eval_tester(
-        tfrecords_writer=cur_tfrecords_writer,
+        tfrecords_writer=stockfish_records_writer_creator(sf_location),
         feature_getter=cur_tfrecords_to_features,
         inference_pipe_fn=get_board_data,
         boards_to_input_for_inference=cur_boards_to_input_list_fn,
         piece_to_filter_fn=cur_piece_to_filter_fn,
         ep_filter_index=1,
-        castling_filter_indices=[8, 15])
+        castling_filter_indices=[8, 15],
+        max_moves_per_game=500)
 
     print("Board evaluation data creation and training pipeline test:    %s" % result_str[training_pipe_results])
     print("Board evaluation inference pipeline test:                     %s" % result_str[inference_pipe_results])

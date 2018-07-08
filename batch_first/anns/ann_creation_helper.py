@@ -5,7 +5,7 @@ from tensorflow.python import training
 
 from functools import reduce
 
-from batch_first import generate_move_to_enumeration_dict
+import batch_first as bf
 from batch_first.chestimator import get_board_data
 
 
@@ -106,11 +106,28 @@ def build_fully_connected_layers_with_batch_norm(the_input, shape, kernel_initia
 
 
 def build_inception_module_with_batch_norm(the_input, module, kernel_initializer, mode, activation_summaries=[],
-                                           num_previously_built_inception_modules=0, padding='same',
-                                           force_no_concat=False, make_trainable=True, weight_regularizer=None):
+                                           num_previously_built_inception_modules=0, force_no_concat=False,
+                                           make_trainable=True, weight_regularizer=None):
     """
-    Builds an convolutional module based on the design given to the function.  It returns the final layer in the module,
+    Builds a convolutional module based on a given design.  It returns the final layer/layers in the module,
     and the activation summaries generated for the layers within the inception module.
+
+
+    The following are a few examples of what can be used in the 'module' parameter.
+
+    module_1 = [[[35,1], (1024, 8)]]
+
+    module_2 = [[[25, 1]],
+                [[20,1], [25, 3]],
+                [[20,1], [25, 1, 8]],
+                [[20,1], [25, 8, 1]]]
+
+    :param module: A list (representing the module's shape), of lists (each representing the shape of a 'path' from the
+    input to the output of the module), of either tuples or lists of size 2 or 3 (representing individual layers).
+    If a tuple is used, it indicates that the layer should use 'valid' padding, and if a list is used it will use a
+    padding of 'same'.  The contents of the list or tuple will be the number of filters to create, followed by either
+    one number to indicate the length and width of the filter, or two numbers to indicate them independently if they
+    are not equal.
     """
     if weight_regularizer is None:
         weight_regularizer = lambda:None
@@ -126,12 +143,13 @@ def build_inception_module_with_batch_norm(the_input, module, kernel_initializer
                         path_outputs[j - 1] = cur_input
 
                     cur_input = the_input
+
                 kernel_size = [section[1], section[1]] if len(section)==2 else [section[1], section[2]]
                 cur_conv_output = tf.layers.conv2d(
                     inputs=cur_input,
                     filters=section[0],
                     kernel_size=kernel_size,
-                    padding=padding,
+                    padding='valid' if isinstance(section, tuple) else 'same',
                     use_bias=False,
                     kernel_initializer=kernel_initializer(),
                     kernel_regularizer=weight_regularizer(),
@@ -217,7 +235,51 @@ def build_transposed_inception_module_with_batch_norm(the_input, module, kernel_
         return tf.concat([temp_input for temp_input in path_outputs], 3), activation_summaries
 
 
+
 def build_convolutional_modules(input, modules, mode, kernel_initializer, kernel_regularizer, make_trainable):
+    """
+    Creates a desired set of convolutional modules.  Primarily the modules are created through the
+    build_inception_module_with_batch_norm function, but if it's functionality proves insufficient, a function can be
+    given in place of a modules shape, which will accept the previous modules output as input, and who's output will
+    be given to the next module for input. (A detailed example is given below, and more information about the
+    shape of a module can be found in the comment for the build_inception_module_with_batch_norm function)
+
+
+
+    If the below example of the 'modules' parameter were given, the input Tensor would be given to
+    2x2, 3x3, 1x8 and 8x1 convolutional layers (each using a 'same' padding), and then each having their outputs
+    concatenated together.
+
+    The concatenated first module output will then be given as input to four 1x1 convolutional layers, three of which
+    feed into another convolutional layer (with either filter size 3x3, 1x8, or 8x1), and the output of those
+    three layers and the output of the other 1x1 layer are concatenated together (would have shape [-1, 8, 8, 100]).
+
+    This is followed by a 1x1 convolutional layer, and lastly by an 8x8 convolutional layer using a
+    'valid' padding, and resulting in a Tensor of shape [-1, 1, 1, 1024], which is reshaped and then returned.
+
+
+    tf.Shape(input) = [-1, 8, 8, 15]  #Shape of the input given with the following 'modules'
+    modules = [
+        [[[15, 2]],
+         [[25, 3]],
+         [[25, 1, 8]],
+         [[25, 8, 1]]],
+
+         [[[25, 1]],
+         [[20,1], [25, 3]],
+         [[20,1], [25, 1, 8]],
+         [[20,1], [25, 8, 1]]],
+
+         [[[25, 1], (1024,8)]],
+
+         lambda x: tf.reshape(x, [-1, 1024]),
+        ]
+
+
+    :param modules: A list which sequentially represents the graph operations to be created.  It may contain
+     any combination of either functions which accept the previous module's output and return the desired input for
+     the next module, or shapes of modules which can be given to the build_inception_module_with_batch_norm method
+    """
     activation_summaries = []
 
     cur_inception_module = input
@@ -231,7 +293,6 @@ def build_convolutional_modules(input, modules, mode, kernel_initializer, kernel
                 module_shape,
                 kernel_initializer,
                 mode,
-                padding='valid',
                 make_trainable=make_trainable,
                 num_previously_built_inception_modules=module_num,
                 weight_regularizer=kernel_regularizer)
@@ -259,9 +320,391 @@ def metric_dict_creator(the_dict):
     return metric_dict
 
 
+def score_comparison_model_fn(features, labels, mode, params):
+    """
+    Generates an EstimatorSpec for the model.
+    """
+
+    if mode == tf.estimator.ModeKeys.PREDICT:
+        input_layer = features['board']
+    else:
+        # Reshape features from original shape of [-1, 2, 8, 8, params['num_input_filters']]
+        input_layer = tf.reshape(features, [-1, 8, 8, params['num_input_filters']])
+
+
+    inception_module_outputs, activation_summaries = build_convolutional_modules(
+        input_layer,
+        params['inception_modules'],
+        mode,
+        params['kernel_initializer'],
+        params['kernel_regularizer'],
+        params['trainable_cnn_modules'])
+
+
+    if not params["conv_init_fn"] is None: #and tf.train.global_step(tf.get_default_session(), tf.train.get_global_step()) == 0:
+        params["conv_init_fn"]()
+
+
+    # Build the fully connected layers
+    dense_layers_outputs, activation_summaries = build_fully_connected_layers_with_batch_norm(
+        inception_module_outputs,
+        params['dense_shape'],
+        params['kernel_initializer'],
+        mode,
+        activation_summaries=activation_summaries)
+
+
+    # Create the final layer of the ANN
+    logits = tf.layers.dense(inputs=dense_layers_outputs,
+                             units=params['num_outputs'],
+                             use_bias=False,
+                             activation=None,
+                             kernel_initializer=params['kernel_initializer'](),
+                             name="logit_layer")
+
+    loss = None
+    train_op = None
+
+
+    # Calculate loss (for both TRAIN and EVAL modes)
+    if mode != tf.estimator.ModeKeys.PREDICT:
+
+        reshaped_logits = tf.reshape(logits, [-1, 2])
+
+        first_boards_logits, second_boards_logits = tf.split(reshaped_logits, 2, axis=1)
+        first_boards_labels, second_boards_labels = tf.split(labels, 2, axis=1)
+
+        first_board_intended_greater = tf.greater(first_boards_labels, second_boards_labels)
+
+        intended_greater_logits = tf.where(first_board_intended_greater, first_boards_logits, second_boards_logits)
+        intended_less_logits = tf.where(first_board_intended_greater, second_boards_logits, first_boards_logits)
+
+        intended_greater_logits_minus_less = intended_greater_logits - intended_less_logits
+
+
+        with tf.variable_scope("loss"):
+            loss = tf.reduce_mean(-tf.log(tf.sigmoid(intended_greater_logits_minus_less)))
+            loss_summary = tf.summary.scalar("loss", loss)
+
+
+    # Configure the Training Op (for TRAIN mode)
+    if mode == tf.estimator.ModeKeys.TRAIN:
+        global_step = tf.train.get_global_step()
+        learning_rate = params['learning_decay_function'](global_step)
+        tf.summary.scalar("learning_rate", learning_rate)
+        train_op = layers.optimize_loss(
+            loss=loss,
+            global_step=global_step,
+            learning_rate=learning_rate,
+            optimizer=params['optimizer'],
+            summaries=params['train_summaries'])
+
+
+    # Generate predictions
+    predictions = {"scores" : logits}
+
+    # A dictionary for scoring used when exporting model for serving.
+    the_export_outputs = {"serving_default" : tf.estimator.export.RegressionOutput(value=logits)}
+
+
+    # Create the validation metrics
+    validation_metrics = None
+    if mode != tf.estimator.ModeKeys.PREDICT:
+        ratio_better_move_chosen = tf.reduce_mean(tf.cast(tf.greater(intended_greater_logits, intended_less_logits), dtype=tf.float32))
+
+        to_create_metric_dict = {
+            "loss/loss": (loss, loss_summary),
+            "metrics/mean_evaluation_value" : logits,
+            "metrics/mean_abs_evaluation_value": tf.abs(logits),
+            "metrics/mean_dist_between_better_worse_boards" : intended_greater_logits_minus_less,
+            "metrics/ratio_better_move_chosen" : ratio_better_move_chosen,
+        }
+
+        validation_metrics = metric_dict_creator(to_create_metric_dict)
+
+    # Create the trainable variable summaries and merge them together to give to a hook
+    trainable_var_summaries = layers.summarize_tensors(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES))  # Not sure if needs to be stored as a variable, should check
+    merged_summaries = tf.summary.merge_all()
+    summary_hook = tf.train.SummarySaverHook(save_steps=params['log_interval'],
+                                             output_dir=params['model_dir'],
+                                             summary_op=merged_summaries)
+
+
+    # Return the EstimatorSpec object
+    return tf.estimator.EstimatorSpec(
+        mode=mode,
+        predictions=predictions,
+        loss=loss,
+        train_op=train_op,
+        training_hooks=[summary_hook],
+        export_outputs=the_export_outputs,
+        eval_metric_ops=validation_metrics)
+
+
+def sf_score_replicator_model_fn(features, labels, mode, params):
+    """
+    Generates an EstimatorSpec for the model.
+    """
+
+    input_layer = features['board']
+
+    inception_module_outputs, activation_summaries = build_convolutional_modules(
+        input_layer,
+        params['inception_modules'],
+        mode,
+        params['kernel_initializer'],
+        params['kernel_regularizer'],
+        params['trainable_cnn_modules'])
+
+    if not params["conv_init_fn"] is None:  # and tf.train.global_step(tf.get_default_session(), tf.train.get_global_step()) == 0:
+        params["conv_init_fn"]()
+
+    # Build the fully connected layers
+    dense_layers_outputs, activation_summaries = build_fully_connected_layers_with_batch_norm(
+        inception_module_outputs,
+        params['dense_shape'],
+        params['kernel_initializer'],
+        mode,
+        activation_summaries=activation_summaries)
+
+    # Create the final layer of the ANN
+    logits = tf.layers.dense(inputs=dense_layers_outputs,
+                             units=params['num_outputs'],
+                             use_bias=False,
+                             activation=None,
+                             kernel_initializer=params['kernel_initializer'](),
+                             name="logit_layer")
+
+    loss = None
+    train_op = None
+
+    # Calculate loss (for both TRAIN and EVAL modes)
+    if mode != tf.estimator.ModeKeys.PREDICT:
+        # Implementing an altered version of the loss function defined in Deep Pink
+        # There are a few other methods I've been trying out in commented out, though none seem to be as good as
+        # the one proposed in Deep Pink
+        with tf.variable_scope("loss"):
+            loss = tf.losses.mean_squared_error(labels / 100, tf.squeeze(logits, 1) / 100)
+
+            loss_summary = tf.summary.scalar("loss", loss)
+
+    # Configure the Training Op (for TRAIN mode)
+    if mode == tf.estimator.ModeKeys.TRAIN:
+        global_step = tf.train.get_global_step()
+        learning_rate = params['learning_decay_function'](global_step)
+        tf.summary.scalar("learning_rate", learning_rate)
+        train_op = layers.optimize_loss(
+            loss=loss,
+            global_step=global_step,
+            learning_rate=learning_rate,
+            optimizer=params['optimizer'],
+            summaries=params['train_summaries'])
+
+    # Generate predictions
+    predictions = {"scores": logits}
+
+    # A dictionary for scoring used when exporting model for serving.
+    the_export_outputs = {"serving_default": tf.estimator.export.RegressionOutput(value=logits)}
+
+    # Create the validation metrics
+    validation_metrics = None
+    if mode != tf.estimator.ModeKeys.PREDICT:
+        dist_from_desired = logits - labels
+
+        to_create_metric_dict = {
+            "metrics/mean_dist_from_desired": dist_from_desired,
+            "metrics/mean_abs_dist_from_desired": tf.abs(dist_from_desired),
+            "loss/loss": (loss, loss_summary),
+        }
+
+        validation_metrics = metric_dict_creator(to_create_metric_dict)
+
+    # Create the trainable variable summaries and merge them together to give to a hook
+    trainable_var_summaries = layers.summarize_tensors(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES))  # Not sure if needs to be stored as a variable, should check
+    merged_summaries = tf.summary.merge_all()
+    summary_hook = tf.train.SummarySaverHook(save_steps=params['log_interval'],
+                                             output_dir=params['model_dir'],
+                                             summary_op=merged_summaries)
+
+    # Return the EstimatorSpec object
+    return tf.estimator.EstimatorSpec(
+        mode=mode,
+        predictions=predictions,
+        loss=loss,
+        train_op=train_op,
+        training_hooks=[summary_hook],
+        export_outputs=the_export_outputs,
+        eval_metric_ops=validation_metrics)
+
+
+def deep_pink_model_fn(features, labels, mode, params):
+    """
+    Generates an EstimatorSpec for the model.
+    """
+
+    if mode == tf.estimator.ModeKeys.PREDICT:
+        input_layer = features["feature"]
+    else:
+        #Reshape features from original shape of [-1, 3, 8, 8, 16]
+        input_layer = tf.reshape(features, [-1, 8, 8, params['num_input_filters']])
+
+
+    inception_module_outputs, activation_summaries = build_convolutional_modules(
+        input_layer,
+        params['inception_modules'],
+        mode,
+        params['kernel_initializer'],
+        params['kernel_regularizer'],
+        params['trainable_cnn_modules'])
+
+
+    if not params["conv_init_fn"] is None: #and tf.train.global_step(tf.get_default_session(), tf.train.get_global_step()) == 0:
+        params["conv_init_fn"]()
+
+
+    # Build the fully connected layers
+    dense_layers_outputs, activation_summaries = build_fully_connected_layers_with_batch_norm(
+        inception_module_outputs,
+        params['dense_shape'],
+        params['kernel_initializer'],
+        mode,
+        activation_summaries=activation_summaries)
+
+
+    # Create the final layer of the ANN
+    logits = tf.layers.dense(inputs=dense_layers_outputs,
+                             units=params['num_outputs'],
+                             use_bias=False,
+                             activation=None,
+                             kernel_initializer=params['kernel_initializer'](),
+                             name="logit_layer")
+
+    loss = None
+    train_op = None
+    ratio_old_new_sum_loss_to_negative_sum = None
+
+
+    # Calculate loss (for both TRAIN and EVAL modes)
+    if mode != tf.estimator.ModeKeys.PREDICT:
+        to_split = tf.reshape(logits, [-1, 3])
+        original_pos, desired_pos, random_pos = tf.split(to_split, [1, 1, 1], 1)
+
+
+        # Implementing an altered version of the loss function defined in Deep Pink
+        # There are a few other methods I've been trying out in commented out, though none seem to be as good as
+        # the one proposed in Deep Pink
+        with tf.variable_scope("loss"):
+            adjusted_equality_sum = (original_pos + desired_pos)
+            adjusted_real_rand_sum = (random_pos - desired_pos)
+
+            real_greater_rand_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(adjusted_real_rand_sum)))
+
+            equality_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(adjusted_equality_sum)))
+            negative_equality_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid( -adjusted_equality_sum)))
+
+            ratio_old_new_sum_loss_to_negative_sum = tf.divide(equality_scalar_loss, negative_equality_scalar_loss)
+
+            real_rand_loss_summary = tf.summary.scalar("real_greater_rand_loss", real_greater_rand_scalar_loss)
+
+
+            equality_sum_loss_summary = tf.summary.scalar("mean_original_plus_desired_loss", equality_scalar_loss)
+            negative_equality_sum_loss_summary = tf.summary.scalar("mean_negative_original_plus_desired", negative_equality_scalar_loss)
+
+
+            # loss = real_greater_rand_scalar_loss
+            loss = real_greater_rand_scalar_loss + equality_scalar_loss + negative_equality_scalar_loss
+
+            loss_summary = tf.summary.scalar("loss", loss)
+
+
+    # Configure the Training Op (for TRAIN mode)
+    if mode == tf.estimator.ModeKeys.TRAIN:
+        global_step = tf.train.get_global_step()
+        learning_rate = params['learning_decay_function'](global_step)
+        tf.summary.scalar("learning_rate", learning_rate)
+        train_op = layers.optimize_loss(
+            loss=loss,
+            global_step=global_step,
+            learning_rate=learning_rate,
+            optimizer=params['optimizer'],
+            summaries=params['train_summaries'])
+
+
+    # Generate predictions
+    predictions = {"scores" : logits}
+
+    # A dictionary for scoring used when exporting model for serving.
+    the_export_outputs = {"serving_default" : tf.estimator.export.RegressionOutput(value=logits)}
+
+
+    # Create the validation metrics
+    validation_metrics = None
+    if mode != tf.estimator.ModeKeys.PREDICT:
+        old_plus_desired = original_pos + desired_pos
+        rand_real_diff = random_pos - desired_pos
+
+        abs_rand_real_diff = tf.abs(rand_real_diff)
+
+        abs_old_plus_desired = tf.abs(old_plus_desired)
+        mean_abs_old_plus_desired = tf.reduce_mean(abs_old_plus_desired)
+
+        abs_randreal_realold_ratio = tf.reduce_mean(rand_real_diff) / mean_abs_old_plus_desired
+
+        rand_vs_real_accuracy = tf.cast(tf.less(desired_pos, random_pos), tf.float32)
+
+
+        to_create_metric_dict = {
+            "metrics/rand_vs_real_accuracy" : rand_vs_real_accuracy,
+            "metrics/mean_dist_rand_real" : rand_real_diff,
+            "metrics/mean_abs_rand_real_diff" : abs_rand_real_diff,
+            "metrics/mean_dist_old_real" : old_plus_desired,
+            "metrics/mean_abs_dist_old_real" : mean_abs_old_plus_desired,
+            "metrics/abs_randreal_realold_ratio" : abs_randreal_realold_ratio,
+
+            "metrics/mean_old_pos" : original_pos,
+            "metrics/mean_new_pos": desired_pos,
+            "metrics/mean_random_pos": random_pos,
+            "metrics/mean_abs_old_pos": tf.abs(original_pos),
+            "metrics/mean_abs_new_pos": tf.abs(desired_pos),
+            "metrics/mean_abs_random_pos": tf.abs(random_pos),
+
+            "loss/real_greater_rand_loss" : (real_greater_rand_scalar_loss, real_rand_loss_summary),
+            "loss/mean_original_plus_desired_loss" : (equality_scalar_loss, equality_sum_loss_summary),
+            "loss/mean_negative_original_plus_desired" : (negative_equality_scalar_loss, negative_equality_sum_loss_summary),
+            "loss/ratio_old_new_sum_loss_to_negative_sum": ratio_old_new_sum_loss_to_negative_sum,
+
+            "loss/loss" : (loss, loss_summary),
+        }
+
+
+        validation_metrics = metric_dict_creator(to_create_metric_dict)
+
+    # Create the trainable variable summaries and merge them together to give to a hook
+    trainable_var_summaries = layers.summarize_tensors(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES))  # Not sure if needs to be stored as a variable, should check
+    merged_summaries = tf.summary.merge_all()
+    summary_hook = tf.train.SummarySaverHook(save_steps=params['log_interval'],
+                                             output_dir=params['model_dir'],
+                                             summary_op=merged_summaries)
+
+
+    # Return the EstimatorSpec object
+    return tf.estimator.EstimatorSpec(
+        mode=mode,
+        predictions=predictions,
+        loss=loss,
+        train_op=train_op,
+        training_hooks=[summary_hook],
+        export_outputs=the_export_outputs,
+        eval_metric_ops=validation_metrics)
+
+
 def encoder_builder_fn(features, labels, mode, params):
     """
     Generates an EstimatorSpec for the model.
+
+    NOTES:
+    1) I'm not sure yet, but lately I've been thinking the encoder isn't needed/wanted (if the encoder starts being
+    used again, this will be refactored immediately)
     """
 
     if mode == tf.estimator.ModeKeys.PREDICT:
@@ -303,11 +746,10 @@ def encoder_builder_fn(features, labels, mode, params):
     if mode != tf.estimator.ModeKeys.PREDICT:
         with tf.variable_scope("loss"):
 
-            index_to_move_dict = {value: key for key, value in generate_move_to_enumeration_dict().items()}
+            index_to_move_dict = {value: key for key, value in bf.generate_move_to_enumeration_dict().items()}
             possible_move_indices = tf.constant([[index_to_move_dict[j][0],index_to_move_dict[j][1]] for j in range(len(index_to_move_dict))], dtype=tf.int32)
 
             legal_move_ints = tf.transpose(tf.to_int32(labels))
-
 
             move_logits_to_from_format = tf.transpose(tf.reshape(move_logit_slices, (-1,64,64)),perm=[1,2,0])
 
@@ -371,10 +813,8 @@ def encoder_builder_fn(features, labels, mode, params):
         validation_metrics = metric_dict_creator(to_create_metric_dict)
 
 
-
     # Create the trainable variable summaries and merge them together to give to a hook
-    trainable_var_summaries = layers.summarize_tensors(tf.get_collection(
-        tf.GraphKeys.TRAINABLE_VARIABLES))  # Not sure if needs to be stored as a variable, should check
+    trainable_var_summaries = layers.summarize_tensors(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES))  # Not sure if needs to be stored as a variable, should check
     merged_summaries = tf.summary.merge_all()
     summary_hook = tf.train.SummarySaverHook(save_steps=params['log_interval'],
                                              output_dir=params['model_dir'],
@@ -392,194 +832,6 @@ def encoder_builder_fn(features, labels, mode, params):
         eval_metric_ops=validation_metrics)
 
 
-def board_eval_model_fn(features, labels, mode, params):
-    """
-    Generates an EstimatorSpec for the model.
-    """
-
-    if mode == tf.estimator.ModeKeys.PREDICT:
-        input_layer = features["feature"]
-    else:
-        #Reshape features from original shape of [-1, 3, 8, 8, 16]
-        input_layer = tf.reshape(features, [-1, 8, 8, params['num_input_filters']])
-
-
-    inception_module_outputs, activation_summaries = build_convolutional_modules(
-        input_layer,
-        params['inception_modules'],
-        mode,
-        params['kernel_initializer'],
-        params['kernel_regularizer'],
-        params['trainable_cnn_modules'])
-
-
-    if not params["conv_init_fn"] is None: #and tf.train.global_step(tf.get_default_session(), tf.train.get_global_step()) == 0:
-        params["conv_init_fn"]()
-
-
-    # Build the fully connected layers
-    dense_layers_outputs, activation_summaries = build_fully_connected_layers_with_batch_norm(
-        inception_module_outputs,
-        params['dense_shape'],
-        params['kernel_initializer'],
-        mode,
-        activation_summaries=activation_summaries)
-
-
-    # Create the final layer of the ANN
-    logits = tf.layers.dense(inputs=dense_layers_outputs,
-                             units=params['num_outputs'],
-                             use_bias=False,
-                             activation=None,
-                             kernel_initializer=params['kernel_initializer'](),
-                             name="logit_layer")
-
-    loss = None
-    train_op = None
-    ratio_old_new_sum_loss_to_negative_sum = None
-
-
-    # Calculate loss (for both TRAIN and EVAL modes)
-    if mode != tf.estimator.ModeKeys.PREDICT:
-        to_split = tf.reshape(logits, [-1, 3])
-        original_pos, desired_pos, random_pos = tf.split(to_split, [1, 1, 1], 1)
-
-
-        # Implementing an altered version of the loss function defined in Deep Pink
-        # There are a few other methods I've been trying out in commented out, though none seem to be as good as
-        # the one proposed in Deep Pink
-        with tf.variable_scope("loss"):
-            # adjusted_equality_sum = (original_pos + CONSTANT + desired_pos)
-            adjusted_equality_sum = (original_pos + desired_pos)
-            adjusted_real_rand_sum = (random_pos - desired_pos)
-
-            real_greater_rand_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(adjusted_real_rand_sum)))
-
-            # test_new_loss_component = tf.reduce_mean(-tf.log(tf.sigmoid(random_pos + original_pos)))
-            ## test_new_loss_component = tf.reduce_mean(-tf.log(tf.sigmoid(-(original_pos + random_pos))))
-            # test_new_loss_component_summary = tf.summary.scalar("test_new_loss_component", test_new_loss_component)
-
-            equality_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid(adjusted_equality_sum)))
-            negative_equality_scalar_loss = tf.reduce_mean(-tf.log(tf.sigmoid( -adjusted_equality_sum)))
-
-            ratio_old_new_sum_loss_to_negative_sum = tf.divide(equality_scalar_loss, negative_equality_scalar_loss)
-
-            real_rand_loss_summary = tf.summary.scalar("real_greater_rand_loss", real_greater_rand_scalar_loss)
-
-
-            equality_sum_loss_summary = tf.summary.scalar("mean_original_plus_desired_loss", equality_scalar_loss)
-            negative_equality_sum_loss_summary = tf.summary.scalar("mean_negative_original_plus_desired", negative_equality_scalar_loss)
-
-
-            # loss = real_greater_rand_scalar_loss
-            # loss = real_greater_rand_scalar_loss + test_new_loss_component
-            loss = real_greater_rand_scalar_loss + equality_scalar_loss + negative_equality_scalar_loss
-            # loss = real_greater_rand_scalar_loss + equality_scalar_loss + negative_equality_scalar_loss + test_new_loss_component
-
-            loss_summary = tf.summary.scalar("loss", loss)
-
-            ########################################################################################################
-
-            # the_labels = tf.tile(tf.constant([[0, 0, 1]]), [tf.shape(to_split)[0], 1])
-            #
-            # softmax_logits = to_split * tf.constant([[-1,1,1]], dtype=tf.float32)
-            #
-            # cross_entropy_loss = tf.losses.softmax_cross_entropy(the_labels, softmax_logits)
-            #
-            # old_real_sum_squared_scalar_loss = tf.reduce_mean(tf.square(2*(original_pos + desired_pos)))
-            #
-            # loss = cross_entropy_loss + old_real_sum_squared_scalar_loss
-            #
-            # cross_entropy_summary = tf.summary.scalar("cross_entropy_loss", cross_entropy_loss)
-            # old_real_sum_squared_summary = tf.summary.scalar("old_real_sum_squared_loss", old_real_sum_squared_scalar_loss)
-            # loss_summary = tf.summary.scalar("loss", loss)
-
-
-
-    # Configure the Training Op (for TRAIN mode)
-    if mode == tf.estimator.ModeKeys.TRAIN:
-        global_step = tf.train.get_global_step()
-        learning_rate = params['learning_decay_function'](global_step)
-        tf.summary.scalar("learning_rate", learning_rate)
-        train_op = layers.optimize_loss(
-            loss=loss,
-            global_step=global_step,
-            learning_rate=learning_rate,
-            optimizer=params['optimizer'],
-            summaries=params['train_summaries'])
-
-
-    # Generate predictions
-    predictions = {"scores" : logits}
-
-    # A dictionary for scoring used when exporting model for serving.
-    the_export_outputs = {"serving_default" : tf.estimator.export.RegressionOutput(value=logits)}
-
-
-    # Create the validation metrics
-    validation_metrics = None
-    if mode != tf.estimator.ModeKeys.PREDICT:
-        old_plus_desired = original_pos + desired_pos
-        rand_real_diff = random_pos - desired_pos
-
-        abs_rand_real_diff = tf.abs(rand_real_diff)
-
-        abs_old_plus_desired = tf.abs(old_plus_desired)
-        mean_abs_old_plus_desired = tf.reduce_mean(abs_old_plus_desired)
-
-        abs_randreal_realold_ratio = tf.reduce_mean(rand_real_diff) / mean_abs_old_plus_desired
-
-        rand_vs_real_accuracy = tf.cast(tf.less(desired_pos, random_pos), tf.float32)
-
-        to_create_metric_dict = {
-            "metrics/rand_vs_real_accuracy" : rand_vs_real_accuracy,
-            "metrics/mean_dist_rand_real" : rand_real_diff,
-            "metrics/mean_abs_rand_real_diff" : abs_rand_real_diff,
-            "metrics/mean_dist_old_real" : old_plus_desired,
-            "metrics/mean_abs_dist_old_real" : mean_abs_old_plus_desired,#abs_old_plus_desired,
-            "metrics/abs_randreal_realold_ratio" : abs_randreal_realold_ratio,
-
-            "metrics/mean_old_pos" : original_pos,
-            "metrics/mean_new_pos": desired_pos,
-            "metrics/mean_random_pos": random_pos,
-            "metrics/mean_abs_old_pos": tf.abs(original_pos),
-            "metrics/mean_abs_new_pos": tf.abs(desired_pos),
-            "metrics/mean_abs_random_pos": tf.abs(random_pos),
-
-            # "loss/cross_entropy_loss" : (cross_entropy_loss, cross_entropy_summary),
-            # "loss/old_real_sum_squared_loss" : (old_real_sum_squared_scalar_loss, old_real_sum_squared_summary),
-
-            # "loss/test_new_loss_component" : (test_new_loss_component, test_new_loss_component_summary),
-
-            "loss/real_greater_rand_loss" : (real_greater_rand_scalar_loss, real_rand_loss_summary),
-            "loss/mean_original_plus_desired_loss" : (equality_scalar_loss, equality_sum_loss_summary),
-            "loss/mean_negative_original_plus_desired" : (negative_equality_scalar_loss, negative_equality_sum_loss_summary),
-            "loss/ratio_old_new_sum_loss_to_negative_sum": ratio_old_new_sum_loss_to_negative_sum,
-
-            "loss/loss" : (loss, loss_summary),
-        }
-
-
-        validation_metrics = metric_dict_creator(to_create_metric_dict)
-
-    # Create the trainable variable summaries and merge them together to give to a hook
-    trainable_var_summaries = layers.summarize_tensors(tf.get_collection(
-        tf.GraphKeys.TRAINABLE_VARIABLES))  # Not sure if needs to be stored as a variable, should check
-    merged_summaries = tf.summary.merge_all()
-    summary_hook = tf.train.SummarySaverHook(save_steps=params['log_interval'],
-                                             output_dir=params['model_dir'],
-                                             summary_op=merged_summaries)
-
-
-    # Return the EstimatorSpec object
-    return tf.estimator.EstimatorSpec(
-        mode=mode,
-        predictions=predictions,
-        loss=loss,
-        train_op=train_op,
-        training_hooks=[summary_hook],
-        export_outputs=the_export_outputs,
-        eval_metric_ops=validation_metrics)
 
 
 def move_gen_cnn_model_fn(features, labels, mode, params):
@@ -686,8 +938,7 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
 
 
     # Create the trainable variable summaries and merge them together to give to a hook
-    trainable_var_summaries = layers.summarize_tensors(tf.get_collection(
-        tf.GraphKeys.TRAINABLE_VARIABLES))  # Not sure if needs to be stored as a variable, should check
+    trainable_var_summaries = layers.summarize_tensors(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES))  # Not sure if needs to be stored as a variable, should check
     merged_summaries = tf.summary.merge_all()
     summary_hook = tf.train.SummarySaverHook(save_steps=params['log_interval'],
                                              output_dir=params['model_dir'],
@@ -704,50 +955,109 @@ def move_gen_cnn_model_fn(features, labels, mode, params):
         eval_metric_ops=validation_metrics)
 
 
-#Should combine this functionality with the one below it (for creating the encoder),(just add ability to subtract one before one_hot)
-def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size, include_unoccupied=True,
-                                            shuffle_buffer_size=None, repeat=True, num_things_in_parallel=12):
+def one_hot_create_tf_records_input_data_fn(filename_pattern, batch_size=None, include_unoccupied=True,
+                                            shuffle_buffer_size=None, repeat=True, num_things_in_parallel=12,
+                                            return_before_prefetch=False):
     def tf_records_input_data_fn():
-        with tf.device('/cpu:0'):
+        filenames = tf.data.Dataset.list_files(filename_pattern)
+        dataset = filenames.apply(
+            tf.contrib.data.parallel_interleave(
+                lambda filename : tf.data.TFRecordDataset(filename),
+                cycle_length=5,
+                sloppy=True))
 
-            filenames = tf.data.Dataset.list_files(filename_pattern)
-            dataset = filenames.apply(
-                tf.contrib.data.parallel_interleave(
-                    lambda filename : tf.data.TFRecordDataset(filename),
-                    cycle_length=5,
-                    sloppy=True))
+        def parser(record):
+            keys_to_features = {
+                "board": tf.FixedLenFeature([8 * 8 ], tf.int64),
+                "score": tf.FixedLenFeature([], tf.int64),
+            }
 
-            def parser(record):
-                keys_to_features = {
-                    "boards": tf.FixedLenFeature([8 * 8 * 3], tf.int64)}  # , default_value = []),
+            parsed_example = tf.parse_single_example(record, keys_to_features)
 
-
-                return tf.reshape(tf.parse_single_example(record, keys_to_features)["boards"], [-1, 8,8])
-
-            if not shuffle_buffer_size is None:
-                dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
-
-            dataset = dataset.apply(tf.contrib.data.map_and_batch(map_func=parser, batch_size=batch_size, num_parallel_batches=num_things_in_parallel))
+            reshaped_board = tf.reshape(parsed_example['board'], [8,8])
 
             if include_unoccupied:
-                dataset = dataset.map(lambda x: tf.one_hot(x, 16), num_parallel_calls=num_things_in_parallel)
+                one_hot_board = tf.one_hot(reshaped_board, 16)
             else:
-                dataset = dataset.map(lambda x: tf.one_hot(x-1, 15), num_parallel_calls=num_things_in_parallel)
+                one_hot_board = tf.one_hot(reshaped_board - 1, 15)
 
-            dataset = dataset.prefetch(buffer_size=num_things_in_parallel)
+            return one_hot_board, tf.cast(parsed_example['score'], tf.float32)
 
-            if repeat:
-                dataset = dataset.repeat()
+        if not shuffle_buffer_size is None:
+            dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
 
-            iterator = dataset.make_one_shot_iterator()
+        if not batch_size is None:
+            dataset = dataset.apply(tf.contrib.data.map_and_batch(map_func=parser, batch_size=batch_size, num_parallel_batches=num_things_in_parallel))
+        else:
+            dataset = dataset.map(parser, num_parallel_calls=num_things_in_parallel)
 
-            features = iterator.get_next()
-            return features, None
+        if return_before_prefetch:
+            return dataset
+
+        dataset = dataset.prefetch(buffer_size=num_things_in_parallel)
+
+        if repeat:
+            dataset = dataset.repeat()
+
+        iterator = dataset.make_one_shot_iterator()
+
+        features = iterator.get_next()
+
+        for_model = {"board" : features[0]}
+
+        return for_model, features[1]
 
     return tf_records_input_data_fn
 
+
+
+def score_comparison_input_data_fn(filename_pattern, batch_size, include_unoccupied=True,
+                                   shuffle_buffer_size=None, repeat=True, num_things_in_parallel=12, num_things_to_prefetch=None):
+
+    if num_things_to_prefetch is None:
+        num_things_to_prefetch = num_things_in_parallel
+
+
+
+    dataset_1 = one_hot_create_tf_records_input_data_fn(filename_pattern, None, include_unoccupied,
+                                                        shuffle_buffer_size, repeat, num_things_in_parallel,
+                                                        return_before_prefetch=True)()
+
+    dataset_2 = one_hot_create_tf_records_input_data_fn(filename_pattern, None, include_unoccupied,
+                                                        shuffle_buffer_size, repeat, num_things_in_parallel,
+                                                        return_before_prefetch=True)()
+
+
+    combined_dataset = tf.data.Dataset.zip((dataset_1, dataset_2))
+
+    combined_dataset = combined_dataset.filter(lambda x, y: x[1] != y[1])
+
+    combined_dataset = combined_dataset.apply(
+        tf.contrib.data.map_and_batch(
+            map_func=lambda x, y: (tf.stack([x[0], y[0]]), tf.stack([x[1], y[1]])),
+            batch_size=batch_size,
+            num_parallel_batches=num_things_in_parallel))
+
+
+    combined_dataset = combined_dataset.prefetch(buffer_size=num_things_to_prefetch)
+
+    if repeat:
+        combined_dataset = combined_dataset.repeat()
+
+    iterator = combined_dataset.make_one_shot_iterator()
+
+    features = iterator.get_next()
+
+    return features[0], features[1]
+
+
 def encoder_tf_records_input_data_fn(filename_pattern, batch_size, shuffle_buffer_size=100000, include_unoccupied=True,
                                      repeat=True, shuffle=True, num_things_in_parallel=12):
+    """
+    NOTES:
+    1) I'm not sure yet, but lately I've been thinking the encoder isn't needed/wanted (if the encoder starts being
+    used again, this will be refactored immediately)
+    """
     def tf_records_input_data_fn():
 
         filenames = tf.data.Dataset.list_files(filename_pattern)
@@ -769,7 +1079,9 @@ def encoder_tf_records_input_data_fn(filename_pattern, batch_size, shuffle_buffe
             else:
                 reshaped_board = tf.one_hot(tf.reshape(parsed_record[0]["board"], [8, 8])-1,15)
 
-            sparse_tensor = tf.sparse_tensor_to_dense(tf.SparseTensor(tf.expand_dims(parsed_record[1]["moves"],1), tf.fill(tf.shape(parsed_record[1]["moves"]),True),[1792]),default_value=False,validate_indices=False)
+            sparse_tensor = tf.sparse_tensor_to_dense(tf.SparseTensor(tf.expand_dims(
+                parsed_record[1]["moves"], 1),tf.fill(tf.shape(parsed_record[1]["moves"]),True), [1792]),
+                default_value=False,validate_indices=False)
 
             return reshaped_board, sparse_tensor
 
@@ -799,11 +1111,7 @@ def move_index_getter(moves, moves_per_board, max_batch_size=20000, max_moves_pe
             [max_batch_size, max_moves_per_board]),
         [1, 0])
 
-    move_to_index_array = np.zeros(shape=[64, 64], dtype=np.int32)
-    for key, value in generate_move_to_enumeration_dict().items():
-        move_to_index_array[key[0], key[1]] = value
-
-    move_to_index_tensor = tf.constant(move_to_index_array, shape=[64, 64])
+    move_to_index_tensor = tf.constant(bf.MOVE_TO_INDEX_ARRAY, shape=[64, 64])
 
     board_indices_for_moves = tf.boolean_mask(board_index_repeated_array,
                                               tf.sequence_mask(tf.cast(moves_per_board, tf.int32)))
@@ -888,7 +1196,7 @@ def move_gen_create_tf_records_input_data_fn(filename_pattern, batch_size, shuff
     return input_fn
 
 
-def no_chestimator_serving_input_reciever():
+def board_eval_serving_input_receiver():
     (piece_bbs, color_occupied_bbs, ep_squares, castling_lookup_indices, kings), formatted_data = get_board_data()
 
     receiver_tensors = {"piece_bbs": piece_bbs,
@@ -897,10 +1205,12 @@ def no_chestimator_serving_input_reciever():
                         "castling_lookup_indices": castling_lookup_indices,
                         "kings": kings}
 
-    return tf.estimator.export.ServingInputReceiver(formatted_data, receiver_tensors)
+    dict_for_model_fn = {"board": formatted_data}
+
+    return tf.estimator.export.ServingInputReceiver(dict_for_model_fn, receiver_tensors)
 
 
-def no_chestimator_serving_move_scoring_input_reciever(max_batch_size=50000, max_moves_per_board=100):
+def move_scoring_serving_input_receiver(max_batch_size=50000, max_moves_per_board=100):
     (piece_bbs, color_occupied_bbs, ep_squares, castling_lookup_indices, kings), formatted_data = get_board_data()
 
     moves_per_board = tf.placeholder(tf.uint8, shape=[None], name="moves_per_board_placeholder")
