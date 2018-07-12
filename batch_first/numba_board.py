@@ -1186,7 +1186,7 @@ def set_up_move_array(board_struct):
 
     if board_struct['children_left'] == 0:
         board_struct['terminated'] = True
-        board_struct['best_value'] = LOSS_RESULT_SCORE if checkers else TIE_RESULT_SCORE
+        board_struct['best_value'] = LOSS_RESULT_SCORES[board_struct['depth']] if checkers else TIE_RESULT_SCORE
 
 @njit
 def set_up_move_array_except_move(board_struct, move_to_avoid):

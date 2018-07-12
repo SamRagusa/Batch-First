@@ -5,9 +5,8 @@ import time
 import batch_first as bf
 
 from .numba_board import *
-
 from .board_jitclass import BoardState, has_legal_move, is_in_check
-from .transposition_table import add_board_and_move_to_tt, choose_move
+from . import transposition_table as tt
 
 
 
@@ -189,7 +188,7 @@ def should_terminate_from_tt(board_struct, hash_table):
     1) While this currently does work, it represents one of the most crucial components of the negamax search,
     and has not been given the thought and effort it needs.  This is an extremely high priority
     """
-    hash_entry = hash_table[board_struct['hash'] & ONES_IN_RELEVANT_BITS_FOR_TT_INDEX]
+    hash_entry = hash_table[board_struct['hash'] & TT_HASH_MASK]
     if hash_entry['depth'] != NO_TT_ENTRY_VALUE:
         if hash_entry['entry_hash'] == board_struct['hash']:
             if hash_entry['depth'] >= board_struct['depth']:
@@ -253,10 +252,9 @@ def depth_zero_should_terminate_array(struct_array, hash_table):
 
                     struct_array[j]['terminated'] = True
                     if is_in_check(TEMP_JITCLASS_OBJECT):
-                        struct_array[j]['best_value'] = LOSS_RESULT_SCORE
+                        struct_array[j]['best_value'] = LOSS_RESULT_SCORES[struct_array[j]['depth']]
                     else:
                         struct_array[j]['best_value'] = TIE_RESULT_SCORE
-
 
 
 @njit
@@ -269,16 +267,12 @@ def has_legal_tt_move(board_struct, hash_table):
 
     :return: True if a move is found, or False if not.
     """
-    node_entry = hash_table[board_struct['hash'] & bf.ONES_IN_RELEVANT_BITS_FOR_TT_INDEX]
+    node_entry = hash_table[board_struct['hash'] & bf.TT_HASH_MASK]
     if node_entry['depth'] != bf.NO_TT_ENTRY_VALUE:
         if node_entry['entry_hash'] == board_struct['hash']:
-            if node_entry['stored_from_square'] != bf.NO_TT_MOVE_VALUE:
-                move_tuple = (node_entry["stored_from_square"],
-                                  node_entry["stored_to_square"],
-                                  node_entry["stored_promotion"])
-
-                if scalar_is_legal_move(board_struct, move_tuple):
-                    board_struct['unexplored_moves'][0] = move_tuple
+            if node_entry['stored_move'][0] != bf.NO_TT_MOVE_VALUE:
+                if scalar_is_legal_move(board_struct, node_entry['stored_move']):
+                    board_struct['unexplored_moves'][0] = node_entry['stored_move']
                     board_struct['next_move_index'] = 0
                     board_struct['children_left'] = bf.NEXT_MOVE_IS_FROM_TT_VAL
                     return True
@@ -315,6 +309,8 @@ def child_termination_check_and_move_gen(struct_array, hash_table):
 @njit
 def create_child_structs(struct_array, testing=False):
     #This should not copy the entire array, instead only the fields which are not directly written over
+    #Also this should not be creating full structs for depth zero nodes, a new dtype will likely need to be created
+    #which has a subset of the current ones fields.
     child_array = struct_array.copy()
 
     new_next_move_values = np.empty_like(struct_array['best_value'])
@@ -323,7 +319,6 @@ def create_child_structs(struct_array, testing=False):
     moves_to_push = np.empty((len(struct_array), 3), dtype=np.uint8)
 
     for j in range(len(struct_array)):
-
         child_array[j]['unexplored_moves'][:] = 255
         child_array[j]['unexplored_move_scores'][:] = MIN_FLOAT32_VAL
         child_array[j]['prev_move'][:] = struct_array[j]['unexplored_moves'][struct_array[j]['next_move_index']]
@@ -387,7 +382,7 @@ def update_node_from_value(node, value, following_move, hash_table):
 
             if node.board_struct[0]['best_value'] >= node.board_struct[0]['separator'] or node.board_struct[0]['children_left'] == 0:
                 node.board_struct[0]['terminated'] = True
-                add_board_and_move_to_tt(node.board_struct[0], following_move, hash_table)
+                tt.add_board_and_move_to_tt(node.board_struct[0], following_move, hash_table)
 
                 # This is being checked at the start of the call also and thus should be removedMoved several dependencies to newer versions
                 if not node.parent is None:
@@ -418,13 +413,9 @@ def update_tree_from_terminating_nodes(parent_nodes, struct_array, hash_table, w
             print("The tree is about to be updated with values which should be unreachable! The following are the unreachable values attempting to be used to update: (%s)" %
                   str(np.unique(struct_array[to_update_not_evaluated_mask]['best_value'])))
 
-
-    # Since no node being given to this function will have terminated from a child, none of them will have moves to store in the TT.
-    # Also the passing of a copy instead of a view will (I think) ensure the memory be aligned for compilation to
-    # vectorized versions of the looped functions
-    # add_boards_to_tt(struct_array[should_update_mask],hash_table)
-
     if not eval_results is None:
+        tt.add_evaluated_boards_to_tt(struct_array, was_evaluated_mask, eval_results, hash_table)
+
         eval_results_for_parents = - eval_results
 
     index_in_evaluations = 0
@@ -658,7 +649,6 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
             num_children_move_scoring,
             num_adult_move_scoring)
 
-
     update_tree_from_terminating_nodes(
         node_batch,
         child_struct,
@@ -851,29 +841,27 @@ def set_up_root_node(move_eval_fn, hash_table, fen, depth=255, separator=0):
 
 
 
-def mtd_f(fen, depth, first_guess, min_window_to_confirm, open_node_holder, board_eval_fn, move_eval_fn, hash_table,
-          guess_increment=.5, win_threshold=1000000, loss_threshold=-1000000, print_partial_info=False,
-          print_all_info=False, testing=False):
-    counter = 0
+def mtd_f(fen, depth, first_guess, open_node_holder, board_eval_fn, move_eval_fn, hash_table,
+          guess_increment=.5, print_partial_info=False, print_all_info=False, testing=False):
+
     cur_guess = first_guess
-    upper_bound = MAX_FLOAT32_VAL
-    lower_bound = MIN_FLOAT32_VAL
-    while upper_bound - min_window_to_confirm > lower_bound:
-        if upper_bound == MAX_FLOAT32_VAL and lower_bound >= win_threshold:
-            break
+    upper_bound = WIN_RESULT_SCORES[0]
+    lower_bound = LOSS_RESULT_SCORES[0]
 
-        if lower_bound == MIN_FLOAT32_VAL and upper_bound <= loss_threshold:
-            break
+    if print_partial_info:
+        counter = 0
 
-        if lower_bound == MIN_FLOAT32_VAL:
-            if upper_bound != MAX_FLOAT32_VAL:
-                beta = upper_bound - guess_increment
+    while lower_bound < upper_bound:
+
+        if lower_bound == LOSS_RESULT_SCORES[0]:
+            if upper_bound != WIN_RESULT_SCORES[0]:
+                beta = min(upper_bound - guess_increment, np.nextafter(upper_bound, MIN_FLOAT32_VAL))
             else:
                 beta = cur_guess
-        elif upper_bound == MAX_FLOAT32_VAL:
-            beta = lower_bound + guess_increment
+        elif upper_bound == WIN_RESULT_SCORES[0]:
+            beta = max(lower_bound + guess_increment, np.nextafter(lower_bound, MAX_FLOAT32_VAL))
         else:
-            beta = lower_bound + (upper_bound - lower_bound) / 2
+            beta = max(lower_bound + (upper_bound - lower_bound) / 2, np.nextafter(lower_bound, MAX_FLOAT32_VAL))
 
         seperator_to_use = np.nextafter(beta, MIN_FLOAT32_VAL)
 
@@ -900,46 +888,34 @@ def mtd_f(fen, depth, first_guess, min_window_to_confirm, open_node_holder, boar
             lower_bound = cur_guess
 
         if print_partial_info:
-            print("Finished iteration %d with lower and upper bounds (%f,%f) after search returned %f" % (counter+1, lower_bound, upper_bound, cur_guess))
+            counter += 1
+            print("Finished iteration %d with lower and upper bounds (%f,%f) after search returned %f" % (counter, lower_bound, upper_bound, cur_guess))
 
-
-        counter += 1
-
-
-    tt_move = choose_move(hash_table, cur_root_node)
+    tt_move = tt.choose_move(hash_table, cur_root_node)
 
     return cur_guess, tt_move, hash_table
 
 
-def iterative_deepening_mtd_f(fen, depths_to_search, min_windows_to_confirm, open_node_holder, board_eval_fn,
-                              move_eval_fn, hash_table, first_guess=0, guess_increments=None, win_threshold=1000000,
-                              loss_threshold=-1000000, print_partial_info=False, print_all_info=False, testing=False):
+def iterative_deepening_mtd_f(fen, depths_to_search, open_node_holder, board_eval_fn, move_eval_fn, hash_table,
+                              first_guess=0, guess_increments=None, print_partial_info=False,print_all_info=False,
+                              testing=False):
     if guess_increments is None:
         guess_increments = [5]*len(depths_to_search)
 
-    for depth, window, increment in zip(depths_to_search, min_windows_to_confirm, guess_increments):
+    for depth, increment in zip(depths_to_search, guess_increments):
         if print_partial_info:
             print("Starting depth %d search"%depth)
-
-
-        if first_guess >= win_threshold:
-            first_guess = win_threshold
-        elif first_guess <= loss_threshold:
-            first_guess = loss_threshold
 
         start_time = time.time()
         first_guess, tt_move, hash_table = mtd_f(
             fen,
             depth,
             first_guess,
-            window,
             open_node_holder,
             board_eval_fn,
             move_eval_fn,
             hash_table=hash_table,
             guess_increment=increment,
-            win_threshold=win_threshold,
-            loss_threshold=loss_threshold,
             print_partial_info=print_partial_info,
             print_all_info=print_all_info,
             testing=testing)
@@ -950,7 +926,5 @@ def iterative_deepening_mtd_f(fen, depths_to_search, min_windows_to_confirm, ope
 
 
     return first_guess, tt_move, hash_table
-
-
 
 

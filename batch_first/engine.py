@@ -2,12 +2,15 @@ import numpy as np
 from scipy import stats
 
 from .transposition_table import get_empty_hash_table
-from .numba_negamax_zero_window import iterative_deepening_mtd_f, start_move_scoring
+from .numba_negamax_zero_window import iterative_deepening_mtd_f, start_move_scoring, create_root_game_node_from_fen
 from .global_open_priority_nodes import PriorityBins
 
 
 
-def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False, num_batches=125):
+
+
+
+def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False, num_batches=125, output_filename=None):
     """
     Generate values representing the boundaries for the bins in the PriorityBins class based on a given
     move evaluation function.
@@ -18,8 +21,10 @@ def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False
     :param quantiles: The quantiles desired from the sample of move scores computed
     :param print_info: A boolean value indicating if info about the computations should be printed
     :param num_batches: The number of batches to split the given database into for inference
+    :param output_filename: The filename to save the computed bins to, or None if saving the bins is not desired
     :return: An ndarray of the values at the given quantiles
     """
+
     def bin_helper_move_scoring_fn(struct_array, move_eval_fn):
         move_thread, move_score_getter, _, _ = start_move_scoring(
             struct_array,
@@ -33,6 +38,8 @@ def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False
         move_thread.join()
 
         return - move_score_getter[0]([from_to_squares, struct_array['children_left']])
+
+
 
 
     if quantiles is None:
@@ -60,7 +67,12 @@ def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False
     if print_info:
         print("Computed %d move evaluations"%len(combined_results))
 
-    return stats.mstats.mquantiles(combined_results, quantiles)
+    bins = stats.mstats.mquantiles(combined_results, quantiles)
+
+    if not output_filename is None:
+        np.save(output_filename, bins)
+
+    return bins
 
 
 class ChessEngine(object):
@@ -87,7 +99,14 @@ class ChessEngine(object):
 
 class BatchFirstEngine(ChessEngine):
 
-    def __init__(self, search_depth, board_eval_fn, move_eval_fn, bin_database_file, win_threshold=100000, loss_threshold=-100000, first_guess_fn=None):
+    def __init__(self, search_depth, board_eval_fn, move_eval_fn, bin_database_file, bin_output_filename=None,
+                 first_guess_fn=None):
+        """
+        :param bin_database_file: If bin_output_filename is not None, then this is the NumPy database of boards to have
+        bins be created from.  If bin_output_filename is None, then this is the NumPy file containing an array of bins.
+        :param bin_output_filename: The name of the (NumPy) file which will be saved containing the bins computed, or None
+        if the bins should not be saved.
+        """
         if first_guess_fn is None:
             self.first_guess_fn = lambda x : 0
         else:
@@ -99,25 +118,24 @@ class BatchFirstEngine(ChessEngine):
         self.board_evaluator = board_eval_fn
         self.move_evaluator = move_eval_fn
 
-        self.open_node_holder = PriorityBins(
-            generate_bin_ranges(bin_database_file, self.move_evaluator),
-            10000,
-            testing=False)
+        if bin_output_filename is None:
+            bins = np.load(bin_database_file)
+        else:
+            bins = generate_bin_ranges(bin_database_file, self.move_evaluator, output_filename=bin_output_filename),
 
-        self.win_threshold = win_threshold
-        self.loss_threshold = loss_threshold
+        self.open_node_holder = PriorityBins(
+            bins,
+            5000,
+            testing=False)
 
     def pick_move(self, board):
         returned_score, move_to_return, self.hash_table = iterative_deepening_mtd_f(
             fen=board.fen(),
             depths_to_search=np.arange(self.search_depth)+1,
-            min_windows_to_confirm=[.001]*self.search_depth,
             open_node_holder=self.open_node_holder,
             board_eval_fn=self.board_evaluator,
             move_eval_fn=self.move_evaluator,
             hash_table=self.hash_table,
-            win_threshold=self.win_threshold,
-            loss_threshold=self.loss_threshold,
             # print_partial_info=True,
             # print_all_info=True,         #If this is True, print_partial_info must also be True!
             # testing=True,

@@ -253,16 +253,6 @@ def inference_input_pipeline_test(inference_pipe_fn, boards_to_input_list_fn, bo
         return not np.any(problemed_board_mask), desired_filters, calculated_filters
 
 
-@nb.njit
-def test_constants_are_different_jitted():
-    """
-    This is to verify that float point precision doesn't end up equating win/loss values with unreachable constants.
-
-    :return: True if the test is passed, False if not
-    """
-    return  bf.MIN_FLOAT32_VAL != bf.ALMOST_MIN_FLOAT_32_VAL and bf.MAX_FLOAT32_VAL != bf.ALMOST_MAX_FLOAT_32_VAL
-
-
 def move_verification_tester(move_legality_tester, board_creator_fn, fens_to_test=DEFAULT_TESTING_FENS, moves_to_test=DEFAULT_MOVES_TO_CHECK):
     """
     A function to test a method of move legality verification.  This is used to confirm that the move verification done
@@ -292,7 +282,10 @@ def move_verification_tester(move_legality_tester, board_creator_fn, fens_to_tes
     return True
 
 
-def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_fn, boards_to_input_for_inference, piece_to_filter_fn, ep_filter_index, castling_filter_indices, num_random_games=20,max_moves_per_game=None,uses_unoccupied=False):
+def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_fn, boards_to_input_for_inference,
+                                   piece_to_filter_fn, ep_filter_index, castling_filter_indices, num_random_games=20,
+                                   max_moves_per_game=None, uses_unoccupied=False):
+
     """
     This function can be thought of in two parts, one tests the board evaluation inference pipeline, and the other
      tests the entire board evaluation training pipeline (from PGN to Tensor).
@@ -473,9 +466,7 @@ def full_test():
 
     print("Starting tests.\n")
 
-    constants_results = test_constants_are_different_jitted()
-
-    print("Constants test:                                               %s"%result_str[constants_results])
+    constants_results = ()
 
     jitclass_perft_results = full_perft_tester(
         lambda fen, depth: traditional_perft_test(create_board_state_from_fen(fen), depth))
@@ -515,7 +506,7 @@ def full_test():
 
 
 
-    if constants_results and jitclass_perft_results and scalar_perft_results and move_verification_results and zobrist_hash_results and training_pipe_results and inference_pipe_results:
+    if jitclass_perft_results and scalar_perft_results and move_verification_results and zobrist_hash_results and training_pipe_results and inference_pipe_results:
         print("\nAll tests were passed!")
         return True
     else:

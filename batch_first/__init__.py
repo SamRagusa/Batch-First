@@ -72,13 +72,9 @@ BB_BETWEEN = np.array(chess.BB_BETWEEN, dtype=np.uint64)
 
 MIN_FLOAT32_VAL = np.finfo(np.float32).min
 MAX_FLOAT32_VAL = np.finfo(np.float32).max
-FLOAT32_EPS = 1e30 * np.finfo(np.float32).eps
-ALMOST_MIN_FLOAT_32_VAL = MIN_FLOAT32_VAL / 10
-ALMOST_MAX_FLOAT_32_VAL = MAX_FLOAT32_VAL / 10
+ALMOST_MIN_FLOAT_32_VAL = np.nextafter(MIN_FLOAT32_VAL, MAX_FLOAT32_VAL)
+ALMOST_MAX_FLOAT_32_VAL = np.nextafter(MAX_FLOAT32_VAL, MIN_FLOAT32_VAL)
 
-WIN_RESULT_SCORE = ALMOST_MAX_FLOAT_32_VAL
-LOSS_RESULT_SCORE = ALMOST_MIN_FLOAT_32_VAL
-TIE_RESULT_SCORE = np.float32(0)
 
 # The maximum number of moves which can be stored/assessed by the engine
 MAX_MOVES_LOOKED_AT = 100
@@ -106,9 +102,21 @@ TT_MOVE_SCORE_VALUE = ALMOST_MAX_FLOAT_32_VAL
 # This value is used when there is no current ep square.  It (obviously) does not indicate that square 0 is an ep square
 NO_EP_SQUARE = np.uint8(0)
 
+TIE_RESULT_SCORE = np.float32(0)
+
+# The win/loss arrays are such that the magnitudes of the win/loss decrease as the index in the array increases.
+# This is so depth can be used to index the arrays
+WIN_RESULT_SCORES = np.full(MAX_SEARCH_DEPTH, np.nextafter(ALMOST_MAX_FLOAT_32_VAL, MIN_FLOAT32_VAL))
+LOSS_RESULT_SCORES = np.full(MAX_SEARCH_DEPTH, np.nextafter(ALMOST_MIN_FLOAT_32_VAL, MAX_FLOAT32_VAL))
+
+for j in range(1, MAX_SEARCH_DEPTH):
+    WIN_RESULT_SCORES[j] = np.nextafter(WIN_RESULT_SCORES[j - 1], MIN_FLOAT32_VAL)
+    LOSS_RESULT_SCORES[j] = np.nextafter(LOSS_RESULT_SCORES[j - 1], MAX_FLOAT32_VAL)
+
+
 
 SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES = np.uint8(25)  # This needs to be picked precisely
-ONES_IN_RELEVANT_BITS_FOR_TT_INDEX = np.uint64(2 ** (SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES) - 1)
+TT_HASH_MASK = np.uint64(2 ** (SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES) - 1)
 
 
 COLORS = [WHITE, BLACK] = np.array([1, 0], dtype=np.uint8)
