@@ -1,5 +1,4 @@
 import numpy as np
-import numba as nb
 import tensorflow as tf
 
 from chess.polyglot import zobrist_hash
@@ -14,9 +13,9 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 import batch_first as bf
 
-from batch_first.anns.ann_creation_helper import one_hot_create_tf_records_input_data_fn
+from batch_first.anns.evaluation_ann import one_hot_create_tf_records_input_data_fn
 
-from batch_first.anns.database_creator import create_database_from_pgn, board_eval_data_writer_creator, standard_comparison_move_generator, sf_scoring_writer_creator
+from batch_first.anns.database_creator import create_database_from_pgn, sf_scoring_writer_creator
 
 from batch_first.chestimator import get_board_data
 
@@ -368,7 +367,6 @@ def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_
         ep_filter_index=ep_filter_index,
         castling_filter_indices=castling_filter_indices)
 
-
     no_training_pipe_issues = True
     for filter in one_hot_features:
         num_correct_squares = np.sum(filter == desired_filters, (1,2))
@@ -465,8 +463,6 @@ def full_test():
     result_str = ["Failed", "Passed"]
 
     print("Starting tests.\n")
-
-    constants_results = ()
 
     jitclass_perft_results = full_perft_tester(
         lambda fen, depth: traditional_perft_test(create_board_state_from_fen(fen), depth))

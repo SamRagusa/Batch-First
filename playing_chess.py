@@ -1,4 +1,5 @@
 import numpy as np
+import numba as nb
 
 import chess
 import chess.uci
@@ -7,6 +8,7 @@ import time
 from batch_first.engine import ChessEngine, BatchFirstEngine
 from batch_first.chestimator import get_inference_functions
 from batch_first.anns.ann_creation_helper import save_model_as_graphdef_for_serving
+
 
 
 def play_one_game(engine1, engine2, print_info=False):
@@ -18,15 +20,13 @@ def play_one_game(engine1, engine2, print_info=False):
     prev_move_time = time.time()
     halfmove_counter = 0
     engine1_turn = True
+
     while not the_board.is_game_over():
-        if engine1_turn:
-            engine1.ready_engine()
-            next_move = engine1.pick_move(the_board)
-            engine1.release_resources()
-        else:
-            engine2.ready_engine()
-            next_move = engine2.pick_move(the_board)
-            engine2.release_resources()
+        cur_engine = engine1 if engine1_turn else engine2
+
+        cur_engine.ready_engine()
+        next_move = cur_engine.pick_move(the_board)
+        cur_engine.release_resources()
 
         the_board.push(next_move)
         engine1_turn = not engine1_turn
@@ -71,31 +71,29 @@ class StockFishEngine(ChessEngine):
 
 
 if __name__ == "__main__":
-    # board_eval_model_path = "/srv/tmp/encoder_evaluation_helper/comparison_triple_module_2.7/1531036236"
+    # board_eval_model_path = "/srv/tmp/encoder_evaluation_helper/no_modules_5/1532363259"
     # save_model_as_graphdef_for_serving(
     #     model_path=board_eval_model_path,
     #     output_model_path=board_eval_model_path,
     #     output_filename="tensorrt_eval_graph.pb",
     #     output_node_name="logit_layer/MatMul",
-    #     trt_memory_fraction=.4,
-    #     max_batch_size=15000)
-
-
-    # move_scoring_model_path = "/srv/tmp/move_scoring_helper/next_6.3/1529603421"
+    #     # trt_memory_fraction=.1,
+    #     max_batch_size=10000)
+    #
+    # move_scoring_model_path = "/srv/tmp/move_scoring_helper/to_from_square_3/1532363846"
     # save_model_as_graphdef_for_serving(
-    #     model_path=MOVE_SCORING_GRAPHDEF_FILENAME,#move_scoring_model_path,
-    #     output_model_path=MOVE_SCORING_GRAPHDEF_FILENAME,#move_scoring_model_path,
+    #     model_path=move_scoring_model_path,
+    #     output_model_path=move_scoring_model_path,
     #     output_filename="tensorrt_move_scoring_graph.pb",
-    #     output_node_name="GatherNd_2",
-    #     # trt_memory_fraction=.45,
-    #     max_batch_size=40000)
+    #     output_node_name="GatherNd_1",
+    #     trt_memory_fraction=.35,
+    #     max_batch_size=10000)
 
 
+    BOARD_EVAL_GRAPHDEF_FILENAME = "/srv/tmp/encoder_evaluation_helper/no_modules_5/1532363259/tensorrt_eval_graph.pb"
 
+    MOVE_SCORING_GRAPHDEF_FILENAME = "/srv/tmp/move_scoring_helper/to_from_square_3/1532363846/tensorrt_move_scoring_graph.pb"
 
-
-    BOARD_EVAL_GRAPHDEF_FILENAME = "/srv/tmp/encoder_evaluation_helper/comparison_triple_module_2.7/1531036236/tensorrt_eval_graph.pb"
-    MOVE_SCORING_GRAPHDEF_FILENAME = "/srv/tmp/move_scoring_helper/next_6.3/1529603421/tensorrt_move_scoring_graph.pb"
 
     BOARD_PREDICTOR, MOVE_PREDICTOR, PREDICTOR_CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILENAME, MOVE_SCORING_GRAPHDEF_FILENAME)
 
@@ -103,7 +101,7 @@ if __name__ == "__main__":
 
 
 
-    batch_first_engine = BatchFirstEngine(4, BOARD_PREDICTOR, MOVE_PREDICTOR, first_move_scoring_testing_filename)
+    batch_first_engine = BatchFirstEngine(4, BOARD_PREDICTOR, MOVE_PREDICTOR, "/home/sam/PycharmProjects/ChessAI/NEXT_BINS.npy")# first_move_scoring_testing_filename, "NEXT_BINS")
 
     stockfish_engine = StockFishEngine("stockfish-8-linux/Linux/stockfish_8_x64", move_time=1)
     random_engine = RandomEngine()
@@ -112,8 +110,4 @@ if __name__ == "__main__":
         play_one_game(batch_first_engine, stockfish_engine, True)
 
 
-
     PREDICTOR_CLOSER()
-
-
-

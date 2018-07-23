@@ -2,15 +2,12 @@ import numpy as np
 from scipy import stats
 
 from .transposition_table import get_empty_hash_table
-from .numba_negamax_zero_window import iterative_deepening_mtd_f, start_move_scoring, create_root_game_node_from_fen
+from .numba_negamax_zero_window import iterative_deepening_mtd_f, start_move_scoring
 from .global_open_priority_nodes import PriorityBins
 
 
 
-
-
-
-def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False, num_batches=125, output_filename=None):
+def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False, num_batches=1000, output_filename=None):
     """
     Generate values representing the boundaries for the bins in the PriorityBins class based on a given
     move evaluation function.
@@ -72,6 +69,9 @@ def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False
     if not output_filename is None:
         np.save(output_filename, bins)
 
+        if print_info:
+            print("Saved bins to file")
+
     return bins
 
 
@@ -95,6 +95,7 @@ class ChessEngine(object):
         Release the resources currently used by the engine (like GPU memory or large chunks of RAM).
         """
         pass
+
 
 
 class BatchFirstEngine(ChessEngine):
@@ -121,7 +122,7 @@ class BatchFirstEngine(ChessEngine):
         if bin_output_filename is None:
             bins = np.load(bin_database_file)
         else:
-            bins = generate_bin_ranges(bin_database_file, self.move_evaluator, output_filename=bin_output_filename),
+            bins = generate_bin_ranges(bin_database_file, self.move_evaluator, output_filename=bin_output_filename, print_info=True),
 
         self.open_node_holder = PriorityBins(
             bins,
@@ -141,7 +142,5 @@ class BatchFirstEngine(ChessEngine):
             # testing=True,
             )
 
-
-
-
         return move_to_return
+
