@@ -1,13 +1,5 @@
-'''
-Created on Aug 12, 2017
-
-@author: SamRagusa
-'''
-import numpy as np
-import numba as nb
 import tensorflow as tf
 
-import chess
 import chess.pgn
 import chess.uci
 import pickle
@@ -17,46 +9,15 @@ import random
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-
-from ann_creation_helper import line_counter
-
-from batch_first import TURN_WHITE, BB_SQUARES, MIN_FLOAT32_VAL, MAX_MOVES_LOOKED_AT, INITIAL_BOARD_FEN,BB_ALL, generate_move_to_enumeration_dict
-
-from batch_first.numba_board import flip_vertically, msb,  popcount, numpy_node_info_dtype, set_up_move_array, push_moves, create_python_chess_board_from_node_info
-
+from batch_first.numba_board import flip_vertically, msb,  popcount, numpy_node_info_dtype, set_up_move_array, push_moves
 from batch_first.board_jitclass import BoardState, Move, create_board_state_from_fen, generate_legal_moves, \
     copy_push, push_with_hash_update
 
-from batch_first.numba_negamax_zero_window import struct_array_to_ann_inputs, create_node_info_from_fen
+# from batch_first.numba_negamax_zero_window import struct_array_to_ann_inputs
+# from batch_first.chestimator import get_inference_functions
 
-from batch_first.chestimator import get_inference_functions
+from batch_first import *
 
-
-def create_struct_array_from_jitclasses(boards, depth=255, separator=0):
-    return np.array([(board.pawns,
-                      board.knights,
-                      board.bishops,
-                      board.rooks,
-                      board.queens,
-                      board.kings,
-                      board.occupied_w,
-                      board.occupied_b,
-                      board.occupied,
-                      board.turn,
-                      board.castling_rights,
-                      board.ep_square if not board.ep_square is None else 0,
-                      board.halfmove_clock,
-                      board.cur_hash,
-                      False,                                                                  #terminated
-                      separator,
-                      depth,
-                      MIN_FLOAT32_VAL,                                                        #best_value
-                      np.full([MAX_MOVES_LOOKED_AT, 3], 255, dtype=np.uint8),                 #unexplored moves
-                      np.full([MAX_MOVES_LOOKED_AT], MIN_FLOAT32_VAL, dtype=np.float32),   #unexplored move scores
-                      np.full([3], 255, dtype=np.uint8), #The move made to reach the position this board represents
-                      0,      #next_move_index  (the index in the stored moves where the next move to make is)
-                      0)      #children_left (the number of children which have yet to returne a value, or be created)
-                     for board in boards],dtype=numpy_node_info_dtype)
 
 
 def dict_key_to_py_board(key):
@@ -97,10 +58,6 @@ def board_info_array_from_dict_keys(keys):
                       np.full([3], 255, dtype=np.uint8), 0, 0) for key in keys],dtype=numpy_node_info_dtype)
 
 
-
-
-
-
 @nb.njit
 def get_board_info_tuple(board):
     if board.turn == TURN_WHITE:
@@ -111,7 +68,6 @@ def get_board_info_tuple(board):
         return np.array([board.kings, board.queens, board.rooks, board.bishops, board.knights, board.pawns,
                         board.castling_rights, 0 if board.ep_square is None else BB_SQUARES[np.int32(board.ep_square)],
                         board.occupied_b, board.occupied_w, board.occupied],dtype=np.uint64)
-
 
 
 def get_feature_array(white_info):
@@ -166,7 +122,6 @@ class BoardData(object):
             self.moves[move_tuple] += 1
 
 
-
 def create_database_from_pgn(filenames, game_filters=[], to_collect_filters=[], post_collection_filters=[], data_writer=None,
                              num_first_moves_to_skip=0, output_filenames=["board_config_database.csv"], print_info=True):
     """
@@ -209,7 +164,7 @@ def create_database_from_pgn(filenames, game_filters=[], to_collect_filters=[], 
     configs = {}
     for index, filename in enumerate(filenames):
         if print_info:
-            print("Starting file", str(index + 1), "with", line_counter(filename), "lines")
+            print("Starting file", str(index + 1))
 
         pgn_file = open(filename)
 
@@ -341,11 +296,7 @@ def board_eval_data_writer_creator(file_ratios, for_deep_pink_loss, comparison_m
             set of 64 uint8s.
             """
             return tf.train.Example(features=tf.train.Features(feature={
-                "boards": tf.train.Feature(int64_list=tf.train.Int64List(
-                    value=array_to_write))})).SerializeToString()
-
-
-
+                "boards": tf.train.Feature(int64_list=tf.train.Int64List(value=array_to_write))})).SerializeToString()
 
 
         writers = [tf.python_io.TFRecordWriter(file) if for_deep_pink else open(file, 'wb') for file, for_deep_pink in
@@ -519,9 +470,10 @@ def generate_tf_records_with_child_values(node_batch_eval_fn, print_interval=100
     return the_writer
 
 
-def sf_scoring_writer_creator(sf_location, sf_time=15, sf_threads=1, print_info=True):
+def known_scoring_writer_creator(score_board, print_info=True):
     """
-    :param output_filenames: MUST BE LENGTH ONE
+    :param score_board: A function accepting a Python-Chess Board and returning an object with attributes cp (score)
+    and mate (depth to mate, with negative's being losses).  All of this is relative to the white player.
     """
     def create_serialized_example(white_info, score):
         example = tf.train.Example(features=tf.train.Features(feature={
@@ -531,32 +483,28 @@ def sf_scoring_writer_creator(sf_location, sf_time=15, sf_threads=1, print_info=
 
         return example.SerializeToString()
 
-    stockfish_ai = chess.uci.popen_engine(sf_location)
-    stockfish_ai.setoption({"threads" : sf_threads})
-
-    info_handler = chess.uci.InfoHandler()
-    stockfish_ai.info_handlers.append(info_handler)
-
 
     def writer(the_dict, output_filenames):
+        """
+        :param output_filenames: must be length 1
+        """
         with tf.python_io.TFRecordWriter(output_filenames[0]) as the_writer:
             py_boards = map(dict_key_to_py_board, the_dict)
             for index, (py_board, key) in enumerate(zip(py_boards, the_dict)):
                 if print_info and index % 10000== 0:
                     print("Completed %d boards so far."%index)
 
-                stockfish_ai.position(py_board)
-                stockfish_ai.go(movetime=sf_time)
-
-                score_to_write = info_handler.info["score"][1].cp
-                if score_to_write is None:
+                scoring_results = score_board(py_board)
+                if scoring_results.cp is None:
                     # If a mate is found, store the win/loss value,
                     # scaled such that the magnitude of the win/loss value will decrease  as the depth from the mate
                     # increases.
 
-                    mate_depth = info_handler.info["score"][1].mate
+                    mate_depth = scoring_results.mate
                     mate_value = np.iinfo(np.int64).max if mate_depth > 0 else np.iinfo(np.int64).min
                     score_to_write = mate_value - mate_depth
+                else:
+                    score_to_write = scoring_results.cp
 
                 the_writer.write(create_serialized_example(key, score_to_write))
 
@@ -648,6 +596,22 @@ def excessive_promotion_filter_creator(max_promotions):
 
 
 
+def create_sf_scorer(sf_location, sf_time=15, sf_threads=1):
+        stockfish_ai = chess.uci.popen_engine(sf_location)
+        stockfish_ai.setoption({"threads": sf_threads})
+
+        info_handler = chess.uci.InfoHandler()
+        stockfish_ai.info_handlers.append(info_handler)
+
+        def score_board(py_board):
+            stockfish_ai.position(py_board)
+            stockfish_ai.go(movetime=sf_time)
+
+            return info_handler.info["score"][1]
+
+        return score_board
+
+
 
 if __name__ == "__main__":
 
@@ -679,7 +643,8 @@ if __name__ == "__main__":
     final_dataset_filenames = list(map(lambda x: "/srv/databases/chess_engine/full_10/" + x, pickle_filenames))
 
     temp_dataset_filenames = list(map(lambda x: "/srv/databases/chess_engine/sf_chosen_moves_4/" + x, pickle_filenames))
-    # temp_dataset_filenames2 = list(map(lambda x: "/srv/databases/chess_engine/sf_chosen_moves_6/" + x, pickle_filenames))
+    temp_dataset_filenames2 = list(map(lambda x: "/srv/databases/chess_engine/sf_chosen_moves_6/" + x, pickle_filenames))
+    temp_dataset_filenames3 = list(map(lambda x: "/srv/databases/chess_engine/move_scoring_2/" + x, pickle_filenames))
 
 
     file_ratios = [.025] * len(final_dataset_filenames)
@@ -690,7 +655,7 @@ if __name__ == "__main__":
     # with the generation of the move scoring database to prevent any overlap in boards between the datasets.
     start_time = time.time()
     create_database_from_pgn(
-        [pgn_file_paths[0]],#pgn_file_paths[:-1],#
+        pgn_file_paths[:-1],
         game_filters=[game_length_filter_creator(170),
                       excessive_promotion_filter_creator(4)],
         # to_collect_filters=[during_search_n_man_filter_creator(3)],
@@ -706,23 +671,18 @@ if __name__ == "__main__":
 
 
 
-    BOARD_EVAL_GRAPHDEF_FILENAME = "/srv/tmp/encoder_evaluation_helper/sf_data_attempts/encoder_new_data_2.6/1529409998/tensorrt_eval_graph.pb"
-    BOARD_PREDICTOR, _, PREDICTOR_CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILENAME, None, session_gpu_memory=.1)
-
-
-    def cur_eval_fn(struct_array):
-        return BOARD_PREDICTOR(
-            *struct_array_to_ann_inputs(
-                struct_array,
-                np.array([], dtype=numpy_node_info_dtype),
-                np.ones(len(struct_array), dtype=np.bool_),
-                np.array([], dtype=np.bool_),
-                len(struct_array))).squeeze(axis=1)
-
-
-
-    # def dummy_eval_fn(node_array):
-    #     return np.zeros(len(node_array),dtype=np.float32)
+    # BOARD_EVAL_GRAPHDEF_FILENAME = "/srv/tmp/encoder_evaluation_helper/no_modules_5/1532030632/tensorrt_eval_graph.pb"#"/srv/tmp/encoder_evaluation_helper/sf_data_attempts/encoder_new_data_2.6/1529409998/tensorrt_eval_graph.pb"
+    # BOARD_PREDICTOR, _, PREDICTOR_CLOSER = get_inference_functions(BOARD_EVAL_GRAPHDEF_FILENAME, None, session_gpu_memory=.15)
+    #
+    #
+    # def cur_eval_fn(struct_array):
+    #     return BOARD_PREDICTOR(
+    #         *struct_array_to_ann_inputs(
+    #             struct_array,
+    #             np.array([], dtype=numpy_node_info_dtype),
+    #             np.ones(len(struct_array), dtype=np.bool_),
+    #             np.array([], dtype=np.bool_),
+    #             len(struct_array))).squeeze(axis=1)
 
 
     STOCKFISH_LOCATION = "/home/sam/PycharmProjects/ChessAI/stockfish-8-linux/Linux/stockfish_8_x64"
@@ -735,26 +695,23 @@ if __name__ == "__main__":
     #         print_frequency=1000)
 
 
-    # encoding_writer = generate_tf_records_with_child_values(dummy_eval_fn)
 
-    sf_scoring_writer = sf_scoring_writer_creator(
-        sf_location=STOCKFISH_LOCATION,
-        sf_threads=3,
-        sf_time=100)
+    sf_scoring_writer = known_scoring_writer_creator(
+        create_sf_scorer(
+            sf_location=STOCKFISH_LOCATION,
+            sf_time=100,
+            sf_threads=3))
 
 
     # VERY IMPORTANT NOTE:
     # I'm not sure the exact reason, but for some reason using multiple workers in the below data writer
     # will caused strange errors which seem to stem from something to do with TensorRT.
-    move_scoring_writer = generate_tf_records_with_child_values(cur_eval_fn, num_workers=1, print_interval=10000,batch_size=25)
+    # move_scoring_writer = generate_tf_records_with_child_values(cur_eval_fn, num_workers=1, print_interval=100,batch_size=50)
 
-
-    file_index = 17
+    file_index = 25
     print("Creating database for file",file_index)
-     # INPUT_FILENAME = final_dataset_filenames[file_index]
-    INPUT_FILENAME = temp_dataset_filenames[file_index]
-    # OUTPUT_FILENAME = final_dataset_filenames[file_index][:-3] + "tfrecords" #"npy"
-    OUTPUT_FILENAME = temp_dataset_filenames[file_index][:-3] + "tfrecords" #"npy"
+    INPUT_FILENAME = temp_dataset_filenames2[file_index]
+    OUTPUT_FILENAME = temp_dataset_filenames3[file_index][:-3] + "tfrecords" #"npy"
 
     with open(INPUT_FILENAME, "rb") as input:
         # cur_dict_to_write = {cur_tuple[0]: cur_tuple[1] for cur_tuple in pickle.load(input)}
@@ -765,12 +722,10 @@ if __name__ == "__main__":
 
     # board_eval_writer(cur_dict_to_write, [OUTPUT_FILENAME])
 
-    # encoding_writer(cur_dict_to_write, [OUTPUT_FILENAME])
-
     # move_scoring_writer(cur_set_to_write, [OUTPUT_FILENAME])
 
     # board_info_numpy_file_writer(cur_dict_to_write ,[OUTPUT_FILENAME])
 
-    # BOARD_PREDICTOR_CLOSER()
+    # PREDICTOR_CLOSER()
 
 

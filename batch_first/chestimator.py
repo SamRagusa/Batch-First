@@ -7,8 +7,6 @@ from tensorflow.python.util import compat
 import batch_first as bf
 
 
-
-
 def get_predictor_from_graphdef(session, graphdef_filename, output_tensor, input_tensors, name_prefix=None, is_binary=True):
     with gfile.FastGFile(graphdef_filename, 'rb' if is_binary else 'r') as f:
         model_graph_def = tf.GraphDef()
@@ -38,7 +36,11 @@ def get_move_predictor(session, graphdef_filename, output_stages_tensor_names, i
     def start_move_prediction(*board_inputs):
         handle = session.partial_run_setup(desired_tensors[:2], desired_tensors[2:])
 
-        #############THIS IS NOT RETURNING None, INSTEAD ITS RETURNING (all logits) AND THEYRE JUST BEING IGNORED, BUT THIS IS VERY CRUCIAL FOR SPEED###############
+
+        # If I'm not mistaken the workaround mentioned below will be much faster when moved to TensorFlow 1.10,
+        # but either way, all ANN interactions should be through C/C++ functions for Numba to call (long term)
+
+        #############THIS IS NOT RETURNING None, INSTEAD ITS RETURNING (all logits) AND THEYRE JUST BEING IGNORED, BUT THIS IS VERY CRUCIAL FOR SPEED AND A LAUGHABLY SLOW SOLTUION###############
         session.partial_run(handle, desired_tensors[0], dict(zip(desired_tensors[2: 7], board_inputs)))
 
         return lambda move_info: session.partial_run(handle,
@@ -48,7 +50,7 @@ def get_move_predictor(session, graphdef_filename, output_stages_tensor_names, i
     return start_move_prediction
 
 
-def get_inference_functions(eval_graphdef_file, move_graphdef_file, session_gpu_memory=.3):
+def get_inference_functions(eval_graphdef_file, move_graphdef_file, session_gpu_memory=.4):
     sess = tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=session_gpu_memory)))
 
     eval_output_tensor_name = "logit_layer/MatMul:0"
@@ -86,7 +88,7 @@ def get_inference_functions(eval_graphdef_file, move_graphdef_file, session_gpu_
 
 def get_board_data():
     """
-    IMPORTANT NOTES:
+    NOTES:
     1) Verify that accepting the uint8's as int32 is the best way to do this, casting is relatively fast so doing that
     wouldn't be a huge deal.
     """

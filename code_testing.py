@@ -1,30 +1,30 @@
-import numpy as np
 import tensorflow as tf
 
-from chess.polyglot import zobrist_hash
 import random
-import itertools
-import chess
 import chess.pgn
 import os
 import tempfile
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-import batch_first as bf
+from batch_first import *
 
-from batch_first.anns.evaluation_ann import one_hot_create_tf_records_input_data_fn
-
-from batch_first.anns.database_creator import create_database_from_pgn, sf_scoring_writer_creator
+from batch_first.anns.database_creator import create_database_from_pgn, known_scoring_writer_creator
 
 from batch_first.chestimator import get_board_data
 
 from batch_first.board_jitclass import create_board_state_from_fen, traditional_perft_test
 
 from batch_first.numba_board import create_node_info_from_fen, structured_scalar_perft_test, scalar_is_legal_move, \
-    numpy_node_info_dtype, create_node_info_from_python_chess_board, push_moves
+    numpy_node_info_dtype, create_node_info_from_python_chess_board, push_moves, set_up_move_array, flip_vertically
 
-from batch_first.numba_negamax_zero_window import struct_array_to_ann_inputs
+from batch_first.numba_negamax_zero_window import struct_array_to_ann_inputs, has_insufficient_material, \
+    set_up_root_node_for_struct, zero_window_negamax_search
+
+from batch_first.transposition_table import get_empty_hash_table
+
+from batch_first.global_open_priority_nodes import PriorityBins
+
 
 
 #These fens come from the ChessProgramming Wiki, and can be found here: https://chessprogramming.wikispaces.com/Perft+Results
@@ -78,7 +78,6 @@ def full_perft_tester(perft_function_to_test, fens_to_test=DEFAULT_TESTING_FENS,
                 if perft_function_to_test(cur_fen, j+1) != expected_result:
                     return False
     return True
-
 
 
 def zobrist_hash_test(hash_getter, fen_to_start=None, num_sequences_to_test=1000, max_moves_per_test=20):
@@ -149,8 +148,8 @@ def get_expected_features(boards, piece_to_filter_fn, ep_filter_index, castling_
      has castling rights, this is incremented by one if unoccupied is not used as a filter
     :return: An ndarray containing the given boards features, it will have size [len(boards),8,8] and dtype np.uint8
     """
-    CORNER_SQUARES = np.array([bf.A1, bf.H1, bf.A8, bf.H8], np.uint8)
-    CORNER_BBS = np.array([bf.BB_A1, bf.BB_H1, bf.BB_A8, bf.BB_H8], np.uint64)
+    CORNER_SQUARES = np.array([A1, H1, A8, H8], np.uint8)
+    CORNER_BBS = np.array([BB_A1, BB_H1, BB_A8, BB_H8], np.uint64)
 
     desired_filters = np.empty([len(boards), 8, 8], dtype=np.uint8)
 
@@ -184,7 +183,6 @@ def get_expected_features(boards, piece_to_filter_fn, ep_filter_index, castling_
             desired_filters[j] = desired_filters[j,::-1]
 
     return desired_filters
-
 
 
 def inference_input_pipeline_test(inference_pipe_fn, boards_to_input_list_fn, boards, uses_unoccupied, piece_to_filter_fn, ep_filter_index, castling_filter_indices):
@@ -236,7 +234,7 @@ def inference_input_pipeline_test(inference_pipe_fn, boards_to_input_list_fn, bo
         filters_used = tf.cast(tf.argmax(onehot_data,axis=3),tf.uint8)
 
         wrong_filter_squares = tf.not_equal(desired_square_values, filters_used)
-        
+
         board_has_wrong_filter = tf.reduce_any(wrong_filter_squares, axis=[1,2])
 
         boards_with_issues =  tf.logical_or(board_has_square_with_incorrect_filter_sum, board_has_wrong_filter)
@@ -283,7 +281,7 @@ def move_verification_tester(move_legality_tester, board_creator_fn, fens_to_tes
 
 def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_fn, boards_to_input_for_inference,
                                    piece_to_filter_fn, ep_filter_index, castling_filter_indices, num_random_games=20,
-                                   max_moves_per_game=None, uses_unoccupied=False):
+                                   max_moves_per_game=250, uses_unoccupied=False):
 
     """
     This function can be thought of in two parts, one tests the board evaluation inference pipeline, and the other
@@ -312,20 +310,15 @@ def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_
     :param num_random_games: The number of chess games to be played/tested (choosing random moves).  This is used for
      creating the PGN file to test the training pipe, or in generating the list of boards to test the inference pipe
     :param max_moves_per_game: The maximum number of moves (halfmoves) to be made before a game should be stopped.
-     If None is given, there will be no limit on how many moves can be made
+     If None is given, a limit of 250 will be used
     :param uses_unoccupied: See inference_input_pipeline_test
     :return: A tuple of two boolean values, the first indicating if the training pipeline tests were passed,
      and the second indicating if the inference pipeline tests were passed
 
 
-    TODO:
-    1) Have this test not only the first board (validating it's configuration), but also the other two (ones after
-    real/random moves are made).  It should be tested that the moves made to get to them are legal
-    2) Ideally a temporary file would be used for writing/reading the tfrecords database
+    NOTES:
+    1) Ideally a temporary file would be used for writing/reading the tfrecords database
     """
-    if max_moves_per_game == None:
-        max_moves_per_game = 1<<64  #An arbitrarily large integer
-
     tf_records_filename = "THIS_COULD-SHOULD_BE_A_TEMPORARY_FILE.tfrecords"
 
     temp_pgn, temp_filename = tempfile.mkstemp()
@@ -386,10 +379,184 @@ def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_
     return no_training_pipe_issues, inference_pipe_results
 
 
+def zero_window_search_tester(expected_val_fn, calculated_evaluator, hash_table_creator, boards=None, fens=None, max_depth=3, max_separator_change=.1, runs_per_depth=5):
+    """
+    A function to test a zero-window minimax search.  It first computes a 'correct' minimax value based on
+    a given search function, then repeatedly does zero-window search calls (with increasing search depth)
+    above and below the 'correct' minimax value to verify that the searches are behaving as desired.
+
+
+
+    :param expected_val_fn: A function which calculates and returns the full minimax value of a board.  It must accept
+    2 parameters, a Python-Chess board, and the desired search depth.
+    :param calculated_evaluator: The zero-window search function being tested.  It requires 4 parameters,
+    a Python-Chess board, the depth to search, the separator to test, and a hash table.  It must return
+    the value calculated
+    :param hash_table_creator: A function which takes no arguments and returns a hash table to give the search being
+    tested
+    :param boards: An iterable of Python-Chess Board objects.   If supplied, 'fens' parameter will be ignored
+    :param fens: An iterable of strings, each a FEN representation of a board.  If 'boards' is supplied this will not be
+    used, and if neither are supplied DEFAULT_TESTING_FENS will be used
+    :param max_depth: The maximum search depth to test.  Tests will be performed for depths 1 to max_depth
+    :param max_separator_change: The maximum distance from the expected minimax value to do a zero-window test
+    :param runs_per_depth: The number of times the zero-window search will be tested for each board/depth combination
+    (one 'run' is testing one value above the minimax value, and one value below)
+    :return: True if all tests were passed, False if not
+    """
+    issue_printer = lambda b,m,s,c : print(
+        "%s\n%s\nThe actual minimax value for the above board is %f, but when testing a value of %f, the zero-window search resulted in %f"%(b, b.fen(), m, s, c))
+
+    def test_board(board):
+        hash_table = hash_table_creator()
+        for depth in range(1, max_depth+1):
+            minimax_value = expected_val_fn(board, depth)
+
+            for _ in range(runs_per_depth):
+                above_val_separator = minimax_value + np.random.rand() * max_separator_change
+
+                if above_val_separator == minimax_value:
+                    above_val_separator = np.nextafter(np.nextafter(minimax_value, MAX_FLOAT32_VAL), MAX_FLOAT32_VAL)
+
+                calculated_value = calculated_evaluator(board, depth, above_val_separator, hash_table)
+
+                if calculated_value < minimax_value or calculated_value >= above_val_separator:
+                    issue_printer(board, minimax_value, above_val_separator, calculated_value)
+                    return False
+
+                below_val_separator = minimax_value - np.random.rand() * max_separator_change
+
+                if below_val_separator == minimax_value:
+                    below_val_separator = np.nextafter(np.nextafter(minimax_value, MIN_FLOAT32_VAL), MIN_FLOAT32_VAL)
+
+                calculated_value = calculated_evaluator(board, depth, below_val_separator, hash_table)
+
+                if calculated_value > minimax_value or calculated_value < below_val_separator:
+                    issue_printer(board, minimax_value, below_val_separator, calculated_value)
+                    return False
+        return True
+
+
+    if boards is None:
+        boards = map(chess.Board, fens if fens else DEFAULT_TESTING_FENS)
+
+    return all(map(test_board, boards))
 
 
 
 
+
+
+
+
+
+def dummy_eval_for_simple_search(board):
+    dummy_metric = np.bitwise_or(board['occupied_w'], board['occupied_b'])
+    if not board['turn']:
+        dummy_metric = flip_vertically(dummy_metric)
+    return dummy_metric.astype(np.float32) / BB_ALL.astype(np.float32)
+
+
+def dummy_eval_for_bf(*args):
+    return np.bitwise_or(args[1][:,0], args[1][:,1]).astype(np.float32)/BB_ALL.astype(np.float32)
+
+
+def create_negamax_function(eval_fn):
+    """
+    :param eval_fn: The evaluation function used must account for how the board data (in batch first) is given as if
+    it were white's turn (for the sake of the ANNS), and must match that behavior
+    (see 'dummy_eval_for_bf' and 'dummy_eval_for_simple_search')
+    """
+    def get_eval_score(board, depth):
+        if board["halfmove_clock"] >= 50 or has_insufficient_material(board):
+            return TIE_RESULT_SCORE
+
+        set_up_move_array(board)
+
+        if board['children_left'] == 0:
+            if board['best_value'] == TIE_RESULT_SCORE:
+                return TIE_RESULT_SCORE
+            return LOSS_RESULT_SCORES[depth] if board['turn'] else WIN_RESULT_SCORES[depth]
+
+        if depth == 0:
+            return eval_fn(board)
+
+        return None
+
+    def simple_struct_copy_push(board, move):
+        to_push = np.array([board.copy()])
+        push_moves(to_push, np.array([move]))
+
+        to_return = to_push[0]
+        to_return['children_left'] = 0
+        to_return['unexplored_moves'][:] = 255
+
+        return to_return
+
+    def negamax(board, depth, alpha, beta, color):
+        eval_score = get_eval_score(board, depth)
+
+        if not eval_score is None:
+            return color * eval_score
+
+        best_val = MIN_FLOAT32_VAL
+        for j in range(board['children_left']):
+            best_val = np.maximum(
+                best_val,
+                - negamax(simple_struct_copy_push(board, board['unexplored_moves'][j]), depth - 1, -beta, -alpha, -color))
+
+            alpha = np.maximum(alpha, best_val)
+            if alpha >= beta:
+                break
+        return best_val
+
+    def search_helper(py_board, depth, alpha=MIN_FLOAT32_VAL, beta=MAX_FLOAT32_VAL):
+        color = 1 if py_board.turn else -1
+        return negamax(create_node_info_from_python_chess_board(py_board)[0], depth, alpha, beta, color)
+
+    return search_helper
+
+
+def negamax_zero_window_search_creator(move_predictor, max_batch_size=5000, run_search_in_testing_mode=False):
+    def zero_window_search(board, depth, separator, hash_table):
+        priority_bins = PriorityBins(
+            np.linspace(0,1,1000),
+            max_batch_size,
+            testing=run_search_in_testing_mode)
+
+        separator_to_use = np.nextafter(separator, MIN_FLOAT32_VAL)
+
+        root_node = set_up_root_node_for_struct(
+            move_predictor,
+            hash_table,
+            create_node_info_from_python_chess_board(board, depth, separator_to_use))
+
+        if root_node.board_struct[0]['terminated']:
+            return root_node.board_struct[0]['best_value']
+
+        if bool(depth % 2) == board.turn:
+            board_eval_fn = lambda *args: -dummy_eval_for_bf(*args)
+        else:
+            board_eval_fn = dummy_eval_for_bf
+
+        to_return = zero_window_negamax_search(
+            root_node,
+            priority_bins,
+            board_eval_fn,
+            move_predictor,
+            hash_table=hash_table,
+            testing=run_search_in_testing_mode)
+        return to_return
+
+    return zero_window_search
+
+
+def pseudo_random_move_eval(*args):
+    """
+    NOTES:
+    1) This function uses np.linspace instead of randomly generated values to maintain the deterministic behavior of the
+    tree search (only helpful when tracking down a bug).
+    """
+    return lambda x: np.linspace(0, 1, np.sum(x[1]))
 
 
 def cur_hash_getter(fen_to_start,move_lists,max_possible_moves):
@@ -423,23 +590,49 @@ def cur_piece_to_filter_fn(piece):
         return 15-piece.piece_type
 
 
-def stockfish_records_writer_creator(sf_location):
-        def cur_tfrecords_writer(pgn_filename, output_filename):
-            create_database_from_pgn(
-                [pgn_filename],
-                data_writer=sf_scoring_writer_creator(
-                    sf_location=sf_location,
-                    sf_threads=1,
-                    sf_time=1,
-                    print_info=False),
-                output_filenames=[output_filename],
-                print_info=False)
+def dummy_records_writer_creator():
+    class DummyResult:
+        def __init__(self):
+            self.cp = 0
+            self.mate = None
 
-        return cur_tfrecords_writer
+    def cur_tfrecords_writer(pgn_filename, output_filename):
+        create_database_from_pgn(
+            [pgn_filename],
+            data_writer=known_scoring_writer_creator(
+                score_board=lambda b : DummyResult(),
+                print_info=False),
+            output_filenames=[output_filename],
+            print_info=False)
+    return cur_tfrecords_writer
+
+
+def dummy_tf_records_input_data_pipe_creator(filename, include_unoccupied=False):
+    def tf_records_input_data_fn():
+        dataset = tf.data.TFRecordDataset(filename)
+
+        def parser(record):
+            keys_to_features = {"board": tf.FixedLenFeature([8 * 8 ], tf.int64),
+                                "score": tf.FixedLenFeature([], tf.int64)}
+
+            parsed_example = tf.parse_single_example(record, keys_to_features)
+
+            reshaped_board = tf.reshape(parsed_example['board'], [8,8])
+
+            omit_unoccupied_decrement = 0 if include_unoccupied else 1
+            one_hot_board = tf.one_hot(reshaped_board - omit_unoccupied_decrement, 16 - omit_unoccupied_decrement)
+            return one_hot_board
+
+        dataset = dataset.map(parser)
+        iterator = dataset.make_one_shot_iterator()
+        features = iterator.get_next()
+        return {"board" : features}
+
+    return tf_records_input_data_fn
 
 
 def cur_tfrecords_to_features(filename):
-    input_generator, _ = one_hot_create_tf_records_input_data_fn(filename, include_unoccupied=False, repeat=False)()
+    input_generator = dummy_tf_records_input_data_pipe_creator(filename)()
     with tf.Session() as sess:
         inputs = []
         try:
@@ -454,60 +647,61 @@ def full_test():
     Runs every test relevant to Batch First's performance or correctness (that's been created so far).
 
     :return: A boolean value indicating if all tests were passed
-
-    TODO:
-    1) Add test to verify zero-window negamax search returns same result (bool) with or without use of the
-    Transposition Table (Currently checked manually by commenting out functions used to add boards to the TT)
     """
-
     result_str = ["Failed", "Passed"]
 
-    print("Starting tests.\n")
+    print("Starting tests (this will likely take 1-5 minutes).\n")
 
-    jitclass_perft_results = full_perft_tester(
+    test_results = [False] * 7
+
+    test_results[0] = full_perft_tester(
         lambda fen, depth: traditional_perft_test(create_board_state_from_fen(fen), depth))
 
-    print("PERFT test using JitClass:                                    %s"%result_str[jitclass_perft_results])
+    print("PERFT test using JitClass:                                    %s" % result_str[test_results[0]])
 
-    scalar_perft_results = full_perft_tester(
+    test_results[1] = full_perft_tester(
         lambda fen, depth: structured_scalar_perft_test(create_node_info_from_fen(fen, 0, 0), depth))
 
-    print("PERFT test using NumPy structured scalar:                     %s"%result_str[scalar_perft_results])
+    print("PERFT test using NumPy structured scalar:                     %s" % result_str[test_results[1]])
 
-    move_verification_results = move_verification_tester(
+    test_results[2] = move_verification_tester(
         scalar_is_legal_move,
         lambda b: create_node_info_from_python_chess_board(b)[0])
 
-    print("Move legality verification test:                              %s"%result_str[move_verification_results])
+    print("Move legality verification test:                              %s" % result_str[test_results[2]])
 
-    zobrist_hash_results = zobrist_hash_test(cur_hash_getter)
+    test_results[3] = zobrist_hash_test(cur_hash_getter)
 
-    print("Incremental Zobrist hash test:                                %s"%result_str[zobrist_hash_results])
+    print("Incremental Zobrist hash test:                                %s" % result_str[test_results[3]])
 
-
-    sf_location = "/home/sam/PycharmProjects/ChessAI/stockfish-8-linux/Linux/stockfish_8_x64"  #This will hopefully be refactored out of this soon (and a dummy function will be used instead of StockFish)
-    training_pipe_results, inference_pipe_results = complete_board_eval_tester(
-        tfrecords_writer=stockfish_records_writer_creator(sf_location),
+    test_results[4], test_results[5] = complete_board_eval_tester(
+        tfrecords_writer=dummy_records_writer_creator(),
         feature_getter=cur_tfrecords_to_features,
         inference_pipe_fn=get_board_data,
         boards_to_input_for_inference=cur_boards_to_input_list_fn,
         piece_to_filter_fn=cur_piece_to_filter_fn,
         ep_filter_index=1,
-        castling_filter_indices=[8, 15],
-        max_moves_per_game=500)
+        castling_filter_indices=[8, 15])
 
-    print("Board evaluation data creation and training pipeline test:    %s" % result_str[training_pipe_results])
-    print("Board evaluation inference pipeline test:                     %s" % result_str[inference_pipe_results])
+    print("Board evaluation data creation and training pipeline test:    %s" % result_str[test_results[4]])
+    print("Board evaluation inference pipeline test:                     %s" % result_str[test_results[5]])
+
+    test_results[6] = zero_window_search_tester(
+        create_negamax_function(dummy_eval_for_simple_search),
+        negamax_zero_window_search_creator(pseudo_random_move_eval),
+        get_empty_hash_table)
+
+    print("Zero-window search test:                                      %s" % result_str[test_results[6]])
 
 
-
-
-    if jitclass_perft_results and scalar_perft_results and move_verification_results and zobrist_hash_results and training_pipe_results and inference_pipe_results:
+    if all(test_results):
         print("\nAll tests were passed!")
         return True
     else:
         print("\nSome tests failed! (see above).")
         return False
+
+
 
 
 

@@ -1,11 +1,4 @@
-from chess.polyglot import zobrist_hash
-
-from batch_first import *
-
-
-# import llvmlite.binding as llvm
-# llvm.set_option('', '--debug-only=loop-vectorize')
-
+from . import *
 
 
 
@@ -37,36 +30,35 @@ numpy_node_info_dtype = np.dtype([("pawns", np.uint64),
 numba_node_info_type = nb.from_dtype(numpy_node_info_dtype)
 
 
-def create_node_info_from_fen(fen, depth, separator):
-    return create_node_info_from_python_chess_board(chess.Board(fen), depth, separator)
-
 
 def create_node_info_from_python_chess_board(board, depth=255, separator=0):
-    return np.array([(board.pawns,
-                      board.knights,
-                      board.bishops,
-                      board.rooks,
-                      board.queens,
-                      board.kings,
-                      board.occupied_co[chess.WHITE],
-                      board.occupied_co[chess.BLACK],
-                      board.occupied,
-                      board.turn,
-                      board.castling_rights,
-                      board.ep_square if not board.ep_square is None else 0,
-                      board.halfmove_clock,
-                      zobrist_hash(board),
-                      False,                                                                  #terminated
-                      separator,
-                      depth,
-                      MIN_FLOAT32_VAL,                                                        #best_value
-                      np.full([MAX_MOVES_LOOKED_AT, 3], 255, dtype=np.uint8),                 #unexplored moves
-                      np.full([MAX_MOVES_LOOKED_AT], MIN_FLOAT32_VAL, dtype=np.float32),   #unexplored move scores
-                      np.full([3], 255, dtype=np.uint8), #The move made to reach the position this board represents
-                      0,           #next_move_index  (the index in the stored moves where the next move to make is)
-                      0)                   #children_left (the number of children which have yet to returne a value, or be created)
-                     ],dtype=numpy_node_info_dtype)
+    return np.array(
+        [(board.pawns,
+          board.knights,
+          board.bishops,
+          board.rooks,board.queens,
+          board.kings,
+          board.occupied_co[chess.WHITE],
+          board.occupied_co[chess.BLACK],
+          board.occupied,
+          board.turn,
+          board.castling_rights,
+          board.ep_square if not board.ep_square is None else 0,
+          board.halfmove_clock,
+          zobrist_hash(board),
+          False,                                                                  #terminated
+          separator,
+          depth,
+          MIN_FLOAT32_VAL,                                                        #best_value
+          np.full([MAX_MOVES_LOOKED_AT, 3], 255, dtype=np.uint8),                 #unexplored moves
+          np.full([MAX_MOVES_LOOKED_AT], MIN_FLOAT32_VAL, dtype=np.float32),   #unexplored move scores
+          np.full([3], 255, dtype=np.uint8), #The move made to reach the position this board represents
+          0,           #next_move_index  (the index in the stored moves where the next move to make is)
+          0)],                #children_left (the number of children which have yet to returne a value, or be created)
+        dtype=numpy_node_info_dtype)
 
+def create_node_info_from_fen(fen, depth, separator):
+    return create_node_info_from_python_chess_board(chess.Board(fen), depth, separator)
 
 def create_python_chess_board_from_node_info(struct):
     py_board = chess.Board()
@@ -177,7 +169,6 @@ def any(iterable):
     return False
 
 
-
 @njit
 def piece_type_at(board_state, square):
     """
@@ -228,7 +219,6 @@ def _remove_piece_at(board_state, square):
     return piece_type
 
 
-
 @njit
 def _set_piece_at(board_state, square, piece_type, color):
     _remove_piece_at(board_state, square)
@@ -266,7 +256,6 @@ def scalar_is_zeroing(board_state, move_from_square, move_to_square):
             BB_SQUARES[move_from_square] & board_state.pawns or BB_SQUARES[move_to_square] & board_state.occupied_b)
     return np.bool_(
         BB_SQUARES[move_from_square] & board_state.pawns or BB_SQUARES[move_to_square] & board_state.occupied_w)
-
 
 
 @njit
@@ -492,9 +481,6 @@ def push_moves(struct_array, move_array):
                     struct_array[j].hash ^= RANDOM_ARRAY[772 + square_file(struct_array[j].ep_square)]
 
 
-
-
-
 @njit
 def _attackers_mask(board_state, color, square, occupied):
     queens_and_rooks = board_state.queens | board_state.rooks
@@ -548,7 +534,6 @@ def attacks_mask(board_state, square):
                         FILE_ATTACK_ARRAY[square,
                             khash_get(FILE_ATTACK_INDEX_LOOKUP_TABLE, BB_FILE_MASKS[square] & board_state.occupied, 0)])
         return attacks
-
 
 
 @njit
@@ -822,8 +807,6 @@ def pin_mask(board_state, color, square):
     return BB_ALL
 
 
-
-
 @njit
 def is_pseudo_legal_ep(board_state, from_mask, to_mask):
     if board_state['ep_square'] == 0:
@@ -843,7 +826,6 @@ def is_pseudo_legal_ep(board_state, from_mask, to_mask):
             return True
 
     return False
-
 
 
 @njit
@@ -989,10 +971,6 @@ def scalar_is_pseudo_legal_move(board_state, move):
     return False
 
 
-
-
-
-
 @njit
 def is_evasion(board_state, king, checkers, from_mask, to_mask):
     """
@@ -1020,7 +998,6 @@ def is_evasion(board_state, king, checkers, from_mask, to_mask):
         return ~board_state.kings & from_mask and (BB_BETWEEN[king, checker] | checkers) & to_mask
 
     return False
-
 
 
 @njit
@@ -1063,7 +1040,6 @@ def set_evasions(board_state, king, checkers, from_mask=BB_ALL, to_mask=BB_ALL):
                     set_pseudo_legal_ep(board_state, from_mask, to_mask)
 
 
-
 @njit
 def is_castling(board_state, from_square, to_square):
     """
@@ -1101,9 +1077,7 @@ def new_is_en_passant(board_state, from_square, to_square):
                     bool(board_state.pawns & BB_SQUARES[from_square]) and
                     from_square - to_square in [7, 9] and
                     not board_state.occupied & BB_SQUARES[to_square])
-
     return False
-
 
 
 @njit
@@ -1137,8 +1111,6 @@ def _new_ep_skewered(board_state, king, capturer):
             return True
 
     return False
-
-
 
 
 @njit
@@ -1188,6 +1160,7 @@ def set_up_move_array(board_struct):
         board_struct['terminated'] = True
         board_struct['best_value'] = LOSS_RESULT_SCORES[board_struct['depth']] if checkers else TIE_RESULT_SCORE
 
+
 @njit
 def set_up_move_array_except_move(board_struct, move_to_avoid):
     if board_struct['turn'] == TURN_WHITE:
@@ -1213,7 +1186,6 @@ def set_up_move_array_except_move(board_struct, move_to_avoid):
 
     board_struct['unexplored_moves'][legal_move_index:board_struct['children_left'],:] = 255
     board_struct['children_left'] = legal_move_index
-
 
 
 @njit
@@ -1263,8 +1235,6 @@ def structured_scalar_perft_test_move_gen_helper(struct_array):
 
         struct_array[j]['unexplored_moves'][legal_move_index:struct_array[j]['children_left'], :] = 255
         struct_array[j]['children_left'] = legal_move_index
-
-
 
 
 # @njit

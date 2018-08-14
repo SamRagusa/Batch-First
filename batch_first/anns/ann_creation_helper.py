@@ -1,5 +1,5 @@
-import numpy as np
 import tensorflow as tf
+
 from tensorflow.contrib import layers
 from tensorflow.python import training
 
@@ -14,10 +14,9 @@ def save_model_as_graphdef_for_serving(model_path, output_model_path, output_fil
                                        max_batch_size=25000, as_text=False):
 
 
-    #This would ideally be 1 instead of .75, but the GPU that this is running on is responsible for things like graphics
+    #This would ideally be 1 instead of .7, but the GPU that this is running on is responsible for things like graphics
     with tf.Session(config=tf.ConfigProto(
-            gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.75 - trt_memory_fraction))) as sess:
-
+            gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.7 - trt_memory_fraction))) as sess:
         tf.saved_model.loader.load(sess, [model_tags], model_path)
 
         constant_graph_def = tf.graph_util.convert_variables_to_constants(
@@ -62,8 +61,7 @@ def build_fully_connected_layers_with_batch_norm(the_input, shape, kernel_initia
                 inner_modules,
                 kernel_initializer,
                 mode,
-                scope_prefix="%sfc_module_%d/" % (scope_prefix, j + 1),
-            )
+                scope_prefix="%sfc_module_%d/" % (scope_prefix, j + 1))
             module_outputs.append(output)
         else:
             if len(module_outputs) == 1:
@@ -113,7 +111,7 @@ def build_inception_module_with_batch_norm(the_input, module, kernel_initializer
                         [[15, 1], [30, 3, 2]],
                         [[15, 1], [30, 3, 3]],        #  <-- This particular path does a 1x1 convolution on the module's
                         [[10, 1], [20, 3, 4]],        #      input with 15 filters, followed by a 3x3 'same' padded
-                        [[8, 1],  [16, 3, 5]],        #      convolution with dilution rate of 3.  It is concatenated
+                        [[8, 1],  [16, 3, 5]],        #      convolution with dilation factor of 3.  It is concatenated
                         [[8, 1],  [16, 2, (2, 4)]],   #      with the output of the other paths, and then returned
                         [[8, 1],  [16, 2, (4, 2)]]]
 
@@ -123,7 +121,7 @@ def build_inception_module_with_batch_norm(the_input, module, kernel_initializer
     If a tuple is used, it indicates that the layer should use 'valid' padding, and if a list is used it will use a
     padding of 'same'.  The contents of the innermost list or tuple will be the number of filters to create for a layer,
     followed by the information to pass to conv2d as kernel_size, and then optionally, a third element which is
-    to be passed to conv2d as a dilution rate.
+    to be passed to conv2d as a dilation factor.
     """
     if weight_regularizer is None:
         weight_regularizer = lambda:None
@@ -193,7 +191,7 @@ def build_convolutional_modules(input, modules, mode, kernel_initializer, kernel
 
 
     modules = [
-        [[[20, 3]],           # The following 7 layers with 3x3 kernels and increasing dilution rates are such that
+        [[[20, 3]],           # The following 7 layers with 3x3 kernels and increasing dilation factors are such that
          [[20, 3, 2]],        # their combined filters centered at any given square will consider only the squares in
          [[20, 3, 3]],        # which a queen could possibly attack from, and the central square itself (and padding)
          [[20, 3, 4]],
@@ -268,21 +266,6 @@ def numpy_style_repeat_1d(input, multiples):
         tf.multiply(tf.ones([tf.reduce_max(casted_multiples), 1], dtype=input.dtype), input),
         tf.sequence_mask(casted_multiples))
     return to_return
-
-
-def line_counter(filename):
-    """
-    A function to count the number of lines in a file (kinda) efficiently.
-    """
-    def blocks(files, size=65536):
-        while True:
-            b = files.read(size)
-            if not b:
-                break
-            yield b
-
-    with open(filename, "r") as f:
-        return sum(bl.count("\n") for bl in blocks(f))
 
 
 class ValidationRunHook(tf.train.SessionRunHook):

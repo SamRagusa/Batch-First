@@ -1,9 +1,9 @@
 import numpy as np
-import numba as nb
 
 import chess
 import chess.uci
 import time
+
 
 from batch_first.engine import ChessEngine, BatchFirstEngine
 from batch_first.chestimator import get_inference_functions
@@ -21,6 +21,9 @@ def play_one_game(engine1, engine2, print_info=False):
     halfmove_counter = 0
     engine1_turn = True
 
+    if print_info:
+        print("%s\n%s\n"%(the_board, the_board.fen()))
+
     while not the_board.is_game_over():
         cur_engine = engine1 if engine1_turn else engine2
 
@@ -33,10 +36,10 @@ def play_one_game(engine1, engine2, print_info=False):
         halfmove_counter += 1
 
         if print_info:
-            print(the_board)
-            print("Total halfmove count:", halfmove_counter)
-            print(the_board.fen())
-            print("Made move %s after %f time."%(str(next_move), time.time() - prev_move_time))
+            player_str = "Player 1" if not engine1_turn else "Player 2"
+            print("%s made move %s after %f time." % (player_str, str(next_move), time.time() - prev_move_time))
+            print("Total halfmove count: %d"%halfmove_counter)
+            print("%s\n%s\n" % (the_board, the_board.fen()))
             prev_move_time = time.time()
 
     if print_info:
@@ -48,11 +51,10 @@ def play_one_game(engine1, engine2, print_info=False):
 
 
 
-
-
 class RandomEngine(ChessEngine):
     def pick_move(self, board):
-        return np.random.choice(np.array([move for move in board.generate_legal_moves()]))
+        return np.random.choice(np.array(list(board.generate_legal_moves())))
+
 
 
 class StockFishEngine(ChessEngine):
@@ -70,15 +72,15 @@ class StockFishEngine(ChessEngine):
         return  self.stockfish_ai.go(movetime=self.move_time).bestmove
 
 
+
 if __name__ == "__main__":
-    # board_eval_model_path = "/srv/tmp/encoder_evaluation_helper/no_modules_5/1532363259"
+    # board_eval_model_path = "/srv/tmp/encoder_evaluation_helper/diff_fixed_filter_6.4/1534156862"
     # save_model_as_graphdef_for_serving(
     #     model_path=board_eval_model_path,
     #     output_model_path=board_eval_model_path,
     #     output_filename="tensorrt_eval_graph.pb",
     #     output_node_name="logit_layer/MatMul",
-    #     # trt_memory_fraction=.1,
-    #     max_batch_size=10000)
+    #     max_batch_size=5000)
     #
     # move_scoring_model_path = "/srv/tmp/move_scoring_helper/to_from_square_3/1532363846"
     # save_model_as_graphdef_for_serving(
@@ -87,11 +89,9 @@ if __name__ == "__main__":
     #     output_filename="tensorrt_move_scoring_graph.pb",
     #     output_node_name="GatherNd_1",
     #     trt_memory_fraction=.35,
-    #     max_batch_size=10000)
+    #     max_batch_size=7500)
 
-
-    BOARD_EVAL_GRAPHDEF_FILENAME = "/srv/tmp/encoder_evaluation_helper/no_modules_5/1532363259/tensorrt_eval_graph.pb"
-
+    BOARD_EVAL_GRAPHDEF_FILENAME = "/srv/tmp/encoder_evaluation_helper/diff_fixed_filter_6.4/1534156862/tensorrt_eval_graph.pb"
     MOVE_SCORING_GRAPHDEF_FILENAME = "/srv/tmp/move_scoring_helper/to_from_square_3/1532363846/tensorrt_move_scoring_graph.pb"
 
 
@@ -100,14 +100,19 @@ if __name__ == "__main__":
     first_move_scoring_testing_filename = "/srv/databases/chess_engine/one_rand_per_board_data/move_scoring_testing_set_1.npy"
 
 
+    batch_first_engine = BatchFirstEngine(5,
+                                          BOARD_PREDICTOR,
+                                          MOVE_PREDICTOR,
+                                          bin_database_file=first_move_scoring_testing_filename,
+                                          bin_output_filename="NEXT_BINS")
 
-    batch_first_engine = BatchFirstEngine(4, BOARD_PREDICTOR, MOVE_PREDICTOR, "/home/sam/PycharmProjects/ChessAI/NEXT_BINS.npy")# first_move_scoring_testing_filename, "NEXT_BINS")
-
-    stockfish_engine = StockFishEngine("stockfish-8-linux/Linux/stockfish_8_x64", move_time=1)
+    stockfish_engine = StockFishEngine("stockfish-8-linux/Linux/stockfish_8_x64")
     random_engine = RandomEngine()
 
-    for j in range(1):
-        play_one_game(batch_first_engine, stockfish_engine, True)
+
+
+    play_one_game(batch_first_engine, stockfish_engine, True)
+
 
 
     PREDICTOR_CLOSER()

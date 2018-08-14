@@ -7,7 +7,7 @@ import chess
 import itertools
 import functools
 
-from chess.polyglot import POLYGLOT_RANDOM_ARRAY
+from chess.polyglot import POLYGLOT_RANDOM_ARRAY, zobrist_hash
 
 from numba import cffi_support
 from cffi import FFI
@@ -69,7 +69,6 @@ BB_PAWN_ATTACKS = np.array(chess.BB_PAWN_ATTACKS, dtype=np.uint64)
 BB_RAYS = np.array(chess.BB_RAYS, dtype=np.uint64)
 BB_BETWEEN = np.array(chess.BB_BETWEEN, dtype=np.uint64)
 
-
 MIN_FLOAT32_VAL = np.finfo(np.float32).min
 MAX_FLOAT32_VAL = np.finfo(np.float32).max
 ALMOST_MIN_FLOAT_32_VAL = np.nextafter(MIN_FLOAT32_VAL, MAX_FLOAT32_VAL)
@@ -115,7 +114,7 @@ for j in range(1, MAX_SEARCH_DEPTH):
 
 
 
-SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES = np.uint8(25)  # This needs to be picked precisely
+SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES = np.uint8(30)  # This needs to be picked precisely
 TT_HASH_MASK = np.uint64(2 ** (SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES) - 1)
 
 
@@ -167,7 +166,6 @@ BB_FILES = [
     BB_FILE_H
 ] = np.array([0x0101010101010101 << i for i in range(8)], dtype=np.uint64)
 
-
 BB_RANKS = [
     BB_RANK_1,
     BB_RANK_2,
@@ -182,10 +180,7 @@ BB_RANKS = [
 
 BB_BACKRANKS = BB_RANK_1 | BB_RANK_8
 
-INITIAL_BOARD_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-
-
-
+INITIAL_BOARD_FEN = chess.STARTING_FEN
 
 def generate_move_to_enumeration_dict():
     """

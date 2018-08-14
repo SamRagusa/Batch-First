@@ -1,5 +1,4 @@
 import numpy as np
-from scipy import stats
 
 from .transposition_table import get_empty_hash_table
 from .numba_negamax_zero_window import iterative_deepening_mtd_f, start_move_scoring
@@ -7,7 +6,7 @@ from .global_open_priority_nodes import PriorityBins
 
 
 
-def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False, num_batches=1000, output_filename=None):
+def generate_bin_ranges(filename, move_eval_fn, percentiles=None, print_info=False, num_batches=1000, output_filename=None):
     """
     Generate values representing the boundaries for the bins in the PriorityBins class based on a given
     move evaluation function.
@@ -15,13 +14,12 @@ def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False
     :param filename: The filename for the binary file (in NumPy .npy format) containing board structs.
      It's used for computing a sample of move scores
     :param move_eval_fn: The move evaluation function to be used when searching the tree
-    :param quantiles: The quantiles desired from the sample of move scores computed
+    :param percentiles: The percentiles desired from the sample of move scores computed
     :param print_info: A boolean value indicating if info about the computations should be printed
     :param num_batches: The number of batches to split the given database into for inference
     :param output_filename: The filename to save the computed bins to, or None if saving the bins is not desired
-    :return: An ndarray of the values at the given quantiles
+    :return: An ndarray of the values at the given percentiles
     """
-
     def bin_helper_move_scoring_fn(struct_array, move_eval_fn):
         move_thread, move_score_getter, _, _ = start_move_scoring(
             struct_array,
@@ -37,10 +35,8 @@ def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False
         return - move_score_getter[0]([from_to_squares, struct_array['children_left']])
 
 
-
-
-    if quantiles is None:
-        quantiles = np.arange(0, 1, .001)
+    if percentiles is None:
+        percentiles = np.arange(0, 100, .1)
 
     if print_info:
         print("Loading data from file for bin calculations")
@@ -64,7 +60,7 @@ def generate_bin_ranges(filename, move_eval_fn, quantiles=None, print_info=False
     if print_info:
         print("Computed %d move evaluations"%len(combined_results))
 
-    bins = stats.mstats.mquantiles(combined_results, quantiles)
+    bins = np.percentile(combined_results, percentiles)
 
     if not output_filename is None:
         np.save(output_filename, bins)
@@ -101,7 +97,7 @@ class ChessEngine(object):
 class BatchFirstEngine(ChessEngine):
 
     def __init__(self, search_depth, board_eval_fn, move_eval_fn, bin_database_file, bin_output_filename=None,
-                 first_guess_fn=None):
+                 first_guess_fn=None, max_batch_size=5000):
         """
         :param bin_database_file: If bin_output_filename is not None, then this is the NumPy database of boards to have
         bins be created from.  If bin_output_filename is None, then this is the NumPy file containing an array of bins.
@@ -120,19 +116,19 @@ class BatchFirstEngine(ChessEngine):
         self.move_evaluator = move_eval_fn
 
         if bin_output_filename is None:
-            bins = np.load(bin_database_file)
+            self.bins = np.load(bin_database_file)
         else:
-            bins = generate_bin_ranges(bin_database_file, self.move_evaluator, output_filename=bin_output_filename, print_info=True),
+            self.bins = generate_bin_ranges(bin_database_file, self.move_evaluator, output_filename=bin_output_filename, print_info=True)
 
         self.open_node_holder = PriorityBins(
-            bins,
-            5000,
+            self.bins,
+            max_batch_size,
             testing=False)
 
     def pick_move(self, board):
         returned_score, move_to_return, self.hash_table = iterative_deepening_mtd_f(
             fen=board.fen(),
-            depths_to_search=np.arange(self.search_depth)+1,
+            depths_to_search=np.arange(1,self.search_depth+1),
             open_node_holder=self.open_node_holder,
             board_eval_fn=self.board_evaluator,
             move_eval_fn=self.move_evaluator,

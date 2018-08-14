@@ -1,11 +1,5 @@
-import numpy as np
-import numba as nb
+from . import *
 
-import chess
-
-
-from batch_first import SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES, TT_HASH_MASK, NO_TT_ENTRY_VALUE,\
-    NO_TT_MOVE_VALUE, MIN_FLOAT32_VAL, MAX_FLOAT32_VAL
 
 
 
@@ -20,10 +14,6 @@ hash_table_numba_dtype = nb.from_dtype(hash_table_numpy_dtype)
 
 
 def get_empty_hash_table():
-    """
-    NOTES:
-    1) Uses global variable SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES for it's size.
-    """
     blank_hash_entry = np.array([(
         0,
         NO_TT_ENTRY_VALUE,
@@ -37,7 +27,6 @@ def get_empty_hash_table():
 def choose_move(hash_table, node):
     """
     Chooses the desired move to be made from the given node.  This is done by use of the given hash table.
-
 
     :return: A python-chess Move object representing the desired move to be made
     """

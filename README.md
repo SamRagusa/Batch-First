@@ -11,7 +11,38 @@ The following table highlights a few key aspects of the Batch First engine.
 **Batched ANN Inference** | By using a `K-best-first search` algorithm, evaluation of boards and moves can be done in batches, both minimizing the effect of latency and maximizing the throughput for GPUs
 **Priority Bins** | Best-first algorithms such as SSS* are often disregarded due to the cost of maintaining a global list of open nodes in priority order.  This is addressed by instead using a pseudo-priority order, separating nodes based on their binned heuristic values
 **Vectorized Asynchronous CPU Operations** | Through a combination of NumPy and Numba, the array oriented computations are vectorized and compiled to run while the ANNs are being evaluated, and with the Python GIL released
+
+
+## Neural Networks
+
+### Input Features
+Boards are given to the ANNs as an 8x8x15 one-hot encoding, which consists of 12 feature planes for each piece and color,
+2 for each player's rooks with the ability to castle, and 1 for en passant capture squares.
+
+### Input Layers
+
+To model the movement of chess pieces, a novel architecture is used where the ANNs 'first layer' is
+replaced with 9 convolutional layers.  When concatenated, the squares considered by the input convolutions
+centered at any given square are the squares which could contain a piece able to threaten that square,
+and the square itself.
+
+This is accomplished by a set of dilated padded convolutional layers, and can be explained in two parts.
+- An n-dilated convolutional layer with kernel size 3x3 will consider all potential rank, file,
+and diagonal threats n squares away from the kernel's center.  Having 7 of these
+with dilation factors of 1-7 encompasses all potential movement of every piece but the knight.  
+
+- To capture the movement of the knight, two convolutional layers with kernel size 2x2 and dilation factor
+2x4 and 4x2 are used.  Combined, the kernels of these two layers consider only 
+the squares a knight has the potential to move to.  
+
+
+The following diagram shows the structure of the input layers:
  
+|                   |  1  |  2  |  3  |  4  |  5  |  6  |  7  |  8  |  9  |
+|:-----------------:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+|  **Kernel Size**  | 3x3 | 3x3 | 3x3 | 3x3 | 3x3 | 3x3 | 3x3 | 2x2 | 2x2 |
+|**Dilation Factor**| 1x1 | 2x2 | 3x3 | 4x4 | 5x5 | 6x6 | 7x7 | 2x4 | 4x2 |
+
 
 ## Dependencies
 The versions listed are known to work, but are not necessarily the only versions which will work.
