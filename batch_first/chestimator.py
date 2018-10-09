@@ -6,6 +6,8 @@ from tensorflow.python.util import compat
 
 import batch_first as bf
 
+from tensorflow.contrib import tensorrt as trt
+
 
 def get_predictor_from_graphdef(session, graphdef_filename, output_tensor, input_tensors, name_prefix=None, is_binary=True):
     with gfile.FastGFile(graphdef_filename, 'rb' if is_binary else 'r') as f:
@@ -53,7 +55,7 @@ def get_move_predictor(session, graphdef_filename, output_stages_tensor_names, i
 def get_inference_functions(eval_graphdef_file, move_graphdef_file, session_gpu_memory=.4):
     sess = tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=session_gpu_memory)))
 
-    eval_output_tensor_name = "logit_layer/MatMul:0"
+    eval_output_tensor_name = "Squeeze:0"
     eval_input_tensor_names = [
         "piece_bbs:0",
         "color_occupied_bbs:0",
@@ -86,7 +88,7 @@ def get_inference_functions(eval_graphdef_file, move_graphdef_file, session_gpu_
     return evaluation_predictor, move_predictor, closer_fn
 
 
-def get_board_data():
+def get_board_data(data_format="NCHW"):
     """
     NOTES:
     1) Verify that accepting the uint8's as int32 is the best way to do this, casting is relatively fast so doing that
@@ -154,6 +156,8 @@ def get_board_data():
     # The below line of code will be used instead of the code above when inputs are eventually desired in that way
     # full_data = tf.concat([ep_bitboards, king_features, castling_features, properly_arranged_non_lookup_data], 3)
 
+    if data_format == "NCHW":
+        full_data = tf.transpose(full_data, [0,3,1,2])
 
     return (piece_bbs, color_occupied_bbs, ep_squares, castling_lookup_indices, kings), full_data
 

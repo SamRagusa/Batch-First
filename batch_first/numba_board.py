@@ -30,7 +30,6 @@ numpy_node_info_dtype = np.dtype([("pawns", np.uint64),
 numba_node_info_type = nb.from_dtype(numpy_node_info_dtype)
 
 
-
 def create_node_info_from_python_chess_board(board, depth=255, separator=0):
     return np.array(
         [(board.pawns,
@@ -43,7 +42,7 @@ def create_node_info_from_python_chess_board(board, depth=255, separator=0):
           board.occupied,
           board.turn,
           board.castling_rights,
-          board.ep_square if not board.ep_square is None else 0,
+          board.ep_square if not board.ep_square is None else NO_EP_SQUARE,
           board.halfmove_clock,
           zobrist_hash(board),
           False,                                                                  #terminated
@@ -60,27 +59,37 @@ def create_node_info_from_python_chess_board(board, depth=255, separator=0):
 def create_node_info_from_fen(fen, depth, separator):
     return create_node_info_from_python_chess_board(chess.Board(fen), depth, separator)
 
-def create_python_chess_board_from_node_info(struct):
-    py_board = chess.Board()
 
-    py_board.kings = int(np.int64(struct['kings']))
-    py_board.queens = int(np.int64(struct['queens']))
-    py_board.rooks = int(np.int64(struct['rooks']))
-    py_board.bishops = int(np.int64(struct['bishops']))
-    py_board.knights = int(np.int64(struct['knights']))
-    py_board.pawns = int(np.int64(struct['pawns']))
+def convert_board_to_whites_perspective(ary):
+    """
+    NOTES:
+    1) This doesn't change any moves which are stored
+    """
+    if ary[0]['turn']:
+        return ary
 
-    py_board.occupied = int(np.int64(struct['occupied']))
-    py_board.occupied_co[True] = int(np.int64(struct['occupied_w']))
-    py_board.occupied_co[False] = int(np.int64(struct['occupied_b']))
+    struct = ary[0]
 
-    py_board.castling_rights = int(np.int64(struct['castling_rights']))
+    temp_occupied = struct['occupied_b']
+    struct['occupied_b'] = flip_vertically(struct['occupied_w'])
+    struct['occupied_w'] = flip_vertically(temp_occupied)
+    struct['occupied'] = flip_vertically(struct['occupied'])
 
-    py_board.ep_square = struct['ep_square'] if struct['ep_square']==0 else None
+    struct['kings'] = flip_vertically(struct['kings'])
+    struct['queens'] = flip_vertically(struct['queens'])
+    struct['rooks'] = flip_vertically(struct['rooks'])
+    struct['bishops'] = flip_vertically(struct['bishops'])
+    struct['knights'] = flip_vertically(struct['knights'])
+    struct['pawns'] = flip_vertically(struct['pawns'])
 
-    py_board.turn = struct['turn']
+    struct['castling_rights'] = flip_vertically(struct['castling_rights'])
 
-    return py_board
+    struct['ep_square'] = square_mirror(struct['ep_square']) if struct['ep_square'] != NO_EP_SQUARE else NO_EP_SQUARE
+
+    struct['turn'] = True
+
+    return ary
+
 
 
 

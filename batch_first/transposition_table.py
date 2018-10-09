@@ -1,5 +1,6 @@
 from . import *
 
+from .numba_board import square_mirror
 
 
 
@@ -24,14 +25,22 @@ def get_empty_hash_table():
     return np.full(2**SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES, blank_hash_entry)
 
 
-def choose_move(hash_table, node):
+def choose_move(hash_table, node, flip_move=False):
     """
     Chooses the desired move to be made from the given node.  This is done by use of the given hash table.
 
     :return: A python-chess Move object representing the desired move to be made
     """
     root_tt_entry = hash_table[np.uint64(node.board_struct[0]['hash']) & TT_HASH_MASK]
-    return chess.Move(*root_tt_entry['stored_move'].view(np.int8))
+    move_array = root_tt_entry['stored_move']
+
+    if flip_move:
+        move_array[:-1] = square_mirror(move_array[:-1])
+
+    return chess.Move(
+        move_array[0].view(np.int8),
+        move_array[1].view(np.int8),
+        None if move_array[2]==0 else move_array[2].view(np.int8))
 
 
 @nb.njit

@@ -16,7 +16,8 @@ from batch_first.chestimator import get_board_data
 from batch_first.board_jitclass import create_board_state_from_fen, traditional_perft_test
 
 from batch_first.numba_board import create_node_info_from_fen, structured_scalar_perft_test, scalar_is_legal_move, \
-    numpy_node_info_dtype, create_node_info_from_python_chess_board, push_moves, set_up_move_array, flip_vertically
+    numpy_node_info_dtype, create_node_info_from_python_chess_board, push_moves, set_up_move_array, flip_vertically, \
+    popcount
 
 from batch_first.numba_negamax_zero_window import struct_array_to_ann_inputs, has_insufficient_material, \
     set_up_root_node_for_struct, zero_window_negamax_search
@@ -59,7 +60,8 @@ DEFAULT_MOVES_TO_CHECK = np.array(
 
 
 
-def full_perft_tester(perft_function_to_test, fens_to_test=DEFAULT_TESTING_FENS, perft_results=DEFAULT_FEN_PERFT_RESULTS, max_expected_boards_to_test=5000000):
+def full_perft_tester(perft_function_to_test, fens_to_test=DEFAULT_TESTING_FENS,
+                      perft_results=DEFAULT_FEN_PERFT_RESULTS, max_expected_boards_to_test=5000000):
     """
     Tests a given PERFT function by checking it's results against known results for several different boards and depths.
 
@@ -185,7 +187,8 @@ def get_expected_features(boards, piece_to_filter_fn, ep_filter_index, castling_
     return desired_filters
 
 
-def inference_input_pipeline_test(inference_pipe_fn, boards_to_input_list_fn, boards, uses_unoccupied, piece_to_filter_fn, ep_filter_index, castling_filter_indices):
+def inference_input_pipeline_test(inference_pipe_fn, boards_to_input_list_fn, boards, uses_unoccupied,
+                                  piece_to_filter_fn, ep_filter_index, castling_filter_indices):
     """
     A function used to test the conversion of a board to a representation consumed by ANNs during inference.
     It creates an array of features (one-hot inputs potentially with empty squares) by using the
@@ -250,7 +253,8 @@ def inference_input_pipeline_test(inference_pipe_fn, boards_to_input_list_fn, bo
         return not np.any(problemed_board_mask), desired_filters, calculated_filters
 
 
-def move_verification_tester(move_legality_tester, board_creator_fn, fens_to_test=DEFAULT_TESTING_FENS, moves_to_test=DEFAULT_MOVES_TO_CHECK):
+def move_verification_tester(move_legality_tester, board_creator_fn, fens_to_test=DEFAULT_TESTING_FENS,
+                             moves_to_test=DEFAULT_MOVES_TO_CHECK):
     """
     A function to test a method of move legality verification.  This is used to confirm that the move verification done
     for moves stored in the transposition table is correct.  It uses the python-chess package to compute the correct
@@ -348,7 +352,8 @@ def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_
 
     input_features = feature_getter(tf_records_filename)
 
-    one_hot_features = np.argmax(np.concatenate((np.expand_dims(1-np.sum(input_features, axis=3),axis=3),input_features), axis=3),axis=3)
+    one_hot_features = np.argmax(
+        np.concatenate((np.expand_dims(1-np.sum(input_features, axis=3),axis=3), input_features), axis=3),axis=3)
 
 
     inference_pipe_results, desired_filters, inference_filters = inference_input_pipeline_test(
@@ -367,7 +372,6 @@ def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_
 
 
             print(filter)
-
             max_correct = np.max(num_correct_squares)
             print(desired_filters[num_correct_squares==max_correct])
             in_boards = np.array(boards)[num_correct_squares == max_correct][0]
@@ -379,7 +383,8 @@ def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_
     return no_training_pipe_issues, inference_pipe_results
 
 
-def zero_window_search_tester(expected_val_fn, calculated_evaluator, hash_table_creator, boards=None, fens=None, max_depth=3, max_separator_change=.1, runs_per_depth=5):
+def zero_window_search_tester(expected_val_fn, calculated_evaluator, hash_table_creator, boards=None, fens=None,
+                              max_depth=3, max_separator_change=500, runs_per_depth=3):
     """
     A function to test a zero-window minimax search.  It first computes a 'correct' minimax value based on
     a given search function, then repeatedly does zero-window search calls (with increasing search depth)
@@ -449,15 +454,32 @@ def zero_window_search_tester(expected_val_fn, calculated_evaluator, hash_table_
 
 
 
-def dummy_eval_for_simple_search(board):
-    dummy_metric = np.bitwise_or(board['occupied_w'], board['occupied_b'])
-    if not board['turn']:
-        dummy_metric = flip_vertically(dummy_metric)
-    return dummy_metric.astype(np.float32) / BB_ALL.astype(np.float32)
+def weighted_piece_sum_creator(piece_values=None):
+    """
+    NOTES:
+    1) This ignores rooks which have the ability to castle!
+    """
+    if piece_values is None:
+        piece_values = np.array([900,500,300,300,100], dtype=np.int32)
 
+    def bf_piece_sum_eval(pieces, occupied_bbs, ep, castling_lookup, kings):
+        piece_counts = popcount(np.bitwise_and(pieces, occupied_bbs))
+        player_piece_diffs = piece_counts[:, 0].view(np.int8) - piece_counts[:, 1].view(np.int8)
+        return np.sum(piece_values * player_piece_diffs.astype(np.int32), axis=1).astype(np.float32)
 
-def dummy_eval_for_bf(*args):
-    return np.bitwise_or(args[1][:,0], args[1][:,1]).astype(np.float32)/BB_ALL.astype(np.float32)
+    def simple_board_piece_sum(board):
+        pieces = np.array(
+            [[[board['queens'],
+               board['rooks'] ^ board['castling_rights'],
+               board['bishops'],
+               board['knights'],
+               board['pawns']]]],
+            dtype=np.uint64)
+
+        occupied_bbs = np.array([[[board['occupied_w']],[board['occupied_b']]]], dtype=np.uint64)
+        return bf_piece_sum_eval(pieces, occupied_bbs, None, None, None)[0]
+
+    return bf_piece_sum_eval, simple_board_piece_sum
 
 
 def create_negamax_function(eval_fn):
@@ -516,10 +538,10 @@ def create_negamax_function(eval_fn):
     return search_helper
 
 
-def negamax_zero_window_search_creator(move_predictor, max_batch_size=5000, run_search_in_testing_mode=False):
+def negamax_zero_window_search_creator(eval_fn, move_predictor, max_batch_size=5000, run_search_in_testing_mode=False):
     def zero_window_search(board, depth, separator, hash_table):
         priority_bins = PriorityBins(
-            np.linspace(0,1,1000),
+            np.linspace(0,100,1000),
             max_batch_size,
             testing=run_search_in_testing_mode)
 
@@ -533,15 +555,10 @@ def negamax_zero_window_search_creator(move_predictor, max_batch_size=5000, run_
         if root_node.board_struct[0]['terminated']:
             return root_node.board_struct[0]['best_value']
 
-        if bool(depth % 2) == board.turn:
-            board_eval_fn = lambda *args: -dummy_eval_for_bf(*args)
-        else:
-            board_eval_fn = dummy_eval_for_bf
-
         to_return = zero_window_negamax_search(
             root_node,
             priority_bins,
-            board_eval_fn,
+            eval_fn,
             move_predictor,
             hash_table=hash_table,
             testing=run_search_in_testing_mode)
@@ -564,8 +581,13 @@ def cur_hash_getter(fen_to_start,move_lists,max_possible_moves):
     initial_board = create_node_info_from_fen(fen_to_start, 255, 0)
     for j in range(len(move_lists)):
         board = initial_board.copy()
+
         for i,move in enumerate(move_lists[j]):
-            push_moves(board, np.array([[move.from_square, move.to_square, 0 if move.promotion is None else move.promotion]], dtype=np.uint8))
+            moves_to_push = np.array(
+                [[move.from_square, move.to_square, move.promotion if move.promotion else 0]], dtype=np.uint8)
+
+            push_moves(board, moves_to_push)
+
             hashes[j,i] = board[0]['hash']
     return hashes
 
@@ -642,6 +664,7 @@ def cur_tfrecords_to_features(filename):
             return np.stack(inputs)
 
 
+
 def full_test():
     """
     Runs every test relevant to Batch First's performance or correctness (that's been created so far).
@@ -677,7 +700,7 @@ def full_test():
     test_results[4], test_results[5] = complete_board_eval_tester(
         tfrecords_writer=dummy_records_writer_creator(),
         feature_getter=cur_tfrecords_to_features,
-        inference_pipe_fn=get_board_data,
+        inference_pipe_fn=lambda : get_board_data("NHWC"),
         boards_to_input_for_inference=cur_boards_to_input_list_fn,
         piece_to_filter_fn=cur_piece_to_filter_fn,
         ep_filter_index=1,
@@ -686,10 +709,11 @@ def full_test():
     print("Board evaluation data creation and training pipeline test:    %s" % result_str[test_results[4]])
     print("Board evaluation inference pipeline test:                     %s" % result_str[test_results[5]])
 
+    bf_eval_fn, simple_eval_fn = weighted_piece_sum_creator()
     test_results[6] = zero_window_search_tester(
-        create_negamax_function(dummy_eval_for_simple_search),
-        negamax_zero_window_search_creator(pseudo_random_move_eval),
-        get_empty_hash_table)
+        expected_val_fn=create_negamax_function(simple_eval_fn),
+        calculated_evaluator=negamax_zero_window_search_creator(bf_eval_fn, pseudo_random_move_eval),
+        hash_table_creator=get_empty_hash_table)
 
     print("Zero-window search test:                                      %s" % result_str[test_results[6]])
 
@@ -700,7 +724,6 @@ def full_test():
     else:
         print("\nSome tests failed! (see above).")
         return False
-
 
 
 

@@ -5,7 +5,6 @@ from .numba_negamax_zero_window import iterative_deepening_mtd_f, start_move_sco
 from .global_open_priority_nodes import PriorityBins
 
 
-
 def generate_bin_ranges(filename, move_eval_fn, percentiles=None, print_info=False, num_batches=1000, output_filename=None):
     """
     Generate values representing the boundaries for the bins in the PriorityBins class based on a given
@@ -20,7 +19,7 @@ def generate_bin_ranges(filename, move_eval_fn, percentiles=None, print_info=Fal
     :param output_filename: The filename to save the computed bins to, or None if saving the bins is not desired
     :return: An ndarray of the values at the given percentiles
     """
-    def bin_helper_move_scoring_fn(struct_array, move_eval_fn):
+    def bin_helper_move_scoring_fn(struct_array):
         move_thread, move_score_getter, _, _ = start_move_scoring(
             struct_array,
             struct_array[:1],
@@ -47,15 +46,10 @@ def generate_bin_ranges(filename, move_eval_fn, percentiles=None, print_info=Fal
         print("Loaded %d BoardInfo structs"%len(struct_array))
 
     increment = len(struct_array)//num_batches
-    results = []
 
-    for j in range(num_batches):
-        results.append(
-            bin_helper_move_scoring_fn(
-                struct_array[j*increment:(j+1)*increment],
-                move_eval_fn))
+    combined_results = np.concatenate(
+        [bin_helper_move_scoring_fn(struct_array[j * increment:(j + 1) * increment]) for j in range(num_batches)])
 
-    combined_results = np.concatenate(results)
 
     if print_info:
         print("Computed %d move evaluations"%len(combined_results))
@@ -79,6 +73,12 @@ class ChessEngine(object):
         the engine would like to make.
         """
         raise NotImplementedError("This method must be implemented!")
+
+    def start_new_game(self):
+        """
+        Run at the start of each new game
+        """
+        pass
 
     def ready_engine(self):
         """
@@ -118,12 +118,19 @@ class BatchFirstEngine(ChessEngine):
         if bin_output_filename is None:
             self.bins = np.load(bin_database_file)
         else:
-            self.bins = generate_bin_ranges(bin_database_file, self.move_evaluator, output_filename=bin_output_filename, print_info=True)
+            self.bins = generate_bin_ranges(
+                bin_database_file,
+                self.move_evaluator,
+                output_filename=bin_output_filename,
+                print_info=True)
 
         self.open_node_holder = PriorityBins(
             self.bins,
             max_batch_size,
             testing=False)
+
+    def start_new_game(self):
+        self.hash_table = get_empty_hash_table()
 
     def pick_move(self, board):
         returned_score, move_to_return, self.hash_table = iterative_deepening_mtd_f(

@@ -136,7 +136,7 @@ def start_board_evaluations(struct_array, to_score_mask, board_eval_fn, testing=
                 np.array([], dtype=numpy_node_info_dtype),
                 to_score_mask,
                 np.array([], dtype=np.bool_),
-                num_to_score)).squeeze(axis=1)
+                num_to_score))
 
     t = threading.Thread(target=evaluate_and_set)
     t.start()
@@ -771,6 +771,9 @@ def zero_window_negamax_search(root_game_node, open_node_holder, board_eval_fn, 
 
 
 def set_up_root_node_for_struct(move_eval_fn, hash_table, root_struct):
+    if not root_struct['turn']:
+        root_struct = convert_board_to_whites_perspective(root_struct)
+
     root_node = GameNode(root_struct, None)
 
     struct_array = root_node.board_struct
@@ -867,7 +870,7 @@ def mtd_f(fen, depth, first_guess, open_node_holder, board_eval_fn, move_eval_fn
             counter += 1
             print("Finished iteration %d with lower and upper bounds (%f,%f) after search returned %f" % (counter, lower_bound, upper_bound, cur_guess))
 
-    tt_move = tt.choose_move(hash_table, cur_root_node)
+    tt_move = tt.choose_move(hash_table, cur_root_node, fen.split()[1]=='b')
 
     return cur_guess, tt_move, hash_table
 
