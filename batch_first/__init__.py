@@ -43,7 +43,7 @@ def get_table_and_array_for_set_of_dicts(dicts):
     for square_num, dict in enumerate(dicts):
         for key, value in dict.items():
             index_to_set = khash_get(ffi.cast("void *", index_lookup_table), np.uint64(key), np.uint64(0))
-            array[square_num][index_to_set] = np.uint64(value)
+            array[square_num, index_to_set] = np.uint64(value)
 
     return index_lookup_table, array
 
@@ -100,6 +100,9 @@ TT_MOVE_SCORE_VALUE = ALMOST_MAX_FLOAT_32_VAL
 
 # This value is used when there is no current ep square.  It (obviously) does not indicate that square 0 is an ep square
 NO_EP_SQUARE = np.uint8(0)
+
+# The value to set a move's promotion to if no promotion is done
+NO_PROMOTION_VALUE = np.uint8(0)
 
 TIE_RESULT_SCORE = np.float32(0)
 

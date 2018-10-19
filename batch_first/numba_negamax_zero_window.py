@@ -3,7 +3,6 @@ from collections import OrderedDict
 import time
 
 from .numba_board import *
-from .board_jitclass import BoardState, has_legal_move, is_in_check
 from . import transposition_table as tt
 
 
@@ -29,8 +28,6 @@ class GameNode:
 game_node_type.define(GameNode.class_type.instance_type)
 
 
-
-
 @njit(nogil=True)
 def struct_array_to_ann_inputs(child_structs, not_child_structs, to_score_child_mask, to_score_not_child_mask, total_num_to_score):
 
@@ -42,7 +39,6 @@ def struct_array_to_ann_inputs(child_structs, not_child_structs, to_score_child_
 
     store_index = 0
     for j in range(len(child_structs) + len(not_child_structs)):
-
         if j < len(child_structs):
             should_score = to_score_child_mask[j]
             struct = child_structs[j]
@@ -51,7 +47,6 @@ def struct_array_to_ann_inputs(child_structs, not_child_structs, to_score_child_
             struct = not_child_structs[j - len(child_structs)]
 
         if should_score:
-
             if struct['turn']:
                 bb_array[0, store_index] = struct['queens']
                 bb_array[1, store_index] = struct['rooks'] ^ struct['castling_rights']
@@ -61,13 +56,11 @@ def struct_array_to_ann_inputs(child_structs, not_child_structs, to_score_child_
 
                 byte_info[1, store_index] = khash_get(WHITE_CASTLING_RIGHTS_LOOKUP_TABLE, struct['castling_rights'], 0)
 
-                byte_info[2, store_index] = msb(struct['occupied_w'] & struct['kings'])
-                byte_info[3, store_index] = msb(struct['occupied_b'] & struct['kings'])
+                byte_info[2:4, store_index] = msb(struct['occupied_co'][::-1] & struct['kings'])
 
                 byte_info[0, store_index] = struct['ep_square']
 
-                bb_array[5,store_index] = struct['occupied_w']
-                bb_array[6,store_index] = struct['occupied_b']
+                bb_array[5:7, store_index] = struct['occupied_co'][::-1]
 
             else:
                 bb_array[0, store_index] = flip_vertically(struct['queens'])
@@ -78,13 +71,11 @@ def struct_array_to_ann_inputs(child_structs, not_child_structs, to_score_child_
 
                 byte_info[1, store_index] = khash_get(BLACK_CASTLING_RIGHTS_LOOKUP_TABLE, struct['castling_rights'], 0)
 
-                byte_info[2, store_index] = square_mirror(msb(struct['occupied_b'] & struct['kings']))
-                byte_info[3, store_index] = square_mirror(msb(struct['occupied_w'] & struct['kings']))
+                byte_info[2:4, store_index] = square_mirror(msb(struct['occupied_co'] & struct['kings']))
 
                 byte_info[0, store_index] = REVERSED_EP_LOOKUP_ARRAY[struct['ep_square']]
 
-                bb_array[5, store_index] = flip_vertically(struct['occupied_b'])
-                bb_array[6, store_index] = flip_vertically(struct['occupied_w'])
+                bb_array[5:7, store_index] = flip_vertically(struct['occupied_co'])
 
             store_index += 1
 
@@ -122,7 +113,7 @@ def start_move_scoring(children, not_children, child_score_mask, not_child_score
     return t, result_getter, num_children_to_score, num_not_child_to_score
 
 
-def start_board_evaluations(struct_array, to_score_mask, board_eval_fn, testing=False):
+def start_board_evaluations(struct_array, to_score_mask, board_eval_fn):
     """
     Start the evaluation of the depth zero nodes which were not previously terminated.
     """
@@ -142,29 +133,6 @@ def start_board_evaluations(struct_array, to_score_mask, board_eval_fn, testing=
     t.start()
 
     return t, evaluation_scores
-
-
-@njit
-def has_insufficient_material(board_state):
-    # Enough material to mate.
-    if board_state['pawns'] or board_state['rooks'] or board_state['queens']:
-        return False
-
-    # A single knight or a single bishop.
-    if popcount(board_state['occupied']) <= 3:
-        return True
-
-    # More than a single knight.
-    if board_state['knights']:
-        return False
-
-    # All bishops on the same color.
-    if board_state['bishops'] & BB_DARK_SQUARES == 0:
-        return True
-    elif board_state['bishops'] & BB_LIGHT_SQUARES == 0:
-        return True
-    else:
-        return False
 
 
 @njit
@@ -206,7 +174,7 @@ def depth_zero_should_terminate_array(struct_array, hash_table):
     5) Termination by information contained in the TT
 
     TODO:
-    1) Check for draw by threefold repetition  (once complete it will abide by every rule of chess)
+    1) Check for draw by threefold repetition  (this has been completed and is being prepared for commit)
     """
     for j in range(len(struct_array)):
         if struct_array[j]['depth'] == 0:
@@ -216,29 +184,8 @@ def depth_zero_should_terminate_array(struct_array, hash_table):
             elif should_terminate_from_tt(struct_array[j], hash_table):
                 struct_array[j]['terminated'] = True
             else:
-                TEMP_JITCLASS_OBJECT = BoardState(struct_array[j]['pawns'],   ###############THIS MUST BE REMOVED.  IT IS THE LAST REMAINING CONVERSION TO BoardState objects
-                                                  struct_array[j]['knights'],
-                                                  struct_array[j]['bishops'],
-                                                  struct_array[j]['rooks'],
-                                                  struct_array[j]['queens'],
-                                                  struct_array[j]['kings'],
-                                                  struct_array[j]['occupied_w'],
-                                                  struct_array[j]['occupied_b'],
-                                                  struct_array[j]['occupied'],
-                                                  struct_array[j]['turn'],
-                                                  struct_array[j]['castling_rights'],
-                                                  None if struct_array[j]['ep_square'] == 0 else struct_array[j]['ep_square'],
-                                                  struct_array[j]['halfmove_clock'],
-                                                  struct_array[j]['hash'])
-
-                ###########This can and should be removed since the information is already computed during the move generation.
-                if not has_legal_move(TEMP_JITCLASS_OBJECT):
-
+                if not has_legal_move(struct_array[j]):
                     struct_array[j]['terminated'] = True
-                    if is_in_check(TEMP_JITCLASS_OBJECT):
-                        struct_array[j]['best_value'] = LOSS_RESULT_SCORES[struct_array[j]['depth']]
-                    else:
-                        struct_array[j]['best_value'] = TIE_RESULT_SCORE
 
 
 @njit
@@ -255,7 +202,7 @@ def has_legal_tt_move(board_struct, hash_table):
     if node_entry['depth'] != NO_TT_ENTRY_VALUE:
         if node_entry['entry_hash'] == board_struct['hash']:
             if node_entry['stored_move'][0] != NO_TT_MOVE_VALUE:
-                if scalar_is_legal_move(board_struct, node_entry['stored_move']):
+                if is_legal_move(board_struct, node_entry['stored_move']):
                     board_struct['unexplored_moves'][0] = node_entry['stored_move']
                     board_struct['next_move_index'] = 0
                     board_struct['children_left'] = NEXT_MOVE_IS_FROM_TT_VAL
@@ -273,8 +220,9 @@ def child_termination_check_and_move_gen(struct_array, hash_table):
     4) Win/loss by checkmate
     5) Termination by information contained in the TT
 
-    MUST IMPLEMENT:
-    1) Draw by threefold repetition
+
+    TODO:
+    1) Check for draw by threefold repetition  (this has been completed and is being prepared for commit)
     """
     for j in range(len(struct_array)):
         if struct_array[j]['depth'] != 0:
@@ -417,6 +365,7 @@ def update_tree_from_terminating_nodes(parent_nodes, struct_array, hash_table, w
                 struct_array[j]['prev_move'],
                 hash_table)
 
+
 @njit
 def jitted_temp_set_node_from_altered_struct(node, board_struct):
     """
@@ -494,7 +443,6 @@ def get_move_from_to_squares_and_sizes(child_structs, not_child_structs, child_m
 @njit
 def prepare_to_finish_move_scoring(child_structs, adult_structs, scored_child_mask, scored_adult_mask,
                                    num_scored_children, num_scored_adults):
-
     size_array, from_to_squares = get_move_from_to_squares_and_sizes(
         child_structs,
         adult_structs,
@@ -513,7 +461,7 @@ def complete_move_evaluation(result_getter_fn, child_structs, adult_nodes, score
 
     adult_next_move_scores = np.empty(len(size_array) - num_children, dtype=np.float32)
 
-    scores = - result_getter_fn([from_to_squares, size_array])
+    scores = result_getter_fn([from_to_squares, size_array])
 
     child_next_move_scores = set_child_move_scores(
         child_structs,
@@ -540,7 +488,6 @@ def complete_move_evaluation(result_getter_fn, child_structs, adult_nodes, score
 
 
 def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=False):
-
     struct_batch = get_struct_array_from_node_array(node_batch)
 
     child_struct, struct_batch_next_move_scores = create_child_structs(struct_batch, testing)
@@ -568,7 +515,6 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
         evaluation_thread = None
         evaluation_scores = None
 
-
     generate_moves_for_tt_move_nodes(struct_batch, child_was_from_tt_move_mask)
 
     not_one_child_left_mask = struct_batch['children_left'] != 1
@@ -577,7 +523,6 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
     tt_move_nodes_with_more_kids_mask = np.logical_and(not_one_child_left_mask, child_was_from_tt_move_mask)
 
     child_termination_check_and_move_gen(child_struct, hash_table)
-
 
     non_zerod_child_not_term_mask = np.logical_and(
         depth_not_zero_mask,
@@ -602,7 +547,6 @@ def do_iteration(node_batch, hash_table, board_eval_fn, move_eval_fn, testing=Fa
         move_thread = None
         child_next_move_scores = None
         not_child_next_move_scores = None
-
 
     # A mask of the given batch which have more unexplored children left
     have_children_left_mask = np.logical_and(
@@ -706,7 +650,12 @@ def zero_window_negamax_search(root_game_node, open_node_holder, board_eval_fn, 
             if root_game_node.board_struct[0]['children_left'] == 0:
                 print("Root node has 0 children_left at the start of the current iteration.")
 
-        to_insert, to_insert_scores = do_iteration(next_batch, hash_table, board_eval_fn, move_eval_fn, testing)
+        to_insert, to_insert_scores = do_iteration(
+            next_batch,
+            hash_table,
+            board_eval_fn,
+            move_eval_fn,
+            testing)
 
         if root_game_node.board_struct[0]['terminated']:
             open_node_holder.clear_list()
@@ -818,7 +767,6 @@ def set_up_root_node_from_fen(move_eval_fn, hash_table, fen, depth=255, separato
     return set_up_root_node_for_struct(move_eval_fn, hash_table, create_node_info_from_fen(fen, depth, separator))
 
 
-
 def mtd_f(fen, depth, first_guess, open_node_holder, board_eval_fn, move_eval_fn, hash_table,
           guess_increment=.5, print_partial_info=False, print_all_info=False, testing=False):
 
@@ -879,11 +827,12 @@ def iterative_deepening_mtd_f(fen, depths_to_search, open_node_holder, board_eva
                               first_guess=0, guess_increments=None, print_partial_info=False,print_all_info=False,
                               testing=False):
     if guess_increments is None:
-        guess_increments = [5]*len(depths_to_search)
+        guess_increments = [1]*len(depths_to_search)
+
 
     for depth, increment in zip(depths_to_search, guess_increments):
         if print_partial_info:
-            print("Starting depth %d search"%depth)
+            print("Starting depth %d search, with first guess %f"%(depth, first_guess))
             start_time = time.time()
 
         first_guess, tt_move, hash_table = mtd_f(
@@ -905,5 +854,3 @@ def iterative_deepening_mtd_f(fen, depths_to_search, open_node_holder, board_eva
 
 
     return first_guess, tt_move, hash_table
-
-

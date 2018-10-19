@@ -2,24 +2,25 @@ import tensorflow as tf
 
 import random
 import chess.pgn
+import chess.uci
 import os
 import tempfile
+import time
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 from batch_first import *
 
-from batch_first.anns.database_creator import create_database_from_pgn, known_scoring_writer_creator
+from batch_first.anns.database_creator import get_data_from_pgns, create_board_eval_board_from_game_fn, \
+    combine_pickles_and_create_tfrecords, serializer_creator
 
 from batch_first.chestimator import get_board_data
 
-from batch_first.board_jitclass import create_board_state_from_fen, traditional_perft_test
+from batch_first.numba_board import create_node_info_from_fen, perft_test, is_legal_move, \
+    numpy_node_info_dtype, create_node_info_from_python_chess_board, push_moves, set_up_move_array, \
+    popcount, has_insufficient_material, has_legal_move
 
-from batch_first.numba_board import create_node_info_from_fen, structured_scalar_perft_test, scalar_is_legal_move, \
-    numpy_node_info_dtype, create_node_info_from_python_chess_board, push_moves, set_up_move_array, flip_vertically, \
-    popcount
-
-from batch_first.numba_negamax_zero_window import struct_array_to_ann_inputs, has_insufficient_material, \
+from batch_first.numba_negamax_zero_window import struct_array_to_ann_inputs, \
     set_up_root_node_for_struct, zero_window_negamax_search
 
 from batch_first.transposition_table import get_empty_hash_table
@@ -155,29 +156,22 @@ def get_expected_features(boards, piece_to_filter_fn, ep_filter_index, castling_
 
     desired_filters = np.empty([len(boards), 8, 8], dtype=np.uint8)
 
+    filter_getters = [
+        lambda p: piece_to_filter_fn(chess.Piece(p.piece_type, not p.color) if p else None),
+        piece_to_filter_fn]
 
     for j in range(len(boards)):
+        piece_map = map(boards[j].piece_at, chess.SQUARES)
 
-        piece_map = map(boards[j].piece_at,chess.SQUARES)
-
-        if boards[j].turn:
-            cur_filter_squares = np.array(list(map(piece_to_filter_fn, piece_map)))
-        else:
-            cur_filter_squares = np.array(list(map(
-                lambda p : piece_to_filter_fn(None if p is None else chess.Piece(p.piece_type, not p.color)),
-                piece_map)))
+        cur_filter_squares = np.array(list(map(filter_getters[boards[j].turn], piece_map)))
 
         if not boards[j].ep_square is None:
             cur_filter_squares[boards[j].ep_square] = ep_filter_index
 
-        if boards[j].turn:
-            CORNER_FILTER_NUMS = np.array([castling_filter_indices[j] for j in [0, 0, 1, 1]], dtype=np.uint8)
-        else:
-            CORNER_FILTER_NUMS = np.array([castling_filter_indices[j] for j in [1, 1, 0, 0]], dtype=np.uint8)
-
+        corner_filter_nums = castling_filter_indices[2 * [1 ^ boards[j].turn] + 2 * [boards[j].turn]] #indices are [0,0,1,1] if white's turn else [1,1,0,0]
 
         castling_mask = np.array(np.uint64(boards[j].castling_rights) & CORNER_BBS,dtype=np.bool_)
-        cur_filter_squares[CORNER_SQUARES[castling_mask]] =  CORNER_FILTER_NUMS[castling_mask]
+        cur_filter_squares[CORNER_SQUARES[castling_mask]] =  corner_filter_nums[castling_mask]
 
         desired_filters[j] = cur_filter_squares.reshape((8,8))
 
@@ -250,6 +244,9 @@ def inference_input_pipeline_test(inference_pipe_fn, boards_to_input_list_fn, bo
                 **dict(zip(pipe_placeholders, boards_to_input_list_fn(boards))),
             })
 
+        for board in np.array(boards)[problemed_board_mask]:
+            print(board,'\n')
+
         return not np.any(problemed_board_mask), desired_filters, calculated_filters
 
 
@@ -279,6 +276,45 @@ def move_verification_tester(move_legality_tester, board_creator_fn, fens_to_tes
             if move_legality_tester(cur_testing_board, moves_to_test[j]) != cur_board.is_legal(
                     chess.Move(*moves_to_test[j]) if moves_to_test[j, 2] != 0 else chess.Move(*moves_to_test[j, :2])):
                 return False
+
+    return True
+
+
+def generate_boards_for_testing(sf_location, num_random_games=250, max_moves_per_game=1000, sf_move_time=1):
+    stockfish_ai = chess.uci.popen_engine(sf_location)
+
+    for j in range(num_random_games):
+        cur_board = chess.Board()
+        random_turn = True
+        for _ in range(max_moves_per_game):
+            if random_turn:
+                possible_next_moves = list(cur_board.generate_legal_moves())
+                chosen_move = possible_next_moves[random.randrange(len(possible_next_moves))]
+            else:
+                stockfish_ai.position(cur_board)
+                chosen_move = stockfish_ai.go(movetime=sf_move_time).bestmove
+
+            cur_board.push(chosen_move)
+
+            yield cur_board
+
+            if cur_board.is_game_over():
+                break
+
+            random_turn = not random_turn
+
+
+def check_if_legal_move_exists_tester(has_legal_move_fn, boards_to_test=None):
+    if boards_to_test is None:
+        boards_to_test = generate_boards_for_testing("stockfish-8-linux/Linux/stockfish_8_x64")
+
+    for board in boards_to_test:
+        if has_legal_move_fn(board) != any(board.generate_legal_moves()):
+            print(board)
+            print(board.fen())
+            print("Calculated value:", has_legal_move_fn(board))
+            print("Actual moves:", list(board.generate_legal_moves()))
+            return False
 
     return True
 
@@ -341,8 +377,9 @@ def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_
             if cur_board.is_game_over():
                 break
 
-        #Writing the game to the pgn file
-        os.write(temp_pgn, str.encode(str(chess.pgn.Game.from_board(cur_board))))
+        #Writing the game to the pgn file (doing multiple times since only one board is picked from each game)
+        for j in range(5):
+            os.write(temp_pgn, str.encode(str(chess.pgn.Game.from_board(cur_board))))
 
     #Create the tfrecords file as it would be created for training
     tfrecords_writer(temp_filename, tf_records_filename)
@@ -476,8 +513,9 @@ def weighted_piece_sum_creator(piece_values=None):
                board['pawns']]]],
             dtype=np.uint64)
 
-        occupied_bbs = np.array([[[board['occupied_w']],[board['occupied_b']]]], dtype=np.uint64)
-        return bf_piece_sum_eval(pieces, occupied_bbs, None, None, None)[0]
+        occupied_bbs = board['occupied_co'][::-1].reshape([1,2,1])
+        to_return = bf_piece_sum_eval(pieces, occupied_bbs, None, None, None)[0]
+        return to_return
 
     return bf_piece_sum_eval, simple_board_piece_sum
 
@@ -525,7 +563,6 @@ def create_negamax_function(eval_fn):
             best_val = np.maximum(
                 best_val,
                 - negamax(simple_struct_copy_push(board, board['unexplored_moves'][j]), depth - 1, -beta, -alpha, -color))
-
             alpha = np.maximum(alpha, best_val)
             if alpha >= beta:
                 break
@@ -612,21 +649,21 @@ def cur_piece_to_filter_fn(piece):
         return 15-piece.piece_type
 
 
-def dummy_records_writer_creator():
-    class DummyResult:
-        def __init__(self):
-            self.cp = 0
-            self.mate = None
+def dummy_tfrecords_writer(pgn_filename, output_filename):
+    TEMP_FILENAME = "THIS_SHOULD_BE_A_TEMP_FILE.pkl"
+    get_data_from_pgns(
+        [pgn_filename],
+        TEMP_FILENAME,
+        create_board_eval_board_from_game_fn(min_start_moves=0,for_testing=True),
+        print_interval=None)
 
-    def cur_tfrecords_writer(pgn_filename, output_filename):
-        create_database_from_pgn(
-            [pgn_filename],
-            data_writer=known_scoring_writer_creator(
-                score_board=lambda b : DummyResult(),
-                print_info=False),
-            output_filenames=[output_filename],
-            print_info=False)
-    return cur_tfrecords_writer
+    combine_pickles_and_create_tfrecords(
+        [TEMP_FILENAME],
+        [output_filename],
+        [1],
+        serializer_creator())
+
+
 
 
 def dummy_tf_records_input_data_pipe_creator(filename, include_unoccupied=False):
@@ -673,41 +710,42 @@ def full_test():
     """
     result_str = ["Failed", "Passed"]
 
-    print("Starting tests (this will likely take 1-5 minutes).\n")
+    print("Starting tests (this will likely take 1-3 minutes).\n")
 
-    test_results = [False] * 7
+    test_results = np.zeros(7, dtype=np.bool_)
+
 
     test_results[0] = full_perft_tester(
-        lambda fen, depth: traditional_perft_test(create_board_state_from_fen(fen), depth))
+        lambda fen, depth: perft_test(create_node_info_from_fen(fen, 0, 0), depth))
 
-    print("PERFT test using JitClass:                                    %s" % result_str[test_results[0]])
+    print("PERFT test using NumPy structured scalar:                     %s" % result_str[test_results[0]])
 
-    test_results[1] = full_perft_tester(
-        lambda fen, depth: structured_scalar_perft_test(create_node_info_from_fen(fen, 0, 0), depth))
-
-    print("PERFT test using NumPy structured scalar:                     %s" % result_str[test_results[1]])
-
-    test_results[2] = move_verification_tester(
-        scalar_is_legal_move,
+    test_results[1] = move_verification_tester(
+        is_legal_move,
         lambda b: create_node_info_from_python_chess_board(b)[0])
 
-    print("Move legality verification test:                              %s" % result_str[test_results[2]])
+    print("Move legality verification test:                              %s" % result_str[test_results[1]])
 
-    test_results[3] = zobrist_hash_test(cur_hash_getter)
+    test_results[2] = zobrist_hash_test(cur_hash_getter)
 
-    print("Incremental Zobrist hash test:                                %s" % result_str[test_results[3]])
+    print("Incremental Zobrist hash test:                                %s" % result_str[test_results[2]])
 
-    test_results[4], test_results[5] = complete_board_eval_tester(
-        tfrecords_writer=dummy_records_writer_creator(),
+    test_results[3:5] = complete_board_eval_tester(
+        tfrecords_writer=dummy_tfrecords_writer,
         feature_getter=cur_tfrecords_to_features,
         inference_pipe_fn=lambda : get_board_data("NHWC"),
         boards_to_input_for_inference=cur_boards_to_input_list_fn,
         piece_to_filter_fn=cur_piece_to_filter_fn,
         ep_filter_index=1,
-        castling_filter_indices=[8, 15])
+        castling_filter_indices=np.array([8, 15], dtype=np.uint8))
 
-    print("Board evaluation data creation and training pipeline test:    %s" % result_str[test_results[4]])
-    print("Board evaluation inference pipeline test:                     %s" % result_str[test_results[5]])
+    print("Board evaluation data creation and training pipeline test:    %s" % result_str[test_results[3]])
+    print("Board evaluation inference pipeline test:                     %s" % result_str[test_results[4]])
+
+    test_results[5] = check_if_legal_move_exists_tester(
+        lambda b : has_legal_move(create_node_info_from_python_chess_board(b)[0]))
+
+    print("Legal move existance test:                                    %s" % result_str[test_results[5]])
 
     bf_eval_fn, simple_eval_fn = weighted_piece_sum_creator()
     test_results[6] = zero_window_search_tester(
