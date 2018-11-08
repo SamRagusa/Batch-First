@@ -73,12 +73,12 @@ If the values of D are unique, batch B will produce n(n-1)/2 pairs of boards to 
 The versions listed are known to work, but are not necessarily the only versions which will work.
 - [TensorFlow](https://github.com/tensorflow/tensorflow) v1.10.0
 - [NumPy](https://github.com/numpy/numpy) v1.14.3
-- [Numba](https://github.com/numba/numba) v0.39.0
+- [Numba](https://github.com/numba/numba) v0.40.0
 - [SciPy](https://github.com/scipy/scipy) v1.1.0
 - [python-chess](https://github.com/niklasf/python-chess) v0.20.1
 - [khash_numba](https://github.com/synapticarbors/khash_numba)
 
-The tools listed below can be used, but are not needed.  They provide speed improvements to the engine.
+The tools listed below can be used, but are not needed.  They provide _significant_ speed improvements to the engine.
 - [TensorRT](https://developers.googleblog.com/2018/03/tensorrt-integration-with-tensorflow.html) to optimize TensorFlow graphs for inference
 - [Intel Python Distribution](https://software.intel.com/en-us/distribution-for-python) for speed improvements to NumPy and Numba
 

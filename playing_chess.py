@@ -6,7 +6,9 @@ import time
 
 from batch_first.engine import ChessEngine, BatchFirstEngine
 from batch_first.chestimator import get_inference_functions
-from batch_first.anns.ann_creation_helper import save_model_as_graphdef_for_serving
+from batch_first.anns.ann_creation_helper import combine_graphdefs, save_trt_graphdef, remap_inputs
+
+from code_testing import weighted_piece_sum_creator
 
 
 def play_one_game(engine1, engine2, print_info=False):
@@ -106,42 +108,62 @@ def pseudo_random_move_eval(*args):
 
 
 if __name__ == "__main__":
-    # board_eval_model_path = "/srv/tmp/encoder_evaluation_helper/BEFORE_COMMIT_TEST_5.5/1539087638"
-    # save_model_as_graphdef_for_serving(
-    #     model_path=board_eval_model_path,
-    #     output_model_path=board_eval_model_path,
-    #     output_filename="tensorrt_eval_graph.pb",
-    #     output_node_name="Squeeze",
-    #     max_batch_size=5000)
+    MAX_SEARCH_BATCH_SIZE = 1024
 
-    # move_scoring_model_path = "/srv/tmp/move_scoring_helper/to_from_square_3/1532363846"
-    # save_model_as_graphdef_for_serving(
-    #     model_path=move_scoring_model_path,
-    #     output_model_path=move_scoring_model_path,
-    #     output_filename="tensorrt_move_scoring_graph.pb",
-    #     output_node_name="GatherNd_1",
-    #     max_batch_size=7500)
 
-    MOVE_SCORING_TEST_FILENAME = "/srv/databases/chess_engine/one_rand_per_board_data/move_scoring_testing_set_1.npy"
+    GRAPHDEF_FILENAMES = [
+        "/srv/tmp/encoder_evaluation_helper/only_one_mate_weight_decrement_1.13/1540312680",
+        "/srv/tmp/move_scoring_helper_current/new_data_one_pass_14_no_final_bn_scaling/new_data_one_pass_14_no_final_bn_scaling.15/1541546710",
+    ]
+    OUTPUT_MODEL_PATH = "/srv/tmp/combining_graphs_1"
+    OUTPUT_MODEL_FILENAME = "COMBINED_OUTPUT_TEST_1.pbtxt"
 
-    MOVE_SCORING_GRAPHDEF_FILENAME = "/srv/tmp/move_scoring_helper/to_from_square_3/1532363846/tensorrt_move_scoring_graph.pb"
-    BOARD_EVAL_GRAPHDEF_FILENAME = "/srv/tmp/encoder_evaluation_helper/BEFORE_COMMIT_TEST_5.5/1539087638/tensorrt_eval_graph.pb"
+    OUTPUT_NODE_NAMES = ["Squeeze", "requested_move_scores"]
 
-    BOARD_PREDICTOR, MOVE_PREDICTOR, PREDICTOR_CLOSER = get_inference_functions(
-        BOARD_EVAL_GRAPHDEF_FILENAME,
-        MOVE_SCORING_GRAPHDEF_FILENAME,
-        session_gpu_memory=.4)
+    PREFIXES = ["value_network", "policy_network"]
 
-    search_depth = 4
+    # combine_graphdefs(
+    #     GRAPHDEF_FILENAMES,
+    #     OUTPUT_MODEL_PATH,
+    #     OUTPUT_MODEL_FILENAME,
+    #     OUTPUT_NODE_NAMES,
+    #     name_prefixes=PREFIXES,
+    # )
+
+    # remap_inputs(OUTPUT_MODEL_PATH + "/" +  OUTPUT_MODEL_FILENAME, OUTPUT_MODEL_PATH, "REMAPPED_TEST_1.pbtxt")
+
+    OUTPUT_NODE_NAMES = ["%s/%s"%(prefix,name) for name, prefix in zip(OUTPUT_NODE_NAMES, PREFIXES)]
+    TRT_OUTPUT_FILENAME = "COMBINED_TRT_TEST_1.pbtxt"
+    # save_trt_graphdef(OUTPUT_MODEL_PATH + "/" +  OUTPUT_MODEL_FILENAME,
+    #                OUTPUT_MODEL_PATH,
+    #                TRT_OUTPUT_FILENAME,
+    #                OUTPUT_NODE_NAMES,
+    #                trt_memory_fraction=.4,
+    #                max_batch_size=int(1.25*MAX_SEARCH_BATCH_SIZE))
+
+
+    MOVE_SCORING_TEST_FILENAME = "/srv/databases/lichess/lichess_db_standard_rated_2018-07_first_100k_games.npy"
+    ZERO_VALUE_BOARD_FILENAME = "/srv/databases/has_zero_valued_board/combined_zero_boards.npy"
+
+
+    BOARD_PREDICTOR, MOVE_PREDICTOR, PREDICTOR_CLOSER = get_inference_functions(OUTPUT_MODEL_PATH + "/" + TRT_OUTPUT_FILENAME, session_gpu_memory=.65)
+
+
+    search_depth = 6
     batch_first_engine = BatchFirstEngine(
         search_depth,
+        # weighted_piece_sum_creator()[0],
+        # pseudo_random_move_eval,
         BOARD_PREDICTOR,
         MOVE_PREDICTOR,
-        MOVE_SCORING_TEST_FILENAME,  # "pre_commit_bin_test.npy"
-        bin_output_filename="pre_commit_bin_test")
+        bin_database_file="deeper_network_1.npy",
+        max_batch_size=MAX_SEARCH_BATCH_SIZE,
+        saved_zero_shift_file="new_zero_board_thing_1.npy"
+    )
 
-    stockfish_engine = StockFishEngine("stockfish-8-linux/Linux/stockfish_8_x64", move_time=1)
+    stockfish_engine = StockFishEngine("stockfish-8-linux/Linux/stockfish_8_x64", move_time=1, print_search_info=True)
 
     competition_results = compete(batch_first_engine, stockfish_engine, print_games=True)
 
     PREDICTOR_CLOSER()
+

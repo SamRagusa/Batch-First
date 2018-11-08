@@ -576,6 +576,8 @@ def create_negamax_function(eval_fn):
 
 
 def negamax_zero_window_search_creator(eval_fn, move_predictor, max_batch_size=5000, run_search_in_testing_mode=False):
+    dummy_previous_board_map = np.zeros([2, 1], dtype=np.uint64)
+
     def zero_window_search(board, depth, separator, hash_table):
         priority_bins = PriorityBins(
             np.linspace(0,100,1000),
@@ -584,9 +586,12 @@ def negamax_zero_window_search_creator(eval_fn, move_predictor, max_batch_size=5
 
         separator_to_use = np.nextafter(separator, MIN_FLOAT32_VAL)
 
+
+
         root_node = set_up_root_node_for_struct(
             move_predictor,
             hash_table,
+            dummy_previous_board_map,
             create_node_info_from_python_chess_board(board, depth, separator_to_use))
 
         if root_node.board_struct[0]['terminated']:
@@ -598,6 +603,7 @@ def negamax_zero_window_search_creator(eval_fn, move_predictor, max_batch_size=5
             eval_fn,
             move_predictor,
             hash_table=hash_table,
+            previous_board_map=dummy_previous_board_map,
             testing=run_search_in_testing_mode)
         return to_return
 

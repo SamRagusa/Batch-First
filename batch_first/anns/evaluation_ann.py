@@ -1,6 +1,5 @@
 import tensorflow as tf
 
-
 from scipy.stats import kendalltau, weightedtau, spearmanr
 
 import batch_first.anns.ann_creation_helper as ann_h
@@ -17,11 +16,12 @@ def diag_comparison_model_fn(features, labels, mode, params):
     two board evaluations, where one is intended to be greater than the other based on some pre-calculated
     scoring system (e.g. StockFish evaluations).
     """
-    convolutional_module_outputs = ann_h.create_input_convolutions_shared_weights(
+    convolutional_module_outputs=ann_h.create_input_convolutions_shared_weights(
         features['board'],
         params['kernel_initializer'],
         params['data_format'],
-        mode)
+        mode,
+        num_unique_filters=[32, 20, 20, 18, 18, 16, 24, 24]) #236 with the 64 undilated included
 
     if len(params['convolutional_modules']):
         convolutional_module_outputs = ann_h.build_convolutional_modules(
@@ -54,34 +54,12 @@ def diag_comparison_model_fn(features, labels, mode, params):
     # Calculate loss
     if mode != tf.estimator.ModeKeys.PREDICT:
         with tf.variable_scope("loss"):
-            desired_diff_matrix = ann_h.vec_and_transpose_op(features['scores'], tf.subtract, tf.float32)
             calculated_diff_matrix = ann_h.vec_and_transpose_op(logits, tf.subtract)
 
-            lower_diag_diff_matrix = tf.matrix_band_part(desired_diff_matrix, -1, 0)
+            label_matrix = features['label_matrix']
+            weight_matrix = features['weight_matrix']
 
-            lower_diag_sign = tf.sign(lower_diag_diff_matrix)
-            weight_mask = tf.abs(lower_diag_sign)
-            bool_weight_mask = tf.cast(weight_mask, tf.bool)
-
-            desired_found_mate = tf.greater(tf.abs(features['scores']), params['value_larger_than_centipawn_less_than_mate'])
-
-            both_found_mate = ann_h.vec_and_transpose_op(desired_found_mate, tf.logical_and)
-
-            desired_signs = tf.sign(features['scores'])
-
-            same_sign_matrix = ann_h.vec_and_transpose_op(desired_signs, tf.equal)
-
-            both_same_player_mates = tf.logical_and(both_found_mate, same_sign_matrix)
-
-            both_same_mate_and_nonzero_weight = tf.logical_and(both_same_player_mates, bool_weight_mask)
-
-            weight_helper = params['same_mate_depth_diff_decrement'] * tf.cast(both_same_mate_and_nonzero_weight, tf.float32)
-
-            mate_adjusted_weight_mask = weight_mask - weight_helper
-
-            label_matrix = (lower_diag_sign + weight_mask)/2
-
-            loss = tf.losses.sigmoid_cross_entropy(label_matrix, calculated_diff_matrix, weights=mate_adjusted_weight_mask)
+            loss = tf.losses.sigmoid_cross_entropy(label_matrix, calculated_diff_matrix, weights=weight_matrix)
             loss_summary = tf.summary.scalar("loss", loss)
 
 
@@ -100,27 +78,17 @@ def diag_comparison_model_fn(features, labels, mode, params):
     predictions = {"scores" : logits}
     the_export_outputs = {"serving_default" : tf.estimator.export.RegressionOutput(value=logits)}
 
-    if mode != tf.estimator.ModeKeys.PREDICT:
-        relevant_correct_diff = tf.logical_and(
-            bool_weight_mask,
-            tf.equal(
-                tf.sign(calculated_diff_matrix),
-                lower_diag_sign))
-
-        ratio_better = tf.reduce_sum(tf.cast(relevant_correct_diff, tf.float32)) / tf.reduce_sum(weight_mask)
-
     validation_metrics = None
     training_hooks = []
 
     # Create the metrics
     if mode == tf.estimator.ModeKeys.TRAIN:
-        tau_a = ann_h.kendall_rank_correlation_coefficient(logits, features['scores'])
+        tau_a = ann_h.kendall_rank_correlation_coefficient(logits, features['score'])
 
         to_create_metric_dict = {
             "loss/loss": (loss, loss_summary),
             "metrics/mean_evaluation_value" : logits,
             "metrics/mean_abs_evaluation_value": tf.abs(logits),
-            "metrics/ratio_better_board_chosen" : ratio_better,
             "metrics/kendall_tau-a" : tau_a,
         }
 
@@ -135,24 +103,40 @@ def diag_comparison_model_fn(features, labels, mode, params):
 
     elif mode == tf.estimator.ModeKeys.EVAL:
         the_logits, update1 = tf.contrib.metrics.streaming_concat(logits)
-        the_labels, update2 = tf.contrib.metrics.streaming_concat(features['scores'])
+        the_labels, update2 = tf.contrib.metrics.streaming_concat(features['score'])
+
+        BIGGER_THAN_CP_LESS_THAN_WIN_VAL = tf.constant(100000, dtype=features['score'].dtype)
+
+        mate_mask = tf.greater(tf.abs(the_labels), BIGGER_THAN_CP_LESS_THAN_WIN_VAL)
+        mate_logits = tf.boolean_mask(the_logits, mate_mask)
+        mate_labels = tf.boolean_mask(the_labels, mate_mask)
+
+        non_mate_mask = tf.logical_not(mate_mask)
+        non_mate_logits = tf.boolean_mask(the_logits, non_mate_mask)
+        non_mate_labels = tf.boolean_mask(the_labels, non_mate_mask)
+
+        mate_tau_b, mate_tau_b_p_value = ann_h.py_func_scipy_rank_helper_creator(mate_logits, mate_labels)(kendalltau)
+
+        non_mate_coef_creator = ann_h.py_func_scipy_rank_helper_creator(non_mate_logits, non_mate_labels)
+        non_mate_tau_b, non_mate_tau_b_p_value = non_mate_coef_creator(kendalltau)
+        non_mate_weighted_tau_b, non_mate_weighted_tau_b_p_value= non_mate_coef_creator(weightedtau)
 
         update = tf.group(update1, update2)
 
         scipy_rank_coef_creator = ann_h.py_func_scipy_rank_helper_creator(the_logits, the_labels)
 
         tau_b, tau_b_p_value = scipy_rank_coef_creator(kendalltau)
-        weighted_tau_b, weighted_tau_b_p_value = scipy_rank_coef_creator(weightedtau)
         rho, rho_p_value = scipy_rank_coef_creator(spearmanr)
 
         validation_metrics = {
             "metrics/mean_evaluation_value" : tf.metrics.mean(logits),
             "metrics/mean_abs_evaluation_value" : tf.metrics.mean(tf.abs(logits)),
-            "metrics/ratio_better_board_chosen" : tf.metrics.mean(ratio_better),
             "metrics/kendall_tau-b": (tau_b, update),
             "metrics/kendall_tau-b_p_value": (tau_b_p_value, update),
-            "metrics/weighted_kendall_tau-b": (weighted_tau_b, update),
-            "metrics/weighted_kendall_tau-b_p_value": (weighted_tau_b_p_value, update),
+            "metrics/kendall_tau-b_mate_only" : (mate_tau_b, update),
+            "metrics/non_mate_kendall_tau-b" : (non_mate_tau_b, update),
+            "metrics/non_mate_weighted_tau-b": (non_mate_weighted_tau_b, update),
+            "metrics/non_mate_weighted_kendall_tau-b_p_value": (non_mate_weighted_tau_b_p_value, update),
             "metrics/spearman_rho": (rho, update),
             "metrics/spearman_rho_p_value": (rho_p_value, update),
         }
@@ -167,7 +151,7 @@ def diag_comparison_model_fn(features, labels, mode, params):
         eval_metric_ops=validation_metrics)
 
 
-def lower_diag_score_comparison_input_fn(filename_pattern, batch_size, include_unoccupied=True,shuffle_buffer_size=None,
+def lower_diag_score_comparison_input_fn(filename_pattern, batch_size, include_unoccupied=True, shuffle_buffer_size=None,
                                          num_things_in_parallel=None, num_things_to_prefetch=None, shuffle_seed=None,
                                          data_format="NHWC"):
     if num_things_to_prefetch is None:
@@ -194,7 +178,38 @@ def lower_diag_score_comparison_input_fn(filename_pattern, batch_size, include_u
             16 - omit_unoccupied_decrement,
             axis=-1 if data_format=="NHWC" else 1)
 
-        return boards, parsed_examples['score']
+        desired_diff_matrix = ann_h.vec_and_transpose_op(parsed_examples['score'], tf.subtract, tf.float32)
+
+        lower_diag_diff_matrix = tf.matrix_band_part(desired_diff_matrix, -1, 0)
+
+        lower_diag_sign = tf.sign(lower_diag_diff_matrix)
+        weight_mask = tf.abs(lower_diag_sign)
+        bool_weight_mask = tf.cast(weight_mask, tf.bool)
+
+        comparison_indices = tf.where(bool_weight_mask)
+
+        value_larger_than_centipawn_less_than_mate = 100000
+        desired_found_mate = tf.greater(tf.abs(parsed_examples['score']), value_larger_than_centipawn_less_than_mate)
+
+        both_found_mate = ann_h.vec_and_transpose_op(desired_found_mate, tf.logical_and)
+
+        desired_signs = tf.sign(parsed_examples['score'])
+
+        same_sign_matrix = ann_h.vec_and_transpose_op(desired_signs, tf.equal)
+
+        both_same_player_mates = tf.logical_and(both_found_mate, same_sign_matrix)
+
+        both_same_mate_and_nonzero_weight = tf.logical_and(both_same_player_mates, bool_weight_mask)
+
+        same_mate_depth_diff_decrement = .95
+
+        weight_helper = same_mate_depth_diff_decrement * tf.cast(both_same_mate_and_nonzero_weight, tf.float32)
+
+        mate_adjusted_weight_mask = weight_mask - weight_helper
+
+        label_matrix = (lower_diag_sign + weight_mask)/2
+
+        return boards, parsed_examples['score'], label_matrix, mate_adjusted_weight_mask, comparison_indices
 
 
     dataset = dataset.map(process_batch, num_parallel_calls=num_things_in_parallel)
@@ -205,10 +220,9 @@ def lower_diag_score_comparison_input_fn(filename_pattern, batch_size, include_u
 
     features = iterator.get_next()
 
-    feature_dict = {"board" : features[0], "scores" : features[1]}
+    feature_dict = {"board": features[0], "score": features[1], "label_matrix": features[2], "weight_matrix": features[3]}
 
     return feature_dict, None
-
 
 
 def board_eval_serving_input_receiver(data_format="NCHW"):
@@ -227,19 +241,18 @@ def board_eval_serving_input_receiver(data_format="NCHW"):
     return fn_to_return
 
 
-
 def main(unused_par):
-    SAVE_MODEL_DIR ="/srv/tmp/diag_loss_2/pre_commit_test_1"
-    TRAINING_FILENAME_PATTERN = "/home/sam/databases/shifted_lichess_training.tfrecords"
-    VALIDATION_FILENAME_PATTERN = "/home/sam/databases/shifted_lichess_validation.tfrecords"
+    SAVE_MODEL_DIR = "/srv/tmp/diag_loss_3/pre_commit_test"
+    TRAINING_FILENAME_PATTERN = "/srv/databases/lichess_combined_methods_eval_databases/lichess_training.tfrecords"
+    VALIDATION_FILENAME_PATTERN = "/srv/databases/lichess_combined_methods_eval_databases/lichess_validation.tfrecords"
     TRAIN_OP_SUMMARIES = ["gradient_norm", "gradients"]
     NUM_INPUT_FILTERS = 15
     OPTIMIZER = 'Adam'
-    TRAINING_SHUFFLE_BUFFER_SIZE = 6900000
-    TRAINING_BATCH_SIZE = 256      #The effective batch size used for the loss = n(n-1)/2  (where n is the number of boards in the batch)
+    TRAINING_SHUFFLE_BUFFER_SIZE = 32790000
+    TRAINING_BATCH_SIZE = 512      #The effective batch size used for the loss = n(n-1)/2  (where n is the number of boards in the batch)
     VALIDATION_BATCH_SIZE = 1000
-    LOG_ITERATION_INTERVAL = 2500
-    LEARNING_RATE = 5e-4
+    LOG_ITERATION_INTERVAL = 1500
+    LEARNING_RATE = 2.5e-3
     KERNEL_REGULARIZER = lambda: None
     KERNEL_INITIALIZER = lambda: tf.contrib.layers.variance_scaling_initializer()
     TRAINABLE_CNN_MODULES = True
@@ -247,16 +260,18 @@ def main(unused_par):
     SAME_MATE_DEPTH_DIFF_LOSS_WEIGHT_DECREMENT = .95
     VALUE_LARGER_THAN_CENTIPAWN_LESS_THAN_MATE = 100000
 
-    num_examples_in_training_file = 6926305
-    num_examples_in_validation_file = 583324
+    num_examples_in_training_file = 32792847
+    num_examples_in_validation_file = 3857982
 
     BATCHES_IN_TRAINING_EPOCH = num_examples_in_training_file // TRAINING_BATCH_SIZE
     BATCHES_IN_VALIDATION_EPOCH =  num_examples_in_validation_file // VALIDATION_BATCH_SIZE
 
+    # learning_decay_function = lambda gs: LEARNING_RATE
     learning_decay_function = lambda gs : tf.train.exponential_decay(LEARNING_RATE, gs,
-                                                                     BATCHES_IN_TRAINING_EPOCH, 0.97, staircase=True)
+                                                                     BATCHES_IN_TRAINING_EPOCH, 0.96, staircase=True)
 
-    CONVOLUTIONAL_MODULES = [[[[512, 1], [128, 1]] + 4 * [[64, 3]] + [(8, 8)]]]
+    CONVOLUTIONAL_MODULES = [[[[512, 1], [128, 1]] + 4 * [[32, 3]] + [(16, 8)]]]
+
 
     # Create the Estimator
     the_estimator = tf.estimator.Estimator(
@@ -284,13 +299,13 @@ def main(unused_par):
 
 
     validation_hook = ann_h.ValidationRunHook(
-        step_increment=BATCHES_IN_TRAINING_EPOCH,
+        step_increment=BATCHES_IN_TRAINING_EPOCH//3,
         estimator=the_estimator,
         input_fn_creator=lambda: lambda : lower_diag_score_comparison_input_fn(
             VALIDATION_FILENAME_PATTERN,
             VALIDATION_BATCH_SIZE,
             include_unoccupied=NUM_INPUT_FILTERS == 16,
-            num_things_to_prefetch=1,
+            num_things_to_prefetch=5,
             num_things_in_parallel=12,
             data_format=DATA_FORMAT,
         ),
@@ -303,7 +318,7 @@ def main(unused_par):
             shuffle_buffer_size=TRAINING_SHUFFLE_BUFFER_SIZE,
             include_unoccupied=NUM_INPUT_FILTERS == 16,
             num_things_in_parallel=12,
-            num_things_to_prefetch=5000,
+            num_things_to_prefetch=1,
             data_format=DATA_FORMAT,
         ),
         hooks=[validation_hook],

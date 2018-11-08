@@ -48,6 +48,55 @@ def get_table_and_array_for_set_of_dicts(dicts):
     return index_lookup_table, array
 
 
+
+def generate_move_filter_table():
+    """
+    Generate a lookup table for the policy encoding described in the following paper:
+
+    'Mastering Chess and Shogi by Self-Play with a General Reinforcement Learning Algorithm'
+    https://arxiv.org/pdf/1712.01815.pdf
+
+    So in the returned table, the value at index (f,t,p) is the index of the policy plane (in the move scoring ann)
+    associated with the chess move described as moving a piece from square f to square t and being promoted to piece p.
+    """
+    diffs = {}
+    for j in range(1, 8):
+        diffs[(0, j)] = j - 1
+        diffs[(0, -j)] = j + 6
+        diffs[(j, 0)] = j + 13
+        diffs[(-j, 0)] = j + 20
+        diffs[(j, j)] = j + 27
+        diffs[(j, -j)] = j + 34
+        diffs[(-j, j)] = j + 41
+        diffs[(-j, -j)] = j + 48
+
+    diffs[(1, 2)] = 56
+    diffs[(1, -2)] = 57
+    diffs[(-1, 2)] = 58
+    diffs[(-1, -2)] = 59
+    diffs[(2, 1)] = 60
+    diffs[(2, -1)] = 61
+    diffs[(-2, 1)] = 62
+    diffs[(-2, -1)] = 63
+
+    filter_table = np.zeros([64,64,6], dtype=np.uint8)
+
+    for square1 in chess.SQUARES:
+        for square2 in chess.SQUARES:
+            file_diff = chess.square_file(square2) - chess.square_file(square1)
+            rank_diff = chess.square_rank(square2) - chess.square_rank(square1)
+            if not diffs.get((file_diff, rank_diff)) is None:
+                filter_table[square1, square2] = diffs[(file_diff, rank_diff)]
+
+                if rank_diff == 1 and file_diff in [1,0,-1]:
+                    filter_table[square1, square2, 2:5] = 3*(1+file_diff) + np.arange(64,67)
+    return filter_table
+
+
+
+MOVE_FILTER_LOOKUP = generate_move_filter_table()
+
+
 numpy_move_dtype = np.dtype([("from_square", np.uint8), ("to_square", np.uint8), ("promotion", np.uint8)])
 move_type = nb.from_dtype(numpy_move_dtype)
 
@@ -106,6 +155,12 @@ NO_PROMOTION_VALUE = np.uint8(0)
 
 TIE_RESULT_SCORE = np.float32(0)
 
+
+# This is used in times when a value should be 'None', but Numba won't let it.   To appease the compiler
+# this array is given, and it's first value checked against MIN_FLOAT32_VAL to see if it's the 'None' situation.
+# Ideally this will be removed eventually.
+INT_ARRAY_NONE = np.array([MIN_FLOAT32_VAL])
+
 # The win/loss arrays are such that the magnitudes of the win/loss decrease as the index in the array increases.
 # This is so depth can be used to index the arrays
 WIN_RESULT_SCORES = np.full(MAX_SEARCH_DEPTH, np.nextafter(ALMOST_MAX_FLOAT_32_VAL, MIN_FLOAT32_VAL))
@@ -117,7 +172,7 @@ for j in range(1, MAX_SEARCH_DEPTH):
 
 
 
-SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES = np.uint8(30)  # This needs to be picked precisely
+SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES = np.uint8(30)
 TT_HASH_MASK = np.uint64(2 ** (SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES) - 1)
 
 

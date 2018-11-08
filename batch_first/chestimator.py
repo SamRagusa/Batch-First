@@ -1,61 +1,55 @@
 import tensorflow as tf
 import numpy as np
 
-from tensorflow.python.platform import gfile
-from tensorflow.python.util import compat
-
 import batch_first as bf
 
 from tensorflow.contrib import tensorrt as trt
 
-
-def get_predictor_from_graphdef(session, graphdef_filename, output_tensor, input_tensors, name_prefix=None, is_binary=True):
-    with gfile.FastGFile(graphdef_filename, 'rb' if is_binary else 'r') as f:
-        model_graph_def = tf.GraphDef()
-        model_graph_def.ParseFromString(compat.as_bytes(f.read()))
-
-        desired_tensors = tf.import_graph_def(
-            model_graph_def,
-            return_elements=[output_tensor] + input_tensors,
-            name=name_prefix)
-
-        def test_predictor(*inputs):
-            return session.run(desired_tensors[0], dict(zip(desired_tensors[1:], inputs)))
-
-        return test_predictor
+from google.protobuf import text_format
 
 
-def get_move_predictor(session, graphdef_filename, output_stages_tensor_names, input_tensor_names, name_prefix=None, is_binary=True):
-    with gfile.FastGFile(graphdef_filename, 'rb' if is_binary else 'r') as f:
-        model_graph_def = tf.GraphDef()
-        model_graph_def.ParseFromString(compat.as_bytes(f.read()))
 
-        desired_tensors = tf.import_graph_def(
-            model_graph_def,
-            return_elements=output_stages_tensor_names + input_tensor_names,
-            name=name_prefix)
+def get_predictors(session, graphdef_filename, eval_output_tensor, move_output_stages_tensor_names, move_input_tensor_names, eval_input_tensor_names):
+    """
+    All ANN interactions should be called through C/C++ functions for speed (hopefully will be addressed soon)
+    """
+    with open(graphdef_filename, 'r') as f:
+        txt = f.read()
+        model_graph_def = text_format.Parse(txt, tf.GraphDef())
+
+    desired_tensors = tf.import_graph_def(
+        model_graph_def,
+        return_elements=[eval_output_tensor] + move_output_stages_tensor_names + move_input_tensor_names + eval_input_tensor_names)
+
+    eval_output = desired_tensors[0]
+    move_outputs = desired_tensors[1:len(move_output_stages_tensor_names) + 1]
+    move_inputs = desired_tensors[len(move_output_stages_tensor_names) + 1:-len(eval_input_tensor_names)]
+    eval_inputs = desired_tensors[-len(eval_input_tensor_names):]
+
+    with tf.device('/GPU:0'):
+        with tf.control_dependencies([move_outputs[0]]):
+            dummy_operation = tf.constant([0], dtype=tf.float32, name="dummy_const")
+
+    def board_predictor(*inputs):
+        return session.run(eval_output, dict(zip(eval_inputs, inputs)))
 
     def start_move_prediction(*board_inputs):
-        handle = session.partial_run_setup(desired_tensors[:2], desired_tensors[2:])
+        handle = session.partial_run_setup([dummy_operation, move_outputs[1]], move_inputs)
 
-
-        # If I'm not mistaken the workaround mentioned below will be much faster when moved to TensorFlow 1.10,
-        # but either way, all ANN interactions should be through C/C++ functions for Numba to call (long term)
-
-        #############THIS IS NOT RETURNING None, INSTEAD ITS RETURNING (all logits) AND THEYRE JUST BEING IGNORED, BUT THIS IS VERY CRUCIAL FOR SPEED AND A LAUGHABLY SLOW SOLTUION###############
-        session.partial_run(handle, desired_tensors[0], dict(zip(desired_tensors[2: 7], board_inputs)))
+        session.partial_run(handle, dummy_operation, dict(zip(move_inputs[:-3], board_inputs)))
 
         return lambda move_info: session.partial_run(handle,
-                                                     desired_tensors[1],
-                                                     dict(zip(desired_tensors[7:], move_info)))
+                                                     move_outputs[1],
+                                                     dict(zip(move_inputs[-3:], move_info)))
 
-    return start_move_prediction
+    return board_predictor, start_move_prediction
 
 
-def get_inference_functions(eval_graphdef_file, move_graphdef_file, session_gpu_memory=.4):
+def get_inference_functions(graphdef_filename, session_gpu_memory=.4):
     sess = tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=session_gpu_memory)))
 
-    eval_output_tensor_name = "Squeeze:0"
+    path_adder = lambda p, l : list(map(lambda st : "%s/%s"%(p, st), l))
+    eval_output_tensor_name = "value_network/Squeeze:0"
     eval_input_tensor_names = [
         "piece_bbs:0",
         "color_occupied_bbs:0",
@@ -63,37 +57,27 @@ def get_inference_functions(eval_graphdef_file, move_graphdef_file, session_gpu_
         "castling_lookup_indices:0",
         "kings:0"]
 
-    move_scoring_stages_names = ["logit_layer/Conv2D:0", "GatherNd_1:0"]
-    move_scoring_input_tensor_names = eval_input_tensor_names + ["move_placeholder:0", "moves_per_board_placeholder:0"]
+    move_scoring_stages_names = ["Reshape_1", "requested_move_scores:0"]
 
-    evaluation_predictor = get_predictor_from_graphdef(
+    move_scoring_input_tensor_names = eval_input_tensor_names + [
+        "from_square_placeholder:0", "move_filter_placeholder:0", "moves_per_board_placeholder:0"]
+
+    eval_input_tensor_names = path_adder("value_network", eval_input_tensor_names)
+
+    move_scoring_stages_names = path_adder("policy_network", move_scoring_stages_names)
+    move_scoring_input_tensor_names = path_adder("policy_network", move_scoring_input_tensor_names)
+
+    predictors = get_predictors(
         sess,
-        eval_graphdef_file,
-        eval_output_tensor_name,
-        eval_input_tensor_names,
-        "board_eval")
-
-    if move_graphdef_file is None:
-        move_predictor = None
-    else:
-        move_predictor = get_move_predictor(
-            sess,
-            move_graphdef_file,
-            move_scoring_stages_names,
-            move_scoring_input_tensor_names,
-            "move_scoring")
+        graphdef_filename,
+        eval_output_tensor_name, move_scoring_stages_names, move_scoring_input_tensor_names, eval_input_tensor_names)
 
     closer_fn = lambda: sess.close()
 
-    return evaluation_predictor, move_predictor, closer_fn
+    return predictors[0], predictors[1], closer_fn
 
 
 def get_board_data(data_format="NCHW"):
-    """
-    NOTES:
-    1) Verify that accepting the uint8's as int32 is the best way to do this, casting is relatively fast so doing that
-    wouldn't be a huge deal.
-    """
     piece_bbs = tf.placeholder(tf.int64, shape=[None, 1, 5], name="piece_bbs")
     color_occupied_bbs = tf.placeholder(tf.int64, shape=[None, 2, 1], name="color_occupied_bbs")
     ep_squares = tf.placeholder(tf.int32, shape=[None], name="ep_squares")
@@ -157,7 +141,7 @@ def get_board_data(data_format="NCHW"):
     # full_data = tf.concat([ep_bitboards, king_features, castling_features, properly_arranged_non_lookup_data], 3)
 
     if data_format == "NCHW":
-        full_data = tf.transpose(full_data, [0,3,1,2])
+        full_data = tf.transpose(full_data, [0,3,1,2], name="FOR_INPUT_MAPPING_transpose")
 
     return (piece_bbs, color_occupied_bbs, ep_squares, castling_lookup_indices, kings), full_data
 

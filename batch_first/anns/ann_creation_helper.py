@@ -1,12 +1,17 @@
 import tensorflow as tf
+import numpy as np
 
 from tensorflow.contrib import layers
 from tensorflow.python import training
 
 from functools import reduce
 
+from batch_first.chestimator import get_board_data
+from google.protobuf import text_format
 
 from tensorflow.contrib import tensorrt as trt
+
+
 
 
 def vec_and_transpose_op(vector, operation, output_type=None):
@@ -52,97 +57,111 @@ def py_func_scipy_rank_helper_creator(logits, labels):
     return helper_to_return
 
 
-def save_model_as_graphdef_for_serving(model_path, output_model_path, output_filename, output_node_name,
-                                       model_tags="serve", trt_memory_fraction=.4, total_video_memory=1.1e10,
-                                       max_batch_size=25000, as_text=False):
+def combine_graphdefs(graphdef_filenames, output_model_path, output_filename, output_node_names, name_prefixes=None):
+    if name_prefixes is None:
+        name_prefixes = len(graphdef_filenames) * [""]
 
-    #This would ideally be 1 instead of .7, but the GPU that this is running on is responsible for things like graphics
-    with tf.Session(config=tf.ConfigProto(
-            gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.7 - trt_memory_fraction))) as sess:
-        tf.saved_model.loader.load(sess, [model_tags], model_path)
+    with tf.Session() as sess:
+        for filename, prefix in zip(graphdef_filenames, name_prefixes):
+            tf.saved_model.loader.load(sess, ['serve'], filename, import_scope=prefix)
 
         constant_graph_def = tf.graph_util.convert_variables_to_constants(
             sess,
             tf.get_default_graph().as_graph_def(),
-            [output_node_name])
+            ["%s/%s"%(prefix,name) for name, prefix in zip(output_node_names, name_prefixes)])
+
+        tf.train.write_graph(
+            constant_graph_def,
+            output_model_path,
+            output_filename)
+
+
+def remap_inputs(model_path, output_model_path, output_filename):
+    with tf.Session() as sess:
+        placeholders, formatted_data = get_board_data()
+
+        with open(model_path, 'r') as f:
+            graph_def = text_format.Parse(f.read(), tf.GraphDef())
+
+        tf.import_graph_def(
+            graph_def,
+            input_map={"policy_network/FOR_INPUT_MAPPING_transpose" : formatted_data,
+                       "value_network/FOR_INPUT_MAPPING_transpose" : formatted_data},
+            name="")
+
+        tf.train.write_graph(
+            sess.graph_def,
+            output_model_path,
+            output_filename,
+            as_text=True)
+
+
+def save_trt_graphdef(model_path, output_model_path, output_filename, output_node_names,
+                      trt_memory_fraction=.5, total_video_memory=1.1e10,
+                      max_batch_size=1000, write_as_text=True, ):
+
+    #This would ideally be 1 instead of .75, but the GPU that this is running on is responsible for things like graphics
+    with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.75 - trt_memory_fraction))) as sess:
+
+        with open(model_path, 'r') as f:
+            txt = f.read()
+            model_graph_def = text_format.Parse(txt, tf.GraphDef())
 
         trt_graph = trt.create_inference_graph(
-            constant_graph_def,
-            [output_node_name],
+            model_graph_def,
+            output_node_names,
             max_batch_size=max_batch_size,
             precision_mode="FP32",
             max_workspace_size_bytes=int(trt_memory_fraction*total_video_memory))
 
-        tf.train.write_graph(trt_graph, output_model_path, output_filename, as_text=as_text)
+        tf.train.write_graph(trt_graph, output_model_path, output_filename, as_text=write_as_text)
 
 
-def create_input_convolutions_shared_weights(the_input, kernel_initializer, data_format, mode, num_input_filters=15,
-                                             undilated_kernels=64, shared_dilated_filters=22, knight_kernels=14,
-                                             layer_unique_dilated_kernels=10, layer_unique_knight_kernels=10):
+def create_input_convolutions_shared_weights(the_input, kernel_initializer, data_format, mode,
+                                             undilated_kernels=64, num_unique_filters=[32,32,24,24,20,20,24,24]):
     """
     This function creates a set of 9 convolutional layers which together model the movement of chess pieces (more
-    information about this is in the README).  To accelerate the learning speed, some filters are shared between
-    similar convolutions.  After concatenation of the convolutions, batch normalization and ReLu are applied.
+    information about this is in the README).  After concatenation of the convolutions, batch normalization
+    and ReLu are applied.
 
 
     :param data_format: A string of either "NHWC" or "NCHW"
     :param undilated_kernels: The number of filters to use in the one undilated 3x3 convolution (including those
      shared with the dilated filters)
-    :param shared_dilated_filters: The number of filters to be shared between all the 3x3 filters
-    :param knight_kernels: The number of filters to be shared between the two knight convolutions
-    :param layer_unique_dilated_kernels: The number of unique kernels to be used for each of the 3x3 dilated convolutions
-    :param layer_unique_knight_kernels: The number of unique kernels to be used for each of the dilated convolutions
-     intended to capture the knight's movement
+    :param num_unique_filters: An iterable of the number of filters to be used for the 8 dilated convolutions (dilation 2-7, knight filters)
     :return: The concatenated output of the convolutions (after bach normalization and ReLu)
     """
     with tf.variable_scope("input_module"):
         channel_axis = 3 if data_format == "NHWC" else 1
-
-        knight_filter = tf.get_variable(
-            "2x2_knight_filter",
-            [2, 2, num_input_filters, knight_kernels],
-            dtype=tf.float32,
-            initializer=kernel_initializer())
-
-        undilated_filter = tf.get_variable(
-            "3x3_adjacency_filter",
-            [3, 3, num_input_filters, undilated_kernels],
-            dtype=tf.float32,
-            initializer=kernel_initializer())
-
-        dilated_filter = undilated_filter[...,:shared_dilated_filters]
+        layer_channel_str = "channels_last" if data_format == "NHWC" else "channels_first"
 
         path_outputs = [
-            tf.nn.conv2d(
-                input=the_input,
-                filter=undilated_filter,
-                strides=4*[1],
-                padding="SAME",
-                data_format=data_format)]
+            tf.layers.conv2d(the_input,
+                             undilated_kernels,
+                             kernel_size=3,
+                             padding='same',
+                             data_format=layer_channel_str,
+                             use_bias=False,
+                             kernel_initializer=kernel_initializer(),
+                             name="3x3_adjacency_filter")]
+
 
         dilations = [[d,d] for d in range(2,8)] + [(2,4),(4,2)]
         filter_sizes = (len(dilations) - 2) * [3] + 2 * [2]
 
-        for j, (rate, filter_size) in enumerate(zip(dilations, filter_sizes)):
-            num_unique_filters = layer_unique_dilated_kernels if filter_size == 3 else layer_unique_knight_kernels
-            shared_filter = dilated_filter if filter_size == 3 else knight_filter
-
-            individual_filter = tf.get_variable(
-                "individual_filter_%d" % j,
-                [filter_size, filter_size, num_input_filters, num_unique_filters],
-                dtype=tf.float32,
-                initializer=kernel_initializer())
-
-            the_filter = tf.concat([individual_filter, shared_filter], axis=-1)
-
+        for j, (rate, filter_size, num_filters) in enumerate(zip(dilations, filter_sizes, num_unique_filters)):
             path_outputs.append(
-                tf.nn.convolution(
-                    the_input,
-                    the_filter,
-                    "SAME",
-                    dilation_rate=rate,
-                    name="input_%dx%d_with_%dx%d_dilation" % (filter_size, filter_size, rate[0], rate[1]),
-                    data_format=data_format))
+                tf.layers.conv2d(the_input,
+                                 num_filters,
+                                 filter_size,
+                                 padding='same',
+                                 data_format=layer_channel_str,
+                                 dilation_rate=rate,
+                                 use_bias=False,
+                                 kernel_initializer=kernel_initializer(),
+                                 name="input_%dx%d_with_%dx%d_dilation" % (filter_size, filter_size, rate[0], rate[1])
+                                 )
+            )
 
         all_convs = tf.concat(path_outputs, axis=channel_axis)
 
@@ -161,9 +180,10 @@ def create_input_convolutions_shared_weights(the_input, kernel_initializer, data
     return convolutional_module_outputs
 
 
+
 def build_convolutional_module_with_batch_norm(the_input, module, kernel_initializer, mode,
-                                               num_previously_built_inception_modules=0, force_no_concat=False,
-                                               make_trainable=True, weight_regularizer=None, data_format="NHWC"):
+                                               num_previously_built_inception_modules=0, make_trainable=True,
+                                               weight_regularizer=None, data_format="NHWC"):
     """
     Builds a convolutional module based on a given design using batch normalization and the rectifier activation.
     It returns the final layer/layers in the module.
@@ -235,11 +255,8 @@ def build_convolutional_module_with_batch_norm(the_input, module, kernel_initial
     with tf.variable_scope("module_" + str(num_previously_built_inception_modules + 1)):
         if len(path_outputs) == 1:
             return path_outputs[0]
-        for j in range(1, len(path_outputs)):
-            if force_no_concat or path_outputs[0].get_shape().as_list()[1:3] != path_outputs[j].get_shape().as_list()[1:3]:
-                return [temp_input for temp_input in path_outputs]
 
-        return tf.concat([temp_input for temp_input in path_outputs], 3)
+        return tf.concat([temp_input for temp_input in path_outputs], -1 if data_format == "NHWC" else 1)
 
 
 def build_convolutional_modules(input, modules, mode, kernel_initializer, kernel_regularizer, make_trainable=True,
@@ -396,12 +413,27 @@ def metric_dict_creator(the_dict):
     return metric_dict
 
 
-def numpy_style_repeat_1d(input, multiples):
-    casted_multiples = tf.cast(multiples, dtype=tf.int32)
-    to_return = tf.boolean_mask(
-        tf.multiply(tf.ones([tf.reduce_max(casted_multiples), 1], dtype=input.dtype), input),
-        tf.sequence_mask(casted_multiples))
-    return to_return
+def numpy_style_repeat_1d_creator(max_multiple=100, max_to_repeat=10000):
+    board_num_lookup_ary = np.repeat(
+        np.arange(max_to_repeat),
+        np.full([max_to_repeat], max_multiple))
+    board_num_lookup_ary = board_num_lookup_ary.reshape(max_to_repeat, max_multiple)
+
+    def fn_to_return(multiples):
+        board_num_lookup_tensor = tf.constant(board_num_lookup_ary, dtype=tf.int32)
+        casted_multiples = tf.cast(multiples, dtype=tf.int32)
+        padded_multiples = tf.pad(
+            casted_multiples,
+            [[0, max_to_repeat - tf.shape(multiples)[0]]])
+
+        padded_multiples =tf.cast(padded_multiples, tf.float32)
+        to_return =  tf.boolean_mask(
+            board_num_lookup_tensor,
+            tf.sequence_mask(padded_multiples, maxlen=max_multiple))
+        return to_return
+
+    return fn_to_return
+
 
 
 def count_tfrecords(filename):

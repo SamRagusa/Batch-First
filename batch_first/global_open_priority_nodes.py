@@ -17,7 +17,6 @@ def should_not_terminate_node_array(node_array):
     return list(map(should_not_terminate, node_array))
 
 
-
 def should_not_terminate_node_array_with_counting(node_array, max_to_get):
     num_not_terminating = 0
     nodes_checked = len(node_array)
@@ -48,9 +47,6 @@ def split_by_bins(to_insert, bin_indices):
     return out
 
 
-
-
-
 class GlobalNodeList(object):
     def is_empty(self):
         """
@@ -70,7 +66,6 @@ class GlobalNodeList(object):
         """
         raise NotImplementedError("This method must be implemented!")
 
-
     def clear_list(self):
         """
         Clears the list so that it is empty.
@@ -78,18 +73,27 @@ class GlobalNodeList(object):
         raise NotImplementedError("This method must be implemented!")
 
 
-
 class PriorityBins(GlobalNodeList):
-    def __init__(self, bins, max_batch_size_to_accept, testing=False):
-        self.bins = bins
+    def __init__(self, bins, max_batch_size_to_accept, zero_shift=0, save_info=False, testing=False):
+        self.bins = bins[::-1]
 
         self.bin_arrays = [np.array([], dtype=np.object) for _ in range(len(bins)+1)]
         self.max_batch_size_to_accept = max_batch_size_to_accept
 
         self.non_empty_mask = np.zeros([len(self.bin_arrays)],dtype=np.bool_)
+
         self.testing = testing
+        self.save_info = save_info
+
+        self.zero_shift = zero_shift
 
         self.temp_aranged_array = np.arange(len(self.bin_arrays))
+
+        self.reset_logs()
+
+    def reset_logs(self):
+        self.total_in = 0
+        self.total_out = 0
 
     def __len__(self):
         return sum(len(self.bin_arrays[bin_index]) for bin_index in self.temp_aranged_array[self.non_empty_mask])
@@ -133,7 +137,7 @@ class PriorityBins(GlobalNodeList):
         :return: A size two tuple, the first element is a bool saying if it's in the bins to insert or in the
         bins stored, the second element being the index in whichever array of bins it's referring.
         """
-        non_empty_bins = np.arange(len(self.bin_arrays))[self.non_empty_mask]
+        non_empty_bins = self.temp_aranged_array[self.non_empty_mask]
         index_in_non_empty_bins = 0
         for index_in_sorted_bins, to_insert in enumerate(bins_to_insert):
             while index_in_non_empty_bins < len(non_empty_bins) and non_empty_bins[index_in_non_empty_bins] < to_insert[0]:
@@ -158,7 +162,13 @@ class PriorityBins(GlobalNodeList):
         after the next iteration, it could discover enough nodes with a high enough priority to hide the bin
         which was partially chosen, and potentially prevent better options from being explored sooner
         """
+        if self.save_info:
+            self.total_in += len(to_insert)
+
         own_len = len(self)
+
+        scores -= self.zero_shift
+        scores = np.abs(scores)
 
         # This should not be using self.max_batch_size_to_accept for the initial check (here), instead should probably
         # be using a value greater than that, because even if 0 nodes are terminating, the time saved will likely
@@ -166,13 +176,17 @@ class PriorityBins(GlobalNodeList):
         # in actual play)
         if len(to_insert) + own_len < self.max_batch_size_to_accept:
             if len(to_insert) == 0:
-                return self.pop_all_non_terminating()
+                to_return = self.pop_all_non_terminating()
 
-            if own_len == 0:
-                return to_insert[should_not_terminate_node_array(to_insert)]
+            elif own_len == 0:
+                to_return =  to_insert[should_not_terminate_node_array(to_insert)]
+            else:
+                to_return = np.concatenate([to_insert[should_not_terminate_node_array(to_insert)], self.pop_all_non_terminating()])
 
-            return np.concatenate([to_insert[should_not_terminate_node_array(to_insert)], self.pop_all_non_terminating()])
+            if self.save_info:
+                self.total_out += len(to_return)
 
+            return to_return
 
         bin_indices = np.digitize(scores, self.bins)
 
@@ -229,4 +243,9 @@ class PriorityBins(GlobalNodeList):
                         self.non_empty_mask[bin_index] = True
                 break
 
-        return np.concatenate([ary[mask] for ary, mask in for_completion])
+        to_return = np.concatenate([ary[mask] for ary, mask in for_completion])
+
+        if self.save_info:
+            self.total_out += len(to_return)
+
+        return to_return

@@ -3,54 +3,11 @@ import tensorflow as tf
 import re
 import pickle
 import time
+import chess.pgn
 
 from batch_first.numba_board import *
 
 
-
-
-def generate_move_filter_table():
-    """
-    Generate a lookup table for the policy encoding described in the following paper:
-
-    'Mastering Chess and Shogi by Self-Play with a General Reinforcement Learning Algorithm'
-    https://arxiv.org/pdf/1712.01815.pdf
-
-    So in the returned table, the value at index (f,t,p) is the index of the policy plane (in the move scoring ann)
-    associated with the chess move described as moving a piece from square f to square t and being promoted to piece p.
-    """
-    diffs = {}
-    for j in range(1, 8):
-        diffs[(0, j)] = j - 1
-        diffs[(0, -j)] = j + 6
-        diffs[(j, 0)] = j + 13
-        diffs[(-j, 0)] = j + 20
-        diffs[(j, j)] = j + 27
-        diffs[(j, -j)] = j + 34
-        diffs[(-j, j)] = j + 41
-        diffs[(-j, -j)] = j + 48
-
-    diffs[(1, 2)] = 56
-    diffs[(1, -2)] = 57
-    diffs[(-1, 2)] = 58
-    diffs[(-1, -2)] = 59
-    diffs[(2, 1)] = 60
-    diffs[(2, -1)] = 61
-    diffs[(-2, 1)] = 62
-    diffs[(-2, -1)] = 63
-
-    filter_table = np.zeros([64,64,6], dtype=np.uint8)
-
-    for square1 in chess.SQUARES:
-        for square2 in chess.SQUARES:
-            file_diff = chess.square_file(square2) - chess.square_file(square1)
-            rank_diff = chess.square_rank(square2) - chess.square_rank(square1)
-            if not diffs.get((file_diff, rank_diff)) is None:
-                filter_table[square1, square2] = diffs[(file_diff, rank_diff)]
-
-                if rank_diff == 1 and file_diff in [1,0,-1]:
-                    filter_table[square1, square2, 2:5] = 3*(1+file_diff) + np.arange(64,67)
-    return filter_table
 
 
 def game_iterator(pgn_filename):
@@ -237,43 +194,6 @@ def combine_pickles_and_create_tfrecords(filenames, output_filenames, output_rat
                 writer.write(example)
 
 
-def clean_pgn_file(filenames, game_filters=[], output_filename="cleaned_data.pgn", print_frequency=25000):
-    """
-    Creates a pgn file from the games contained in the given pgn files, after having removed games which
-    did not pass a given set of filters.
-
-    :param filenames: An iterable of the names of pgn files
-    :param game_filters: A list of functions, each one accepting a python-chess Game object, and returning
-     a boolean value indicating weather or not the board should be removed. The filters are applied sequentially
-     (the second filter wouldn't be checked if the first filter returns True)
-    :param output_filename: The filename used for saving the cleaned pgn
-    :param print_frequency: The number of games checked between printing the progress
-    """
-    def game_is_okay(game):
-        for filter in game_filters:
-            if filter(game):
-                return False
-        return True
-
-    with open(output_filename, 'w') as output_file:
-        game_counter = 0
-
-        for index, filename in enumerate(filenames):
-            if print_frequency:
-                print("Starting file", str(index + 1))
-                prev_time = time.time()
-
-            for cur_game in game_iterator(filename):
-                if print_frequency and game_counter % print_frequency == 0:
-                    print("%d games have been processed.  Time since last print: %f"%(game_counter, time.time() - prev_time))
-                    prev_time = time.time()
-
-                if game_is_okay(cur_game):
-                    output_file.write("%s\n\n"%str(cur_game))
-
-                game_counter += 1
-
-
 def create_board_eval_board_from_game_fn(min_start_moves=6, for_testing=False):
     random_number_starter = min_start_moves - 1
     min_boards_in_game = min_start_moves + 1
@@ -303,8 +223,6 @@ def create_board_eval_board_from_game_fn(min_start_moves=6, for_testing=False):
 
 
 def create_move_scoring_board_from_game_fn(min_start_moves=6):
-    move_filter_table = generate_move_filter_table()
-
     random_number_starter = min_start_moves - 1
     min_boards_in_game = min_start_moves + 1
     def get_board_for_game(game):
@@ -329,10 +247,15 @@ def create_move_scoring_board_from_game_fn(min_start_moves=6):
             move_made.from_square = chess.square_mirror(move_made.from_square)
             move_made.to_square = chess.square_mirror(move_made.to_square)
 
-        move_filter = move_filter_table[
+        if move_made.promotion is None or move_made.promotion == chess.QUEEN:
+            move_promotion = NO_PROMOTION_VALUE
+        else:
+            move_promotion = move_made.promotion
+
+        move_filter = MOVE_FILTER_LOOKUP[
             move_made.from_square,
             move_made.to_square,
-            NO_PROMOTION_VALUE if move_made.promotion is None else move_made.promotion]
+            move_promotion]
 
         if py_board.turn:
             white_info = tuple(get_py_board_info_tuple(py_board))
@@ -375,19 +298,113 @@ def save_all_boards_from_game_as_npy(pgn_file, output_filename, max_games=100000
         move_iterator = (np.array([[move.from_square, move.to_square, 0 if move.promotion is None else move.promotion]]) for move in game.main_line())
         for move_ary in move_iterator:
             push_moves(struct, move_ary)
-
             collected.append(struct.copy())
+
+    print("Completed board acquisition")
 
     unique_structs = np.unique(np.array(collected))
 
+    print("%d unique boards produced." % len(unique_structs))
+
     set_up_move_arrays(unique_structs)
 
-    print("%d unique boards produced."%len(unique_structs))
+    structs_with_less_than_max_moves = unique_structs[unique_structs['children_left'] <= MAX_MOVES_LOOKED_AT]
 
-    np.save(output_filename, unique_structs)
+    print("Moves have now been set up.")
+
+    np.save(output_filename, structs_with_less_than_max_moves)
 
 
+def get_zero_valued_boards(filename, output_filename, print_interval=25000):
+    def iterate_zero_value_nodes():
+        num_done = 0
+        for game in game_iterator(filename):
+            while len(game.variations) == 1:
+                game = game.variations[0]
+                if get_nodes_value(game, True) == 0:
+                    num_done += 1
+                    if num_done % print_interval == 0:
+                        print("Zero valued boards gathered:", num_done)
+                    yield game.board()
 
+
+    to_return = np.array([create_node_info_from_python_chess_board(b) for b in iterate_zero_value_nodes()])
+    unique_boards = np.unique(to_return)
+
+    np.save(output_filename, unique_boards)
+
+
+def get_locations_of_lines_that_pass_filters(filename, filters, print_interval=1e7):
+    """
+    Gets the line numbers of the lines in a given file that pass a set of filters.
+    """
+    def passes(line):
+        for filter in filters:
+            if filter(line):
+                return False
+        return True
+
+    with open(filename, 'r') as f:
+        prev_time = time.time()
+        line_nums = []
+        for j,line in enumerate(iter(f.readline, '')):
+            if passes(line):
+                line_nums.append(f.tell())
+
+            if j % print_interval == 0:
+                print("%d lines completed so far with %d lines found in %f time since last print"%(j, len(line_nums), time.time() - prev_time))
+                prev_time = time.time()
+
+        return line_nums
+
+
+def clean_pgn_file(pgn_to_filter, output_filename, line_filters=[], header_filters=[]):
+    def passes_header_filters(headers):
+        for filter in header_filters:
+            if filter(headers):
+                return False
+        return True
+
+    line_nums = get_locations_of_lines_that_pass_filters(
+        pgn_to_filter,
+        line_filters)
+    line_nums = line_nums[: -1]  #the last game isn't used because if it's the last game in the file the array indexing to follow will cause an error
+
+    line_nums = np.array(line_nums)
+    print("Desired line numbers have been found.")
+    with open(output_filename, 'w') as writer:
+        with open(pgn_to_filter, 'r') as f:
+            temp_stuff = [(offset, passes_header_filters(header)) for offset, header in chess.pgn.scan_headers(f)]
+
+            offsets, should_write = zip(*temp_stuff)
+
+            should_write = np.array(list(should_write), dtype=np.bool_)
+
+            game_offsets = np.array(list(offsets))
+
+            print("Game offsets calculated and headers collected")
+
+            temp_indices = np.searchsorted(game_offsets, line_nums)
+
+
+            actual_offset_indices = temp_indices - 1
+
+            should_write = should_write[actual_offset_indices]
+
+            amount_to_write = game_offsets[temp_indices] - game_offsets[actual_offset_indices]
+            filtered_start_lines = game_offsets[actual_offset_indices]
+
+            print("Starting to write the new file.")
+
+            for offset, amount in zip(filtered_start_lines[should_write], amount_to_write[should_write]):
+                f.seek(offset)
+                writer.write(f.read(amount))
+
+
+def combine_numpy_files_and_make_unique(filenames, output_name):
+    combined = np.concatenate([np.load(file) for file in filenames])
+    unique_boards = np.unique(combined)
+    np.save(output_name, unique_boards)
 
 
 if __name__ == "__main__":
@@ -400,28 +417,50 @@ if __name__ == "__main__":
     def add_path_fn_creator(path):
         return lambda x : [path + y for y in x]
 
-    PGN_FILENAMES = ["lichess_db_standard_rated_2018-06.pgn",
-                 "lichess_db_standard_rated_2018-05.pgn",
-                 "lichess_db_standard_rated_2018-04.pgn",
-                 "lichess_db_standard_rated_2018-03.pgn",
-                 "lichess_db_standard_rated_2018-02.pgn",
-                 "lichess_db_standard_rated_2018-01.pgn",
-                 "lichess_db_standard_rated_2017-12.pgn",
-                 "lichess_db_standard_rated_2017-11.pgn",
-                 "lichess_db_standard_rated_2017-10.pgn",
-                 "lichess_db_standard_rated_2017-09.pgn",
-                 ][::-1]
+    PGN_FILENAMES_WITHOUT_PATHS = [
+        "lichess_db_standard_rated_2018-06.pgn",
+        "lichess_db_standard_rated_2018-05.pgn",
+        "lichess_db_standard_rated_2018-04.pgn",
+        "lichess_db_standard_rated_2018-03.pgn",
+        "lichess_db_standard_rated_2018-02.pgn",
+        "lichess_db_standard_rated_2018-01.pgn",
+        "lichess_db_standard_rated_2017-12.pgn",
+        "lichess_db_standard_rated_2017-11.pgn",
+        "lichess_db_standard_rated_2017-10.pgn",
+        "lichess_db_standard_rated_2017-09.pgn",
+        "lichess_db_standard_rated_2017-08.pgn",
+        "lichess_db_standard_rated_2017-07.pgn",
+        "lichess_db_standard_rated_2017-06.pgn",
+        "lichess_db_standard_rated_2017-05.pgn",
+        "lichess_db_standard_rated_2017-04.pgn",
+        "lichess_db_standard_rated_2017-03.pgn",
+        "lichess_db_standard_rated_2017-02.pgn",
+        "lichess_db_standard_rated_2017-01.pgn",
+        "lichess_db_standard_rated_2016-12.pgn",
+        "lichess_db_standard_rated_2016-11.pgn",
+        "lichess_db_standard_rated_2016-10.pgn",
+        "lichess_db_standard_rated_2016-09.pgn",
+        "lichess_db_standard_rated_2016-08.pgn",
+        "lichess_db_standard_rated_2016-07.pgn",
+        "lichess_db_standard_rated_2016-06.pgn",
+        "lichess_db_standard_rated_2016-05.pgn",
+        "lichess_db_standard_rated_2016-04.pgn",
+        "lichess_db_standard_rated_2016-03.pgn",
+        "lichess_db_standard_rated_2016-02.pgn",
+        "lichess_db_standard_rated_2016-01.pgn",][::-1]
 
-    PICKLE_FILENAMES = list(map(lambda s : s[:-3] + "pkl", PGN_FILENAMES))
+    PICKLE_FILENAMES = list(map(lambda s : s[:-3] + "pkl", PGN_FILENAMES_WITHOUT_PATHS))
 
-    PGN_FILENAMES = add_path_fn_creator("/srv/databases/lichess/")(PGN_FILENAMES)
+    PGN_FILENAMES = add_path_fn_creator("/srv/databases/lichess/original_pgns/")(PGN_FILENAMES_WITHOUT_PATHS)
 
-    FILTERED_FILENAMES = list(map(lambda f: "%s_filtered.pgn" % f[:-4], PGN_FILENAMES))
+    FILTERED_FILENAMES = add_path_fn_creator("/srv/databases/lichess/filtered_pgns/")(PGN_FILENAMES_WITHOUT_PATHS)
+    FILTERED_FILENAMES = list(map(lambda f: "%s_filtered.pgn" % f[:-4], FILTERED_FILENAMES))
 
-    TWO_PASS_TFRECORDS_FILENAMES = [
-        "two_pass_lichess_training.tfrecords",
-        "two_pass_lichess_validation.tfrecords",
-        "two_pass_lichess_testing.tfrecords"]
+
+    TFRECORDS_FILENAMES = [
+        "lichess_training.tfrecords",
+        "lichess_validation.tfrecords",
+        "lichess_testing.tfrecords"]
 
     TFRECORDS_OUTPUT_RATIOS = [.85, .1, .05]
 
@@ -429,64 +468,60 @@ if __name__ == "__main__":
 
 
 
-    # pgn_not_used_for_ann_training = "/srv/databases/lichess/lichess_db_standard_rated_2018-07.pgn"
-    # npy_output_filename = "/srv/databases/lichess/lichess_db_standard_rated_2018-07_first_100k_games"
+
+    pgn_not_used_for_ann_training = "/srv/databases/lichess/lichess_db_standard_rated_2018-07.pgn"
+    npy_output_filename = "/srv/databases/lichess/lichess_db_standard_rated_2018-07_first_100k_games"
     # save_all_boards_from_game_as_npy(pgn_not_used_for_ann_training, npy_output_filename)
 
 
-
-
-    # file_index = 0
-    # OUTPUT_FILTERED_FILENAME = PGN_FILENAMES[file_index][:-4] + "_filtered.pgn"
+    file_index = -6
+    OUTPUT_FILTERED_FILENAME = add_path_fn_creator("/srv/databases/has_zero_valued_board/")(PGN_FILENAMES_WITHOUT_PATHS)[file_index]
     # clean_pgn_file(
-    #     [PGN_FILENAMES[file_index]],
-    #     game_filters=[
-    #         lambda g : g.headers['Termination'] != "Normal",
-    #         lambda g : g.variations and "%eval" not in str(g.variations[0])],
-    #     output_filename=OUTPUT_FILTERED_FILENAME,
-    #     print_frequency=25000)
+    #     FILTERED_FILENAMES[file_index],
+    #     OUTPUT_FILTERED_FILENAME,
+    #     [lambda s: s[0] != '1',
+    #      lambda s: not "%eval 0.0" in s],
+    #     [lambda h: h['Termination'] != "Normal"])
 
 
+    file_index = -2
+    INPUT_FILENAME = FILTERED_FILENAMES[file_index]
+    OUTPUT_FILENAME = INPUT_FILENAME[:-4] + "_zero_boards"
+    # get_zero_valued_boards(INPUT_FILENAME, OUTPUT_FILENAME)
 
 
+    ########################The commented out code below is used for the move scoring database###################
+    file_index = 6
+    OUTPUT_FILENAME = add_path_fn_creator("/srv/databases/lichess_just_move_scoring_fixed_ag_promotion/")(PGN_FILENAMES_WITHOUT_PATHS)[file_index][:-3] + "pkl"
+    OUTPUT_FILENAME = OUTPUT_FILENAME[:-4] + "_second_pass.pkl"
 
-
-    #########################The commented out code below is used for the move scoring database###################
-    # file_index = 0
-    # OUTPUT_FILENAME = "/srv/databases/lichess_just_move_scoring/TO_CONFIRM_GENERALITY.pkl"
-    # CUR_MOVE_PGN_FILENAME = FILTERED_FILENAMES[file_index]
-    #
+    CUR_MOVE_PGN_FILENAME = FILTERED_FILENAMES[file_index]
     # get_data_from_pgns(
     #     [CUR_MOVE_PGN_FILENAME],
     #     OUTPUT_FILENAME,
-    #     create_move_scoring_board_from_game_fn(5),
-    # )
+    #     create_move_scoring_board_from_game_fn(5))
 
 
     #########################The commented out code below is used for the board evaluation database###################
-    # file_index = 8
-    # CUR_EVAL_PGN_FILENAME = FILTERED_FILENAMES[file_index]
-    # OUTPUT_FILENAME = "/srv/databases/lichess_combined_methods_eval_databases/lichess_db_standard_rated_2018-05.pkl"
-    #
+    file_index = 6
+    CUR_EVAL_PGN_FILENAME = FILTERED_FILENAMES[file_index]
+    OUTPUT_FILENAME = add_path_fn_creator("/srv/databases/lichess_combined_methods_eval_databases/")(PGN_FILENAMES_WITHOUT_PATHS)[file_index][:-3] + "pkl"
+    # OUTPUT_FILENAME = OUTPUT_FILENAME[:-4] + "_second_pass.pkl"
     # get_data_from_pgns(
     #     [CUR_EVAL_PGN_FILENAME],
     #     OUTPUT_FILENAME,
-    #     create_board_eval_board_from_game_fn(),
-    # )
-
-
-
+    #     create_board_eval_board_from_game_fn())
 
 
 
     #########################The commented out code below is used for the board evaluation database#########################
-    # eval_path_adder = add_path_fn_creator("/srv/databases/lichess_combined_methods_eval_databases/")
-    #
-    # EVAL_PICKLE_FILES = eval_path_adder(PICKLE_FILENAMES)
+    eval_path_adder = add_path_fn_creator("/srv/databases/lichess_combined_methods_eval_databases/")
+
+    EVAL_PICKLE_FILES = eval_path_adder(PICKLE_FILENAMES)
     # EVAL_PICKLE_FILES += list(map(lambda s: s[:-4] + "_second_pass.pkl", EVAL_PICKLE_FILES))
-    #
-    # EVAL_OUTPUT_TFRECORDS_FILES = eval_path_adder(TWO_PASS_TFRECORDS_FILENAMES)
-    #
+
+    EVAL_OUTPUT_TFRECORDS_FILES = eval_path_adder(TFRECORDS_FILENAMES)
+
     # combine_pickles_and_create_tfrecords(
     #     EVAL_PICKLE_FILES,
     #     EVAL_OUTPUT_TFRECORDS_FILES,
@@ -495,13 +530,14 @@ if __name__ == "__main__":
 
 
     #########################The commented out code below is used for the move scoring database###################
-    # policy_path_adder_1 = add_path_fn_creator("/srv/databases/lichess_just_move_scoring/first_iteration_pickle_files/")
-    # policy_path_adder_2 = add_path_fn_creator("/srv/databases/lichess_just_move_scoring/second_iteration_pickle_files/")
-    # MOVE_SCORING_PICKLE_FILES = policy_path_adder_1(PICKLE_FILENAMES) + policy_path_adder_2(PICKLE_FILENAMES)
-    # POLICY_OUTPUT_TFRECORDS_FILES = add_path_fn_creator("/srv/databases/lichess_just_move_scoring/")(TWO_PASS_TFRECORDS_FILENAMES)
-    #
+    policy_path_adder = add_path_fn_creator("/srv/databases/lichess_just_move_scoring_fixed_ag_promotion/")
+    MOVE_SCORING_PICKLE_FILES = policy_path_adder(PICKLE_FILENAMES)
+    # MOVE_SCORING_PICKLE_FILES += list(map(lambda s: s[:-4] + "_second_pass.pkl", MOVE_SCORING_PICKLE_FILES))
+    POLICY_OUTPUT_TFRECORDS_FILES = policy_path_adder(TFRECORDS_FILENAMES)
+
     # combine_pickles_and_create_tfrecords(
     #     MOVE_SCORING_PICKLE_FILES,
     #     POLICY_OUTPUT_TFRECORDS_FILES,
     #     TFRECORDS_OUTPUT_RATIOS,
     #     serializer_creator(additional_move_features))
+
