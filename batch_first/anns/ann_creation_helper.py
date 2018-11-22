@@ -4,14 +4,84 @@ import numpy as np
 from tensorflow.contrib import layers
 from tensorflow.python import training
 
+import chess
+
 from functools import reduce
 
-from batch_first.chestimator import get_board_data
 from google.protobuf import text_format
+
+from batch_first.numba_board import popcount
+
 
 from tensorflow.contrib import tensorrt as trt
 
 
+
+
+def parse_into_ann_input_inference(max_boards, convert_to_nhwc=False):
+    """
+    NOTES:
+    1) If a constant/operation is typed in a confusing manor, it's so the entirely of this can be done on GPU
+    """
+    possible_lookup_nums = np.arange(2 ** 16, dtype=np.uint16)
+    num_bits = popcount(possible_lookup_nums.astype(np.uint64))
+
+    location_lookup_ary = np.array([[[chess.square_rank(loc), chess.square_file(loc)] for loc in chess.SQUARES_180]], np.int32)
+    location_lookup_ary = np.ones([max_boards, 1, 1], np.int32) * location_lookup_ary
+
+    location_lookup_ary = location_lookup_ary.reshape([max_boards, 8, 8, 2])[:, ::-1]
+    location_lookup_ary = location_lookup_ary.reshape([max_boards, 4, 16, 2])
+
+    mask_getter = lambda n: np.unpackbits(np.frombuffer(n, dtype=np.uint8)[::-1])[::-1]
+    masks_to_gather_ary = np.array(list(map(mask_getter, possible_lookup_nums)), dtype=np.bool_)
+
+    pieces_from_nums = lambda n: [n >> 4, (n & np.uint8(0x0F))]
+    piece_lookup_ary = np.array(list(map(pieces_from_nums, possible_lookup_nums)), dtype=np.int32)
+
+    range_repeater = numpy_style_repeat_1d_creator(max_multiple=33, max_to_repeat=max_boards, out_type=tf.int64)
+
+    popcount_lookup = tf.constant(num_bits, tf.int64)
+    locations_for_masking = tf.constant(location_lookup_ary, tf.int64)
+    occupancy_mask_table = tf.constant(masks_to_gather_ary, tf.half)
+    piece_lookup_table = tf.constant(piece_lookup_ary, tf.int64)
+
+    ones_to_slice = tf.constant(np.ones(33 * max_boards), dtype=tf.float32)  # This is used since there seems to be no simple/efficient way to broadcast for scatter_nd
+
+    piece_indicators = tf.placeholder(tf.int32, shape=[None], name="piece_filters")  #Given as an array of uint8s
+    occupied_bbs = tf.placeholder(tf.int64, shape=[None], name="occupied_bbs")       #Given as an array of uint64s
+
+    # The code below this comment defines ops which are run during inference
+
+    occupied_bitcasted = tf.cast(tf.bitcast(occupied_bbs, tf.uint16), dtype=tf.int32)
+
+    partial_popcounts = tf.gather(popcount_lookup, occupied_bitcasted, "byte_popcount_loopkup")
+    partial_popcounts = tf.cast(partial_popcounts, tf.int32)
+    occupied_popcounts = tf.reduce_sum(partial_popcounts, axis=-1, name="popcount_lookup_sum")
+
+    location_mask = tf.gather(occupancy_mask_table, occupied_bitcasted, "gather_location_mask")
+    location_mask = tf.cast(location_mask, tf.bool)
+    piece_coords = tf.boolean_mask(locations_for_masking, location_mask, "mask_desired_locations")
+
+    gathered_pieces = tf.gather(piece_lookup_table, piece_indicators, "gather_pieces")
+    piece_filter_indices = tf.reshape(gathered_pieces, [-1, 1])
+
+    repeated_board_numbers = range_repeater(occupied_popcounts)
+    board_numbers_for_concat = tf.expand_dims(repeated_board_numbers, -1)
+
+    # Removes either the last piece filter, or no filters (based on if the number of filters was odd and half of the final uint8 was padding)
+    piece_filter_indices = piece_filter_indices[:tf.shape(board_numbers_for_concat)[0]]
+
+    one_indices = tf.concat([board_numbers_for_concat, piece_filter_indices, piece_coords], axis=-1) #Should figure out how this can be done with (or similarly to) tf.parallel_stack
+
+    boards = tf.scatter_nd(
+        indices=one_indices,
+        updates=ones_to_slice[:tf.shape(one_indices)[0]],
+        shape=[tf.shape(occupied_bbs, out_type=tf.int64)[0], 15, 8, 8])
+
+    if convert_to_nhwc:
+        boards = tf.transpose(boards, [0,2,3,1])
+
+    return (piece_indicators, occupied_bbs), boards
 
 
 def vec_and_transpose_op(vector, operation, output_type=None):
@@ -76,9 +146,11 @@ def combine_graphdefs(graphdef_filenames, output_model_path, output_filename, ou
             output_filename)
 
 
-def remap_inputs(model_path, output_model_path, output_filename):
+def remap_inputs(model_path, output_model_path, output_filename, max_batch_size=None):
     with tf.Session() as sess:
-        placeholders, formatted_data = get_board_data()
+        with tf.device('/GPU:0'):
+            with tf.name_scope("input_parser"):
+                placeholders, formatted_data = parse_into_ann_input_inference(max_batch_size)
 
         with open(model_path, 'r') as f:
             graph_def = text_format.Parse(f.read(), tf.GraphDef())
@@ -98,10 +170,10 @@ def remap_inputs(model_path, output_model_path, output_filename):
 
 def save_trt_graphdef(model_path, output_model_path, output_filename, output_node_names,
                       trt_memory_fraction=.5, total_video_memory=1.1e10,
-                      max_batch_size=1000, write_as_text=True, ):
+                      max_batch_size=1000, write_as_text=True):
 
-    #This would ideally be 1 instead of .75, but the GPU that this is running on is responsible for things like graphics
-    with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.75 - trt_memory_fraction))) as sess:
+    #This would ideally be 1 instead of .85, but the GPU that this is running on is responsible for things like graphics
+    with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=.85 - trt_memory_fraction))) as sess:
 
         with open(model_path, 'r') as f:
             txt = f.read()
@@ -413,27 +485,29 @@ def metric_dict_creator(the_dict):
     return metric_dict
 
 
-def numpy_style_repeat_1d_creator(max_multiple=100, max_to_repeat=10000):
+def numpy_style_repeat_1d_creator(max_multiple=100, max_to_repeat=10000, out_type=tf.int32):
     board_num_lookup_ary = np.repeat(
         np.arange(max_to_repeat),
         np.full([max_to_repeat], max_multiple))
     board_num_lookup_ary = board_num_lookup_ary.reshape(max_to_repeat, max_multiple)
 
     def fn_to_return(multiples):
-        board_num_lookup_tensor = tf.constant(board_num_lookup_ary, dtype=tf.int32)
-        casted_multiples = tf.cast(multiples, dtype=tf.int32)
+        board_num_lookup_tensor = tf.constant(board_num_lookup_ary, dtype=out_type)
+
+        if multiples.dtype != tf.int32:
+            multiples = tf.cast(multiples, dtype=tf.int32)
+
         padded_multiples = tf.pad(
-            casted_multiples,
+            multiples,
             [[0, max_to_repeat - tf.shape(multiples)[0]]])
 
-        padded_multiples =tf.cast(padded_multiples, tf.float32)
+        padded_multiples = tf.cast(padded_multiples, tf.int32)
         to_return =  tf.boolean_mask(
             board_num_lookup_tensor,
             tf.sequence_mask(padded_multiples, maxlen=max_multiple))
         return to_return
 
     return fn_to_return
-
 
 
 def count_tfrecords(filename):

@@ -4,25 +4,32 @@ from .numba_board import square_mirror
 
 
 
-hash_table_numpy_dtype = np.dtype([("entry_hash", np.uint64),
+hash_table_numpy_dtype = np.dtype([("entry_hash", np.uint64),  #Total of 160 bits per entry
                                    ("depth", np.uint8),
                                    ("upper_bound", np.float32),
                                    ("lower_bound", np.float32),
                                    ("stored_move", np.uint8, (3))])
 
-
 hash_table_numba_dtype = nb.from_dtype(hash_table_numpy_dtype)
 
 
-def get_empty_hash_table():
-    blank_hash_entry = np.array([(
+blank_tt_entry = np.array([(
         0,
         NO_TT_ENTRY_VALUE,
         MAX_FLOAT32_VAL,
         MIN_FLOAT32_VAL,
         np.full(3, NO_TT_MOVE_VALUE, dtype=np.uint8))], dtype=hash_table_numpy_dtype)[0]
 
-    return np.full(2**SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES, blank_hash_entry)
+
+
+def get_empty_hash_table():
+    return np.full(2**SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES, blank_tt_entry)
+
+
+@njit
+def clear_hash_table(table):
+    table[table['depth'] != NO_TT_ENTRY_VALUE] = blank_tt_entry
+    return table
 
 
 def choose_move(hash_table, node, flip_move=False):
@@ -31,7 +38,7 @@ def choose_move(hash_table, node, flip_move=False):
 
     :return: A python-chess Move object representing the desired move to be made
     """
-    root_tt_entry = hash_table[np.uint64(node.board_struct[0]['hash']) & TT_HASH_MASK]
+    root_tt_entry = hash_table[np.uint64(node.struct['hash']) & TT_HASH_MASK]
     move_array = root_tt_entry['stored_move']
 
     if flip_move:

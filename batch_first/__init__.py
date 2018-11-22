@@ -48,7 +48,6 @@ def get_table_and_array_for_set_of_dicts(dicts):
     return index_lookup_table, array
 
 
-
 def generate_move_filter_table():
     """
     Generate a lookup table for the policy encoding described in the following paper:
@@ -91,7 +90,6 @@ def generate_move_filter_table():
                 if rank_diff == 1 and file_diff in [1,0,-1]:
                     filter_table[square1, square2, 2:5] = 3*(1+file_diff) + np.arange(64,67)
     return filter_table
-
 
 
 MOVE_FILTER_LOOKUP = generate_move_filter_table()
@@ -169,7 +167,6 @@ LOSS_RESULT_SCORES = np.full(MAX_SEARCH_DEPTH, np.nextafter(ALMOST_MIN_FLOAT_32_
 for j in range(1, MAX_SEARCH_DEPTH):
     WIN_RESULT_SCORES[j] = np.nextafter(WIN_RESULT_SCORES[j - 1], MIN_FLOAT32_VAL)
     LOSS_RESULT_SCORES[j] = np.nextafter(LOSS_RESULT_SCORES[j - 1], MAX_FLOAT32_VAL)
-
 
 
 SIZE_EXPONENT_OF_TWO_FOR_TT_INDICES = np.uint8(30)
@@ -297,11 +294,11 @@ def power_set(iterable):
 flip_vert_const_1 = np.uint64(0x00FF00FF00FF00FF)
 flip_vert_const_2 = np.uint64(0x0000FFFF0000FFFF)
 
-@nb.vectorize([nb.uint64(nb.uint64)])
-def vectorized_flip_vertically(bb):
-    bb = ((bb >> 8) & flip_vert_const_1) | ((bb & flip_vert_const_1) << 8)
+@nb.vectorize([nb.uint64(nb.uint64)], nopython=True)
+def flip_vertically(bb):
+    bb = ((bb >>  8) & flip_vert_const_1) | ((bb & flip_vert_const_1) <<  8)
     bb = ((bb >> 16) & flip_vert_const_2) | ((bb & flip_vert_const_2) << 16)
-    bb = (bb >> 32) | (bb << 32)
+    bb = ( bb >> 32) | ( bb << 32)
     return bb
 
 def get_castling_lookup_tables():
@@ -310,7 +307,7 @@ def get_castling_lookup_tables():
         possible_castling_rights[j] = np.uint64(functools.reduce(lambda x, y: x | y, set, np.uint64(0)))
 
     white_turn_castling_tables = create_index_table(possible_castling_rights)
-    black_turn_castling_tables = create_index_table(vectorized_flip_vertically(possible_castling_rights))
+    black_turn_castling_tables = create_index_table(flip_vertically(possible_castling_rights))
 
     return white_turn_castling_tables, black_turn_castling_tables, possible_castling_rights
 

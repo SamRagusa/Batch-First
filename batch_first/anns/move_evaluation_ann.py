@@ -1,11 +1,8 @@
 import tensorflow as tf
 
-
 from scipy.stats import kendalltau, weightedtau, spearmanr
 
 import batch_first.anns.ann_creation_helper as ann_h
-
-from batch_first.chestimator import get_board_data
 
 tf.logging.set_verbosity(tf.logging.INFO)
 
@@ -62,7 +59,7 @@ def lower_diag_policy_comparison_model_fn(features, labels, mode, params):
     move_reshaped_logits = tf.reshape(original_logits, new_logit_shape)
 
     if mode == tf.estimator.ModeKeys.PREDICT:
-        range_repeater = ann_h.numpy_style_repeat_1d_creator()
+        range_repeater = ann_h.numpy_style_repeat_1d_creator(out_type=tf.int64)
         board_indices = range_repeater(features['moves_per_board'])
     else:
         num_moves = tf.shape(features['move_from_square'])[0]
@@ -70,10 +67,11 @@ def lower_diag_policy_comparison_model_fn(features, labels, mode, params):
 
     indices_to_gather = tf.stack([
         board_indices,
-        tf.cast(features[first_square], dtype=tf.int32),
-        tf.cast(features[second_square],dtype=tf.int32)], axis=1)
+        tf.cast(features[first_square], dtype=board_indices.dtype),
+        tf.cast(features[second_square], dtype=board_indices.dtype)], axis=1)
 
     logits = tf.gather_nd(move_reshaped_logits, indices_to_gather, name="requested_move_scores")
+
 
     loss = None
     train_op = None
@@ -196,29 +194,32 @@ def simpler_lower_diag_score_comparison_input_fn(filename_pattern, batch_size, i
 
         lower_diag_sign = tf.sign(lower_diag_diff_matrix)
         weight_mask = tf.abs(lower_diag_sign)
-        bool_weight_mask = tf.cast(weight_mask, tf.bool)
-
-        value_larger_than_centipawn_less_than_mate = 100000
-        desired_found_mate = tf.greater(tf.abs(parsed_examples['score']), value_larger_than_centipawn_less_than_mate)
-
-        both_found_mate = ann_h.vec_and_transpose_op(desired_found_mate, tf.logical_and)
-
-        desired_signs = tf.sign(parsed_examples['score'])
-
-        same_sign_matrix = ann_h.vec_and_transpose_op(desired_signs, tf.equal)
-
-        both_same_player_mates = tf.logical_and(both_found_mate, same_sign_matrix)
-
-        both_same_mate_and_nonzero_weight = tf.logical_and(both_same_player_mates, bool_weight_mask)
-
-        same_mate_depth_diff_decrement = .95
-        weight_helper = same_mate_depth_diff_decrement * tf.cast(both_same_mate_and_nonzero_weight, tf.float32)
-
-        mate_adjusted_weight_mask = weight_mask - weight_helper
+        # bool_weight_mask = tf.cast(weight_mask, tf.bool)
+        #
+        # value_larger_than_centipawn_less_than_mate = 100000
+        # desired_found_mate = tf.greater(tf.abs(parsed_examples['score']), value_larger_than_centipawn_less_than_mate)
+        #
+        # both_found_mate = ann_h.vec_and_transpose_op(desired_found_mate, tf.logical_and)
+        #
+        # desired_signs = tf.sign(parsed_examples['score'])
+        #
+        # same_sign_matrix = ann_h.vec_and_transpose_op(desired_signs, tf.equal)
+        #
+        # both_same_player_mates = tf.logical_and(both_found_mate, same_sign_matrix)
+        #
+        # both_same_mate_and_nonzero_weight = tf.logical_and(both_same_player_mates, bool_weight_mask)
+        #
+        # same_mate_depth_diff_decrement = .95
+        # weight_helper = same_mate_depth_diff_decrement * tf.cast(both_same_mate_and_nonzero_weight, tf.float32)
+        #
+        # mate_adjusted_weight_mask = weight_mask - weight_helper
 
         label_matrix = (lower_diag_sign + weight_mask)/2
 
-        return (boards, parsed_examples['score'], label_matrix, mate_adjusted_weight_mask,
+        # return (boards, parsed_examples['score'], label_matrix, mate_adjusted_weight_mask,
+        #         parsed_examples['move_filter'], parsed_examples['move_to_square'], parsed_examples['move_filter'])
+
+        return (boards, parsed_examples['score'], label_matrix, weight_mask,
                 parsed_examples['move_filter'], parsed_examples['move_to_square'], parsed_examples['move_filter'])
 
 
@@ -236,42 +237,40 @@ def simpler_lower_diag_score_comparison_input_fn(filename_pattern, batch_size, i
     return feature_dict, None
 
 
-def move_scoring_serving_input_receiver():
-    (piece_bbs, color_occupied_bbs, ep_squares, castling_lookup_indices, kings), formatted_data = get_board_data()
+def move_scoring_serving_input_receiver(data_format="NCHW"):
+    def fn_to_return():
+        placeholder_shape = [None, 15, 8, 8] if data_format == "NCHW" else [None, 8, 8, 15]
+        for_remapping = tf.placeholder(tf.float32, placeholder_shape, "FOR_INPUT_MAPPING_transpose")
 
-    moves_per_board = tf.placeholder(tf.uint8, shape=[None], name="moves_per_board_placeholder")
-    from_squares = tf.placeholder(tf.uint8, shape=[None], name="from_square_placeholder")
-    move_filters = tf.placeholder(tf.uint8, shape=[None], name="move_filter_placeholder")
+        moves_per_board = tf.placeholder(tf.uint8, shape=[None], name="moves_per_board_placeholder")
+        from_squares = tf.placeholder(tf.uint8, shape=[None], name="from_square_placeholder")
+        move_filters = tf.placeholder(tf.uint8, shape=[None], name="move_filter_placeholder")
 
-    receiver_tensors = {"piece_bbs": piece_bbs,
-                        "color_occupied_bbs": color_occupied_bbs,
-                        "ep_squares": ep_squares,
-                        "castling_lookup_indices": castling_lookup_indices,
-                        "kings": kings,
-                        "moves_per_board": moves_per_board,
-                        "from_squares" : from_squares,
-                        "move_filters": move_filters}
+        receiver_tensors = {
+            "board": for_remapping,
+            "move_from_square": from_squares,
+            "move_filter": move_filters,
+            "moves_per_board": moves_per_board,
+        }
 
-    dict_for_model_fn = {"board": formatted_data,
-                         "move_from_square": from_squares,
-                         "move_filter": move_filters,
-                         "moves_per_board": moves_per_board}
+        return tf.estimator.export.ServingInputReceiver(receiver_tensors, receiver_tensors)
+    return fn_to_return
 
-    return tf.estimator.export.ServingInputReceiver(dict_for_model_fn, receiver_tensors)
+
 
 
 def main(unused_par):
-    SAVE_MODEL_DIR = "/srv/tmp/move_scoring_helper_current/new_data_one_pass_14_no_final_bn_scaling/TEST111"
+    SAVE_MODEL_DIR = "/srv/tmp/diag_move_loss_314/pre_commit_test_1"
     TRAINING_FILENAME_PATTERN = "/srv/databases/lichess_just_move_scoring_fixed_ag_promotion/lichess_training.tfrecords"
     VALIDATION_FILENAME_PATTERN = "/srv/databases/lichess_just_move_scoring_fixed_ag_promotion/lichess_validation.tfrecords"
     TRAIN_OP_SUMMARIES = ["gradient_norm", "gradients"]
     NUM_INPUT_FILTERS = 15
     OPTIMIZER = 'Adam'
     TRAINING_SHUFFLE_BUFFER_SIZE = 17100000
-    TRAINING_BATCH_SIZE = 256     #The effective batch size used for the loss = n(n-1)/2  (where n is the number of boards in the batch)
+    TRAINING_BATCH_SIZE = 512     #The effective batch size used for the loss = n(n-1)/2  (where n is the number of boards in the batch)
     VALIDATION_BATCH_SIZE = 1024
     LOG_ITERATION_INTERVAL = 2500
-    LEARNING_RATE = 5e-4
+    LEARNING_RATE = 5e-3
     KERNEL_REGULARIZER = lambda: None
     KERNEL_INITIALIZER = lambda: tf.contrib.layers.variance_scaling_initializer()
     TRAINABLE_CNN_MODULES = True
@@ -341,7 +340,7 @@ def main(unused_par):
     )
 
     # Save the model for inference
-    the_estimator.export_savedmodel(SAVE_MODEL_DIR, move_scoring_serving_input_receiver)
+    the_estimator.export_savedmodel(SAVE_MODEL_DIR, move_scoring_serving_input_receiver())
 
 
 
@@ -349,3 +348,6 @@ def main(unused_par):
 
 if __name__ == "__main__":
     tf.app.run()
+
+
+

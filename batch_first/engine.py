@@ -1,13 +1,8 @@
 from . import *
 
-from .transposition_table import get_empty_hash_table
+from .transposition_table import get_empty_hash_table, clear_hash_table
 from .numba_negamax_zero_window import iterative_deepening_mtd_f, start_move_scoring, start_board_evaluations
 from .global_open_priority_nodes import PriorityBins
-
-from chess.polyglot import zobrist_hash
-
-
-
 
 
 
@@ -236,7 +231,6 @@ class BatchFirstEngine(ChessEngine):
             self.first_guess_fn = first_guess_fn
 
         self.search_depth = search_depth
-        self.hash_table = get_empty_hash_table()
 
         self.board_evaluator = board_eval_fn
         self.move_evaluator = move_eval_fn
@@ -265,17 +259,17 @@ class BatchFirstEngine(ChessEngine):
 
         self.board_evaluator = lambda *args : board_eval_fn(*args) - zero_shift
 
-        self.move_evaluator = lambda *args : move_eval_fn(*args)
-
         self.open_node_holder = PriorityBins(
             self.bins,
             max_batch_size,
             zero_shift=move_zero_shift,
-            save_info=True,  #Must be set to True if printing info about the searches!
-            testing=False)
+            # save_info=True, #Must be set to True if printing info about the searches!
+        )
+
+        self.hash_table = get_empty_hash_table()
 
     def start_new_game(self):
-        self.hash_table = get_empty_hash_table()
+        clear_hash_table(self.hash_table)
 
     def pick_move(self, board):
         returned_score, move_to_return, self.hash_table = iterative_deepening_mtd_f(
@@ -288,12 +282,8 @@ class BatchFirstEngine(ChessEngine):
 
             previous_board_map=get_previous_board_map_from_py_board(board),
 
-            # print_partial_info=True,       #If this is True, the save_info parameter for the PriorityBins must be True (in the __init__ function)  (better connection of these values to come)!
-            # print_all_info=True,         #If this is True, print_partial_info must also be True!
-            # testing=True,
+            # print_info=True,       #If this is True, the save_info parameter for the PriorityBins must be True (in the __init__ function)  (better connection of these values to come)!
             )
 
         return move_to_return
-
-
 

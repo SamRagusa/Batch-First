@@ -1,63 +1,5 @@
-from . import *
+from .classes_and_structs import *
 
-
-
-
-numpy_node_info_dtype = np.dtype(
-    [("pawns", np.uint64),
-     ("knights", np.uint64),
-     ("bishops", np.uint64),
-     ("rooks", np.uint64),
-     ("queens", np.uint64),
-     ("kings", np.uint64),
-     ("occupied_co", np.uint64, (2)),
-     ("occupied", np.uint64),
-     ("turn", np.int8),
-     ("castling_rights", np.uint64),
-     ("ep_square", np.uint8),
-     ("halfmove_clock", np.uint8),
-     ("hash", np.uint64),
-     ("terminated", np.bool_),
-     ("separator", np.float32),
-     ("depth", np.uint8),
-     ("best_value", np.float32),
-     ("unexplored_moves", np.uint8, (MAX_MOVES_LOOKED_AT, 3)),
-     ("unexplored_move_scores", np.float32, (MAX_MOVES_LOOKED_AT)),
-     ('prev_move', np.uint8, (3)),
-     ("next_move_index", np.uint8),
-     ("children_left", np.uint8)])
-
-
-numba_node_info_type = nb.from_dtype(numpy_node_info_dtype)
-
-def create_node_info_from_python_chess_board(board, depth=255, separator=0):
-    return np.array(
-        [(board.pawns,
-          board.knights,
-          board.bishops,
-          board.rooks,board.queens,
-          board.kings,
-          board.occupied_co,
-          board.occupied,
-          np.int8(board.turn),
-          board.castling_rights,
-          board.ep_square if not board.ep_square is None else NO_EP_SQUARE,
-          board.halfmove_clock,
-          zobrist_hash(board),
-          False,                # terminated
-          separator,
-          depth,
-          MIN_FLOAT32_VAL,      # best_value
-          np.full([MAX_MOVES_LOOKED_AT, 3], 255, dtype=np.uint8),                # unexplored moves
-          np.full([MAX_MOVES_LOOKED_AT], MIN_FLOAT32_VAL, dtype=np.float32),     # unexplored move scores
-          np.full([3], 255, dtype=np.uint8), # The move made to reach the position this board represents
-          0,        # next_move_index  (the index in the stored moves where the next move to make is)
-          0)],      # children_left (the number of children which have yet to returne a value, or be created)
-        dtype=numpy_node_info_dtype)
-
-
-def create_node_info_from_fen(fen, depth, separator):
-    return create_node_info_from_python_chess_board(chess.Board(fen), depth, separator)
 
 
 def convert_board_to_whites_perspective(ary):
@@ -85,18 +27,6 @@ def convert_board_to_whites_perspective(ary):
     struct['turn'] = True
 
     return ary
-
-
-
-flip_vert_const_1 = np.uint64(0x00FF00FF00FF00FF)
-flip_vert_const_2 = np.uint64(0x0000FFFF0000FFFF)
-
-@nb.vectorize([nb.uint64(nb.uint64)], nopython=True)
-def flip_vertically(bb):
-    bb = ((bb >>  8) & flip_vert_const_1) | ((bb & flip_vert_const_1) <<  8)
-    bb = ((bb >> 16) & flip_vert_const_2) | ((bb & flip_vert_const_2) << 16)
-    bb = ( bb >> 32) | ( bb << 32)
-    return bb
 
 
 # Obviously needs to be refactored

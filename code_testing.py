@@ -5,23 +5,23 @@ import chess.pgn
 import chess.uci
 import os
 import tempfile
-import time
+
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-from batch_first import *
+
+from batch_first.anns.ann_creation_helper import parse_into_ann_input_inference
 
 from batch_first.anns.database_creator import get_data_from_pgns, create_board_eval_board_from_game_fn, \
     combine_pickles_and_create_tfrecords, serializer_creator
 
-from batch_first.chestimator import get_board_data
+from batch_first.classes_and_structs import *
 
-from batch_first.numba_board import create_node_info_from_fen, perft_test, is_legal_move, \
-    numpy_node_info_dtype, create_node_info_from_python_chess_board, push_moves, set_up_move_array, \
-    popcount, has_insufficient_material, has_legal_move
+from batch_first.numba_board import  perft_test, is_legal_move, numpy_node_info_dtype, push_moves, set_up_move_array, \
+    popcount, has_insufficient_material, has_legal_move, piece_type_at, scan_reversed
 
-from batch_first.numba_negamax_zero_window import struct_array_to_ann_inputs, \
-    set_up_root_node_for_struct, zero_window_negamax_search
+from batch_first.numba_negamax_zero_window import set_up_root_node_for_struct, struct_array_to_ann_inputs, \
+    zero_window_negamax_search
 
 from batch_first.transposition_table import get_empty_hash_table
 
@@ -29,7 +29,7 @@ from batch_first.global_open_priority_nodes import PriorityBins
 
 
 
-#These fens come from the ChessProgramming Wiki, and can be found here: https://chessprogramming.wikispaces.com/Perft+Results
+#These fens come from the ChessProgramming Wiki, and can be found here: https://www.chessprogramming.org/Perft_Results
 DEFAULT_TESTING_FENS = ["rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
                         "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
                         "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
@@ -39,7 +39,7 @@ DEFAULT_TESTING_FENS = ["rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 
                         "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10"]
 
 
-#These values come from the ChessProgramming Wiki, and can be found here: https://chessprogramming.wikispaces.com/Perft+Results
+#These values come from the ChessProgramming Wiki, and can be found here: https://www.chessprogramming.org/Perft_Results
 DEFAULT_FEN_PERFT_RESULTS = [[20,400,8902,197281,4865609,119060324,3195901860,849989789566,2439530234167,693552859712417],
                              [48,2039,97862,4085603,193690690],
                              [14,191,2812,43238,674624,11030083, 178633661],
@@ -182,7 +182,7 @@ def get_expected_features(boards, piece_to_filter_fn, ep_filter_index, castling_
 
 
 def inference_input_pipeline_test(inference_pipe_fn, boards_to_input_list_fn, boards, uses_unoccupied,
-                                  piece_to_filter_fn, ep_filter_index, castling_filter_indices):
+                                  piece_to_filter_fn, ep_filter_index, castling_filter_indices, num_splits):
     """
     A function used to test the conversion of a board to a representation consumed by ANNs during inference.
     It creates an array of features (one-hot inputs potentially with empty squares) by using the
@@ -203,6 +203,8 @@ def inference_input_pipeline_test(inference_pipe_fn, boards_to_input_list_fn, bo
      this is incremented by one if unoccupied is not used as a filter
     :param castling_filter_indices:  The index of the input filter used to identify if a square contains a rook which
      has castling rights, this is incremented by one if unoccupied is not used as a filter
+    :param num_splits: The number of times to split the array of test boards before giving it to the pipe
+     (which is done to ensure that errors which don't occur every run are still properly tested)
     :return: A size 3 tuple, the first element being a boolean value signifying if the test was passed,
      the second element being the expected filters, and the third being the filters computed by the inference pipeline
     """
@@ -236,16 +238,27 @@ def inference_input_pipeline_test(inference_pipe_fn, boards_to_input_list_fn, bo
 
         boards_with_issues =  tf.logical_or(board_has_square_with_incorrect_filter_sum, board_has_wrong_filter)
 
+        run_results = []
+        split_indices = np.r_[np.arange(0, len(boards), len(boards) // num_splits), len(boards)]
+        for start, end in zip(split_indices[:-1], split_indices[1:]):
+            run_results.append(
+                sess.run(
+                    [filters_used, boards_with_issues],
+                    {
+                        desired_square_values: desired_filters[start:end],
+                        **dict(zip(pipe_placeholders, boards_to_input_list_fn(boards[start:end]))),
+                    }))
 
-        calculated_filters, problemed_board_mask = sess.run(
-            [filters_used, boards_with_issues],
-            {
-                desired_square_values: desired_filters,
-                **dict(zip(pipe_placeholders, boards_to_input_list_fn(boards))),
-            })
+        calculated_filters, problemed_board_mask = zip(*run_results)
+        calculated_filters = np.concatenate(calculated_filters)
+        problemed_board_mask = np.concatenate(problemed_board_mask)
 
-        for board in np.array(boards)[problemed_board_mask]:
-            print(board,'\n')
+        for j in range(len(problemed_board_mask)):
+            if problemed_board_mask[j]:
+                print("Inference pipeline test failed for board number:", j)
+                print(boards[j].fen())
+                print(boards[j], "\n-Desired filters:\n", desired_filters[j],
+                      "\n-Computed filters:\n", calculated_filters[j], "\n\n\n")
 
         return not np.any(problemed_board_mask), desired_filters, calculated_filters
 
@@ -304,9 +317,9 @@ def generate_boards_for_testing(sf_location, num_random_games=250, max_moves_per
             random_turn = not random_turn
 
 
-def check_if_legal_move_exists_tester(has_legal_move_fn, boards_to_test=None):
+def check_if_legal_move_exists_tester(has_legal_move_fn, existing_high_level_uci_filename, boards_to_test=None):
     if boards_to_test is None:
-        boards_to_test = generate_boards_for_testing("stockfish-8-linux/Linux/stockfish_8_x64")
+        boards_to_test = generate_boards_for_testing(existing_high_level_uci_filename)
 
     for board in boards_to_test:
         if has_legal_move_fn(board) != any(board.generate_legal_moves()):
@@ -320,8 +333,8 @@ def check_if_legal_move_exists_tester(has_legal_move_fn, boards_to_test=None):
 
 
 def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_fn, boards_to_input_for_inference,
-                                   piece_to_filter_fn, ep_filter_index, castling_filter_indices, num_random_games=20,
-                                   max_moves_per_game=250, uses_unoccupied=False):
+                               piece_to_filter_fn, ep_filter_index, castling_filter_indices, num_splits=250,
+                               num_random_games=25, max_moves_per_game=250, uses_unoccupied=False):
 
     """
     This function can be thought of in two parts, one tests the board evaluation inference pipeline, and the other
@@ -347,6 +360,7 @@ def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_
     :param piece_to_filter_fn: See inference_input_pipeline_test
     :param ep_filter_index: See inference_input_pipeline_test
     :param castling_filter_indices: See inference_input_pipeline_test
+    :param num_splits: See inference_input_pipeline_test
     :param num_random_games: The number of chess games to be played/tested (choosing random moves).  This is used for
      creating the PGN file to test the training pipe, or in generating the list of boards to test the inference pipe
     :param max_moves_per_game: The maximum number of moves (halfmoves) to be made before a game should be stopped.
@@ -392,7 +406,6 @@ def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_
     one_hot_features = np.argmax(
         np.concatenate((np.expand_dims(1-np.sum(input_features, axis=3),axis=3), input_features), axis=3),axis=3)
 
-
     inference_pipe_results, desired_filters, inference_filters = inference_input_pipeline_test(
         inference_pipe_fn,
         boards_to_input_for_inference,
@@ -400,14 +413,13 @@ def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_
         uses_unoccupied,
         piece_to_filter_fn,
         ep_filter_index=ep_filter_index,
-        castling_filter_indices=castling_filter_indices)
+        castling_filter_indices=castling_filter_indices,
+        num_splits=num_splits)
 
     no_training_pipe_issues = True
     for filter in one_hot_features:
         num_correct_squares = np.sum(filter == desired_filters, (1,2))
         if np.all(64 != num_correct_squares):
-
-
             print(filter)
             max_correct = np.max(num_correct_squares)
             print(desired_filters[num_correct_squares==max_correct])
@@ -421,7 +433,7 @@ def complete_board_eval_tester(tfrecords_writer, feature_getter, inference_pipe_
 
 
 def zero_window_search_tester(expected_val_fn, calculated_evaluator, hash_table_creator, boards=None, fens=None,
-                              max_depth=3, max_separator_change=500, runs_per_depth=3):
+                              max_depth=3, max_separator_change=1200, runs_per_depth=3):
     """
     A function to test a zero-window minimax search.  It first computes a 'correct' minimax value based on
     a given search function, then repeatedly does zero-window search calls (with increasing search depth)
@@ -490,32 +502,45 @@ def zero_window_search_tester(expected_val_fn, calculated_evaluator, hash_table_
 
 
 
+def decompress_squares(to_decompress, desired_num):
+    to_return = np.empty(desired_num, np.uint8)
+    to_return[::2] = to_decompress >> 4
+
+    if desired_num % 2:
+        to_return[1::2] = to_decompress[:-1] & np.uint8(0x0F)
+    else:
+        to_return[1::2] = to_decompress & np.uint8(0x0F)
+    return to_return
+
 
 def weighted_piece_sum_creator(piece_values=None):
-    """
-    NOTES:
-    1) This ignores rooks which have the ability to castle!
-    """
     if piece_values is None:
-        piece_values = np.array([900,500,300,300,100], dtype=np.int32)
+        piece_values = np.array([0,100,300,300,500,900,0], dtype=np.int32)
 
-    def bf_piece_sum_eval(pieces, occupied_bbs, ep, castling_lookup, kings):
-        piece_counts = popcount(np.bitwise_and(pieces, occupied_bbs))
-        player_piece_diffs = piece_counts[:, 0].view(np.int8) - piece_counts[:, 1].view(np.int8)
-        return np.sum(piece_values * player_piece_diffs.astype(np.int32), axis=1).astype(np.float32)
+        values_for_white = np.array([0, 900, 500, 300, 300, 100, 500])
+        piece_filter_values = np.r_[0, values_for_white, -values_for_white]
+
+    def bf_piece_sum_eval(compressed_pieces_filters, relevant_piece_masks):
+        squares_per_mask = popcount(relevant_piece_masks)
+
+        decompressed_pieces = decompress_squares(compressed_pieces_filters, np.sum(squares_per_mask))
+        cur_piece_values = piece_filter_values[decompressed_pieces]
+
+        split_indices = np.r_[0,np.cumsum(squares_per_mask, dtype=np.int32)]
+
+        to_return = np.array([np.sum(cur_piece_values[s:e]) for s, e in zip(split_indices[:-1], split_indices[1:])])
+        return to_return
+
 
     def simple_board_piece_sum(board):
-        pieces = np.array(
-            [[[board['queens'],
-               board['rooks'] ^ board['castling_rights'],
-               board['bishops'],
-               board['knights'],
-               board['pawns']]]],
-            dtype=np.uint64)
-
-        occupied_bbs = board['occupied_co'][::-1].reshape([1,2,1])
-        to_return = bf_piece_sum_eval(pieces, occupied_bbs, None, None, None)[0]
-        return to_return
+        total = 0
+        for square in scan_reversed(board['occupied']):
+            type = piece_type_at(board, square)
+            cur_value = piece_values[type]
+            if board['occupied_co'][0] & BB_SQUARES[square]:
+                cur_value *= -1
+            total += cur_value
+        return total
 
     return bf_piece_sum_eval, simple_board_piece_sum
 
@@ -575,18 +600,15 @@ def create_negamax_function(eval_fn):
     return search_helper
 
 
-def negamax_zero_window_search_creator(eval_fn, move_predictor, max_batch_size=5000, run_search_in_testing_mode=False):
+def negamax_zero_window_search_creator(eval_fn, move_predictor, max_batch_size=5000):
     dummy_previous_board_map = np.zeros([2, 1], dtype=np.uint64)
 
     def zero_window_search(board, depth, separator, hash_table):
         priority_bins = PriorityBins(
-            np.linspace(0,100,1000),
-            max_batch_size,
-            testing=run_search_in_testing_mode)
+            np.linspace(-4000,4000,1000),
+            max_batch_size)
 
         separator_to_use = np.nextafter(separator, MIN_FLOAT32_VAL)
-
-
 
         root_node = set_up_root_node_for_struct(
             move_predictor,
@@ -594,8 +616,8 @@ def negamax_zero_window_search_creator(eval_fn, move_predictor, max_batch_size=5
             dummy_previous_board_map,
             create_node_info_from_python_chess_board(board, depth, separator_to_use))
 
-        if root_node.board_struct[0]['terminated']:
-            return root_node.board_struct[0]['best_value']
+        if root_node.struct['terminated']:
+            return root_node.struct['best_value']
 
         to_return = zero_window_negamax_search(
             root_node,
@@ -603,8 +625,7 @@ def negamax_zero_window_search_creator(eval_fn, move_predictor, max_batch_size=5
             eval_fn,
             move_predictor,
             hash_table=hash_table,
-            previous_board_map=dummy_previous_board_map,
-            testing=run_search_in_testing_mode)
+            previous_board_map=dummy_previous_board_map)
         return to_return
 
     return zero_window_search
@@ -636,7 +657,7 @@ def cur_hash_getter(fen_to_start,move_lists,max_possible_moves):
 
 
 def cur_boards_to_input_list_fn(boards):
-    struct_array = np.concatenate([create_node_info_from_python_chess_board(board) for board in boards])
+    struct_array = np.concatenate(list(map(create_node_info_from_python_chess_board, boards)))
 
     return struct_array_to_ann_inputs(
         struct_array,
@@ -708,7 +729,7 @@ def cur_tfrecords_to_features(filename):
 
 
 
-def full_test():
+def full_test(existing_high_level_uci_filename):
     """
     Runs every test relevant to Batch First's performance or correctness (that's been created so far).
 
@@ -739,7 +760,7 @@ def full_test():
     test_results[3:5] = complete_board_eval_tester(
         tfrecords_writer=dummy_tfrecords_writer,
         feature_getter=cur_tfrecords_to_features,
-        inference_pipe_fn=lambda : get_board_data("NHWC"),
+        inference_pipe_fn=lambda : parse_into_ann_input_inference(5000, True),
         boards_to_input_for_inference=cur_boards_to_input_list_fn,
         piece_to_filter_fn=cur_piece_to_filter_fn,
         ep_filter_index=1,
@@ -749,7 +770,8 @@ def full_test():
     print("Board evaluation inference pipeline test:                     %s" % result_str[test_results[4]])
 
     test_results[5] = check_if_legal_move_exists_tester(
-        lambda b : has_legal_move(create_node_info_from_python_chess_board(b)[0]))
+        lambda b : has_legal_move(create_node_info_from_python_chess_board(b)[0]),
+        existing_high_level_uci_filename)
 
     print("Legal move existance test:                                    %s" % result_str[test_results[5]])
 
@@ -774,4 +796,4 @@ def full_test():
 
 
 if __name__ == "__main__":
-    full_test()
+    full_test(existing_high_level_uci_filename="stockfish-8-linux/Linux/stockfish_8_x64")

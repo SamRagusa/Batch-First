@@ -4,8 +4,6 @@ from scipy.stats import kendalltau, weightedtau, spearmanr
 
 import batch_first.anns.ann_creation_helper as ann_h
 
-from batch_first.chestimator import get_board_data
-
 tf.logging.set_verbosity(tf.logging.INFO)
 
 
@@ -13,7 +11,7 @@ tf.logging.set_verbosity(tf.logging.INFO)
 def diag_comparison_model_fn(features, labels, mode, params):
     """
     Generates an EstimatorSpec for a model which scores chess boards.  It learns by maximizing the difference between
-    two board evaluations, where one is intended to be greater than the other based on some pre-calculated
+    board evaluation values, where one is intended to be greater than the other based on some pre-calculated
     scoring system (e.g. StockFish evaluations).
     """
     convolutional_module_outputs=ann_h.create_input_convolutions_shared_weights(
@@ -45,7 +43,7 @@ def diag_comparison_model_fn(features, labels, mode, params):
         kernel_regularizer=params['kernel_regularizer'](),
         name="logit_layer")
 
-    logits = tf.squeeze(logits)
+    logits = tf.squeeze(logits, axis=[1,2,3])
 
     loss = None
     train_op = None
@@ -188,28 +186,29 @@ def lower_diag_score_comparison_input_fn(filename_pattern, batch_size, include_u
 
         comparison_indices = tf.where(bool_weight_mask)
 
-        value_larger_than_centipawn_less_than_mate = 100000
-        desired_found_mate = tf.greater(tf.abs(parsed_examples['score']), value_larger_than_centipawn_less_than_mate)
+        # value_larger_than_centipawn_less_than_mate = 100000
+        # desired_found_mate = tf.greater(tf.abs(parsed_examples['score']), value_larger_than_centipawn_less_than_mate)
 
-        both_found_mate = ann_h.vec_and_transpose_op(desired_found_mate, tf.logical_and)
+        # both_found_mate = ann_h.vec_and_transpose_op(desired_found_mate, tf.logical_and)
 
-        desired_signs = tf.sign(parsed_examples['score'])
+        # desired_signs = tf.sign(parsed_examples['score'])
 
-        same_sign_matrix = ann_h.vec_and_transpose_op(desired_signs, tf.equal)
+        # same_sign_matrix = ann_h.vec_and_transpose_op(desired_signs, tf.equal)
 
-        both_same_player_mates = tf.logical_and(both_found_mate, same_sign_matrix)
+        # both_same_player_mates = tf.logical_and(both_found_mate, same_sign_matrix)
 
-        both_same_mate_and_nonzero_weight = tf.logical_and(both_same_player_mates, bool_weight_mask)
+        # both_same_mate_and_nonzero_weight = tf.logical_and(both_same_player_mates, bool_weight_mask)
 
-        same_mate_depth_diff_decrement = .95
+        # same_mate_depth_diff_decrement = .95
 
-        weight_helper = same_mate_depth_diff_decrement * tf.cast(both_same_mate_and_nonzero_weight, tf.float32)
+        # weight_helper = same_mate_depth_diff_decrement * tf.cast(both_same_mate_and_nonzero_weight, tf.float32)
 
-        mate_adjusted_weight_mask = weight_mask - weight_helper
+        # mate_adjusted_weight_mask = weight_mask - weight_helper
 
         label_matrix = (lower_diag_sign + weight_mask)/2
 
-        return boards, parsed_examples['score'], label_matrix, mate_adjusted_weight_mask, comparison_indices
+        # return boards, parsed_examples['score'], label_matrix, mate_adjusted_weight_mask, comparison_indices
+        return boards, parsed_examples['score'], label_matrix, weight_mask, comparison_indices
 
 
     dataset = dataset.map(process_batch, num_parallel_calls=num_things_in_parallel)
@@ -227,31 +226,27 @@ def lower_diag_score_comparison_input_fn(filename_pattern, batch_size, include_u
 
 def board_eval_serving_input_receiver(data_format="NCHW"):
     def fn_to_return():
-        (piece_bbs, color_occupied_bbs, ep_squares, castling_lookup_indices, kings), formatted_data = get_board_data(data_format)
+        placeholder_shape = [None, 15, 8, 8] if data_format=="NCHW" else [None, 8, 8, 15]
 
-        receiver_tensors = {"piece_bbs": piece_bbs,
-                            "color_occupied_bbs": color_occupied_bbs,
-                            "ep_squares": ep_squares,
-                            "castling_lookup_indices": castling_lookup_indices,
-                            "kings": kings}
+        for_remapping = tf.placeholder(tf.float32, placeholder_shape, "FOR_INPUT_MAPPING_transpose")
 
-        dict_for_model_fn = {"board": formatted_data}
-
-        return tf.estimator.export.ServingInputReceiver(dict_for_model_fn, receiver_tensors)
+        receiver_tensors = {"board": for_remapping}
+        return tf.estimator.export.ServingInputReceiver(receiver_tensors, receiver_tensors)
     return fn_to_return
 
 
 def main(unused_par):
-    SAVE_MODEL_DIR = "/srv/tmp/diag_loss_3/pre_commit_test"
+
+    SAVE_MODEL_DIR = "/srv/tmp/diag_loss_3/pre_commit_test_2534111"
     TRAINING_FILENAME_PATTERN = "/srv/databases/lichess_combined_methods_eval_databases/lichess_training.tfrecords"
     VALIDATION_FILENAME_PATTERN = "/srv/databases/lichess_combined_methods_eval_databases/lichess_validation.tfrecords"
     TRAIN_OP_SUMMARIES = ["gradient_norm", "gradients"]
     NUM_INPUT_FILTERS = 15
     OPTIMIZER = 'Adam'
-    TRAINING_SHUFFLE_BUFFER_SIZE = 32790000
+    TRAINING_SHUFFLE_BUFFER_SIZE = 16800000
     TRAINING_BATCH_SIZE = 512      #The effective batch size used for the loss = n(n-1)/2  (where n is the number of boards in the batch)
     VALIDATION_BATCH_SIZE = 1000
-    LOG_ITERATION_INTERVAL = 1500
+    LOG_ITERATION_INTERVAL = 2500
     LEARNING_RATE = 2.5e-3
     KERNEL_REGULARIZER = lambda: None
     KERNEL_INITIALIZER = lambda: tf.contrib.layers.variance_scaling_initializer()
@@ -260,8 +255,8 @@ def main(unused_par):
     SAME_MATE_DEPTH_DIFF_LOSS_WEIGHT_DECREMENT = .95
     VALUE_LARGER_THAN_CENTIPAWN_LESS_THAN_MATE = 100000
 
-    num_examples_in_training_file = 32792847
-    num_examples_in_validation_file = 3857982
+    num_examples_in_training_file = 16851682
+    num_examples_in_validation_file = 1982551
 
     BATCHES_IN_TRAINING_EPOCH = num_examples_in_training_file // TRAINING_BATCH_SIZE
     BATCHES_IN_VALIDATION_EPOCH =  num_examples_in_validation_file // VALIDATION_BATCH_SIZE
@@ -270,7 +265,7 @@ def main(unused_par):
     learning_decay_function = lambda gs : tf.train.exponential_decay(LEARNING_RATE, gs,
                                                                      BATCHES_IN_TRAINING_EPOCH, 0.96, staircase=True)
 
-    CONVOLUTIONAL_MODULES = [[[[512, 1], [128, 1]] + 4 * [[32, 3]] + [(16, 8)]]]
+    CONVOLUTIONAL_MODULES = [[[[512, 1], [128, 1]] + 6 * [[32, 3]] + [(16, 8)]]]
 
 
     # Create the Estimator
@@ -299,7 +294,7 @@ def main(unused_par):
 
 
     validation_hook = ann_h.ValidationRunHook(
-        step_increment=BATCHES_IN_TRAINING_EPOCH//3,
+        step_increment=BATCHES_IN_TRAINING_EPOCH,
         estimator=the_estimator,
         input_fn_creator=lambda: lambda : lower_diag_score_comparison_input_fn(
             VALIDATION_FILENAME_PATTERN,
@@ -318,8 +313,9 @@ def main(unused_par):
             shuffle_buffer_size=TRAINING_SHUFFLE_BUFFER_SIZE,
             include_unoccupied=NUM_INPUT_FILTERS == 16,
             num_things_in_parallel=12,
-            num_things_to_prefetch=1,
+            num_things_to_prefetch=36,
             data_format=DATA_FORMAT,
+            shuffle_seed=12312312,
         ),
         hooks=[validation_hook],
         # max_steps=1,

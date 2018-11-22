@@ -1,86 +1,83 @@
 import threading
-from collections import OrderedDict
 import time
 
 from .numba_board import *
 from . import transposition_table as tt
 
-
-
-game_node_type = nb.deferred_type()
-
-gamenode_spec = OrderedDict()
-
-gamenode_spec["board_struct"] = numba_node_info_type[:]
-gamenode_spec["parent"] = nb.optional(game_node_type)
+from .classes_and_structs import *
 
 
 
-
-@nb.jitclass(gamenode_spec)
-class GameNode:
-    def __init__(self, board_struct, parent):
-        self.board_struct = board_struct
-
-        # Eventually this should be some sort of list, so that updating multiple parents is possible
-        # when handling transpositions which are open at the same time.
-        self.parent = parent
-
-    @property
-    def struct(self):
-        return self.board_struct[0]
-
-
-game_node_type.define(GameNode.class_type.instance_type)
-
-
-
-
-game_node_holder_type = nb.deferred_type()
-
-game_node_holder_spec = OrderedDict()
-
-game_node_holder_spec["held_node"] = GameNode.class_type.instance_type
-game_node_holder_spec["next_holder"] = nb.optional(game_node_holder_type)
-
-@nb.jitclass(game_node_holder_spec)
-class GameNodeNodeHolder:
+@njit
+def compress_square_array(to_compress):
     """
-    A jitclass used for representing a linked list of GameNode objects.  (this is mainly used for compilation purposes)
-
-    NOTES:
-    1) This shouldn't be needed at all and a 'next' SOMETHING should just be added to the GameNode class, but
-    Numba won't let that happen (yet)
+    Given an array of uint8s which all have values less than 16, compress them by storing
+    two values per uint8 (as opposed to one).
     """
-    def __init__(self, held_node, next_holder):
-        self.held_node = held_node
-        self.next_holder = next_holder
-
-    @property
-    def struct(self):
-        return self.held_node.struct
-
-game_node_holder_type.define(GameNodeNodeHolder.class_type.instance_type)
+    to_compress[::2] <<= np.uint8(4)
+    to_compress[::2] |= to_compress[1::2]
+    return to_compress[::2]
 
 
+@njit
+def square_scanner_helper(bb, mirror_squares=False):
+    if mirror_squares:
+        for square in scan_reversed(bb):
+            yield square_mirror(square)
+    else:
+        for square in scan_reversed(bb):
+            yield square
 
-def create_node_holder(nodes):
-    holder = None
-    for node in nodes[::-1]:
-        holder = GameNodeNodeHolder(node, holder)
-    return holder
+
+@njit
+def get_square_ary(struct, relevent_square_mask):
+    """
+    Creates and returns an array of the ann filters indices corresponding to the given boards 'relevant' squares.
+    A 'relevant' square is a square that's either occupied or an ep-capture square.
+    """
+    squares = np.empty(popcount(relevent_square_mask), np.uint8)
+    for j, square in enumerate(square_scanner_helper(relevent_square_mask, not struct['turn'])):
+        type = piece_type_at(struct, square)
+
+        if type:
+            bb_square = BB_SQUARES[square]
+            squares[j] = 7 if struct['occupied_co'][struct['turn']] & bb_square else 14
+            if struct['castling_rights'] & bb_square == 0:
+                squares[j] -= type
+        else:
+            squares[j] = 0
+
+    return squares
 
 
-@njit(nogil=True)
+@njit
+def own_concat(lst, total_size):
+    """
+    A customized implementation of np.concatenate (mainly used because Numba wouldn't let it use np.concatenate for some reason)
+    """
+    to_return = np.empty(total_size + (total_size % 2), np.uint8)
+    start_index = 0
+    for to_place in lst:
+        end_index = start_index + len(to_place)
+        to_return[start_index:end_index] = to_place
+        start_index = end_index
+
+    if total_size % 2: #to fix the issues caused by part of the array staying 'empty'
+        to_return[-1] = 0
+
+    return to_return
+
+
+@njit
 def struct_array_to_ann_inputs(child_structs, not_child_structs, to_score_child_mask, to_score_not_child_mask, total_num_to_score):
+    """
+    Uses ceil((popcnt(occupied)+int(has_ep))/2)*8+64=[80, 200] bits per board transferred.
+    """
+    occupied_bbs = np.empty(total_num_to_score, dtype=np.uint64)
 
-    # [[ep_squares], [castling_lookup_indices], [white_kings], [black_kings]]
-    byte_info = np.empty((4, total_num_to_score), dtype=np.uint8)
-
-    # [[queens],[rooks_without_castling_rights],[bishops],[knights],[pawns],[occupied_w],[occupied_b]]
-    bb_array = np.empty((7, total_num_to_score), dtype=np.uint64)
-
+    total_squares = 0
     store_index = 0
+    to_concat = []
     for j in range(len(child_structs) + len(not_child_structs)):
         if j < len(child_structs):
             should_score = to_score_child_mask[j]
@@ -90,40 +87,22 @@ def struct_array_to_ann_inputs(child_structs, not_child_structs, to_score_child_
             struct = not_child_structs[j - len(child_structs)]
 
         if should_score:
-            if struct['turn']:
-                bb_array[0, store_index] = struct['queens']
-                bb_array[1, store_index] = struct['rooks'] ^ struct['castling_rights']
-                bb_array[2, store_index] = struct['bishops']
-                bb_array[3, store_index] = struct['knights']
-                bb_array[4, store_index] = struct['pawns']
+            occupied_bbs[store_index] = struct['occupied']
+            if struct['ep_square']:
+                occupied_bbs[store_index] |= BB_SQUARES[struct['ep_square']]
 
-                byte_info[1, store_index] = khash_get(WHITE_CASTLING_RIGHTS_LOOKUP_TABLE, struct['castling_rights'], 0)
+            if not struct['turn']:
+                occupied_bbs[store_index] = flip_vertically(occupied_bbs[store_index])
 
-                byte_info[2:4, store_index] = msb(struct['occupied_co'][::-1] & struct['kings'])
+            cur_squares = get_square_ary(struct, occupied_bbs[store_index])
 
-                byte_info[0, store_index] = struct['ep_square']
-
-                bb_array[5:7, store_index] = struct['occupied_co'][::-1]
-
-            else:
-                bb_array[0, store_index] = flip_vertically(struct['queens'])
-                bb_array[1, store_index] = flip_vertically(struct['rooks'] ^ struct['castling_rights'])
-                bb_array[2, store_index] = flip_vertically(struct['bishops'])
-                bb_array[3, store_index] = flip_vertically(struct['knights'])
-                bb_array[4, store_index] = flip_vertically(struct['pawns'])
-
-                byte_info[1, store_index] = khash_get(BLACK_CASTLING_RIGHTS_LOOKUP_TABLE, struct['castling_rights'], 0)
-
-                byte_info[2:4, store_index] = square_mirror(msb(struct['occupied_co'] & struct['kings']))
-
-                byte_info[0, store_index] = REVERSED_EP_LOOKUP_ARRAY[struct['ep_square']]
-
-                bb_array[5:7, store_index] = flip_vertically(struct['occupied_co'])
+            total_squares += len(cur_squares)
+            to_concat.append(cur_squares)
 
             store_index += 1
+    compressed_squares = compress_square_array(own_concat(to_concat, total_squares))
 
-    # The tuple being returned is filled with the following: (piece_bbs_excluding_king, color_occupied_bbs, ep_squares, castling_rights_lookup_index, kings)
-    return np.expand_dims(bb_array[:5].transpose(), 1), np.expand_dims(bb_array[5:].transpose(),2), byte_info[0,:], byte_info[1,:], byte_info[2:,:].transpose()
+    return compressed_squares, occupied_bbs
 
 
 @njit
@@ -334,7 +313,7 @@ def child_termination_check_and_move_gen(struct_array, hash_table, node_holder, 
 
 
 @njit
-def create_child_structs(struct_array, testing=False):
+def create_child_structs(struct_array):
     #This should not copy the entire array, instead only the fields which are not directly written over
     #Also this should not be creating full structs for depth zero nodes, a new dtype will likely need to be created
     #which has a subset of the current ones fields.
@@ -352,10 +331,6 @@ def create_child_structs(struct_array, testing=False):
         child_array[j]['depth'] = struct_array[j]['depth'] - 1
 
         moves_to_push[j] = struct_array[j]['unexplored_moves'][struct_array[j]['next_move_index']]
-
-        if testing:
-            if np.any(struct_array[j]['unexplored_moves'][struct_array[j]['next_move_index']] == 255):
-                print("THE FOLLOWING MOVE IS ATTEMPTING TO BE PUSHED:", child_array[j]['prev_move'])
 
         if struct_array[j]['children_left'] != NEXT_MOVE_IS_FROM_TT_VAL:
             new_next_move_values[j] = set_up_next_best_move(struct_array[j])
@@ -389,15 +364,28 @@ def generate_moves_for_tt_move_nodes(struct_array, to_check_mask):
 
 
 @njit
-def create_nodes_for_struct(struct_array, parent_holder, to_create_mask):
-    to_return = []
+def create_holder_for_structs(struct_array, parent_holder, to_create_mask, starting_holder=None):
+    found = 0
     for j in range(len(struct_array)):
         if to_create_mask[j]:
-            to_return.append(GameNode(struct_array[j:j+1], parent_holder.held_node))
+            starting_holder = GameNodeHolder(GameNode(struct_array[j:j + 1], parent_holder.held_node), starting_holder)
+            found += 1
         parent_holder = parent_holder.next_holder
 
-    return to_return
+    return starting_holder, found
 
+
+@njit
+def create_new_holders_and_filter_old(root, node_linked_list, have_children_left_mask, child_struct, create_holder_mask):
+    """
+    Creates new GameNodes and GameNodeHolders for the given new children, and filters the parents which don't need
+    to be given to the open node holder for re-insertion.  Their node holder are connected, and appended to the given root.
+    """
+    new_child_nodes, num_new_children = create_holder_for_structs(child_struct, node_linked_list, create_holder_mask)
+
+    num_not_filtered = filter_holders_then_append(root, node_linked_list, have_children_left_mask, new_child_nodes)
+
+    return num_new_children, num_new_children + num_not_filtered
 
 @njit
 def get_struct_array_from_node_holder(node_holder, length):
@@ -581,13 +569,11 @@ def complete_move_evaluation(scores, child_structs, adult_nodes, scored_child_ma
     return child_next_move_scores, adult_next_move_scores
 
 
+def do_iteration(node_linked_list, hash_table, previous_board_map, board_eval_fn, move_eval_fn):
+    length_of_batch = len_node_holder(node_linked_list)  #this can and should be given to this function
+    struct_batch = get_struct_array_from_node_holder(node_linked_list, length_of_batch)
 
-def do_iteration(node_batch, hash_table, previous_board_map, board_eval_fn, move_eval_fn, testing=False):
-    node_linked_list = create_node_holder(node_batch)
-
-    struct_batch = get_struct_array_from_node_holder(node_linked_list, len(node_batch))
-
-    child_struct, struct_batch_next_move_scores = create_child_structs(struct_batch, testing)
+    child_struct, struct_batch_next_move_scores = create_child_structs(struct_batch)
 
     child_was_from_tt_move_mask = struct_batch['children_left'] == NEXT_MOVE_IS_FROM_TT_VAL
 
@@ -597,11 +583,6 @@ def do_iteration(node_batch, hash_table, previous_board_map, board_eval_fn, move
     depth_zero_should_terminate_array(child_struct, hash_table, previous_board_map, node_linked_list)
 
     depth_zero_not_scored_mask = np.logical_and(depth_zero_children_mask, np.logical_not(child_struct['terminated']))
-
-    if testing:
-        if np.any(child_struct[np.logical_and(depth_zero_children_mask, child_struct['terminated'])]['best_value'] == MIN_FLOAT32_VAL):
-            print("A depth zero node was marked as terminated without a value for termination prior to evaluations!")
-
 
     if np.any(depth_zero_not_scored_mask):
         evaluation_thread, evaluation_scores = start_board_evaluations(
@@ -651,6 +632,7 @@ def do_iteration(node_batch, hash_table, previous_board_map, board_eval_fn, move
         struct_batch["next_move_index"] != NO_MORE_MOVES_VALUE,
         not_only_move_was_tt_move_mask)
 
+
     set_nodes_to_altered_structs(
         node_linked_list,
         struct_batch,
@@ -693,21 +675,13 @@ def do_iteration(node_batch, hash_table, previous_board_map, board_eval_fn, move
             size_array=move_completion_info[0],
             cum_sum_sizes=move_completion_info[2])
 
-    new_child_nodes = create_nodes_for_struct(
-        child_struct,
-        node_linked_list,
-        non_zerod_child_not_term_mask)
-
-    new_child_nodes = np.array(new_child_nodes)
-
-    to_insert = np.concatenate((
-        node_batch[have_children_left_mask],
-        new_child_nodes))
-
+    dummy_root = create_dummy_node_holder()
+    num_new_children, num_returning = create_new_holders_and_filter_old(dummy_root, node_linked_list, have_children_left_mask, child_struct, non_zerod_child_not_term_mask)
+    to_return = dummy_root.next_holder
 
     #Set up the array of scores used to place the returned nodes into their proper bins
-    scores_to_return = np.full(len(to_insert), TT_MOVE_SCORE_VALUE, dtype=np.float32)
-    num_not_child_scores = len(to_insert) - len(new_child_nodes)
+    scores_to_return = np.full(num_returning, TT_MOVE_SCORE_VALUE, dtype=np.float32)
+    num_not_child_scores = num_returning - num_new_children
     if num_not_child_scores != 0:
         scores_to_return[:num_not_child_scores] = struct_batch_next_move_scores[have_children_left_mask]
         if not not_child_next_move_scores is None and len(not_child_next_move_scores) != 0:
@@ -715,107 +689,27 @@ def do_iteration(node_batch, hash_table, previous_board_map, board_eval_fn, move
     if not child_next_move_scores is None and len(child_next_move_scores) != 0:
             scores_to_return[num_not_child_scores:][child_struct[non_zerod_child_not_term_mask]['children_left'] != NEXT_MOVE_IS_FROM_TT_VAL] = child_next_move_scores
 
-    return to_insert, scores_to_return
+
+    return to_return, scores_to_return
 
 
 def zero_window_negamax_search(root_game_node, open_node_holder, board_eval_fn, move_eval_fn, hash_table,
-                               previous_board_map, print_partial_info=False, print_all_info=False, testing=False):
-    if print_partial_info:
-        iteration_counter = 0
-        total_nodes_computed = 0
-        given_for_insert = 0
-        start_time = time.time()
-
-    next_batch = np.array([root_game_node], dtype=np.object)
-
-    if testing:
-        if not open_node_holder.is_empty() or len(open_node_holder) != 0:
-            print("The open node holder given for the zero-window search has %d elements in it and .is_empty() returns: %s"%(len(open_node_holder), open_node_holder.is_empty()))
-
-    while len(next_batch) != 0:
-        if print_partial_info:
-
-            total_nodes_computed += len(next_batch)
-
-            if print_all_info:
-                num_open_nodes = len(open_node_holder)
-                largest_bin = open_node_holder.largest_bin()
-
-                print("Starting iteration %d with batch size of %d and %d open nodes, in %d non-empty bins, with a max bin of %d." % (
-                    iteration_counter, len(next_batch), num_open_nodes, open_node_holder.num_non_empty(),
-                    largest_bin))
-
-        if testing:
-            if root_game_node.struct['terminated']:
-                print("Root node was terminated at the start of the current iteration.")
-            if root_game_node.struct['best_value'] > root_game_node.struct['separator']:
-                print("Root node has best_value larger than it's separator at the start of the current iteration.")
-            if root_game_node.struct['children_left'] == 0:
-                print("Root node has 0 children_left at the start of the current iteration.")
-
+                               previous_board_map):
+    next_batch = GameNodeHolder(root_game_node, None)
+    while next_batch:
         to_insert, to_insert_scores = do_iteration(
-            next_batch,
-            hash_table,
-            previous_board_map,
-            board_eval_fn,
-            move_eval_fn,
-            testing)
+            next_batch, hash_table, previous_board_map, board_eval_fn, move_eval_fn)
 
         if root_game_node.struct['terminated']:
             open_node_holder.clear_list()
-            if print_partial_info:
-                iteration_counter += 1
             break
 
-        if testing:
-            if len(to_insert) != len(to_insert_scores):
-                print("The number of nodes from the previous iteration doesn't equal the number of scores received!")
-            for j in range(len(to_insert)):
-                if to_insert[j] is None:
-                    print("Found none in array being inserted into global nodes!")
-                if to_insert[j].struct['depth'] == 0:
-                    print("Found a node with depth zero being inserted into global nodes!")
-                if np.all(to_insert[j].struct['unexplored_moves'] == 255):
-                    print("Found a node with no stored legal moves being inserted into global nodes!")
-                if to_insert[j].struct['next_move_index'] == NO_MORE_MOVES_VALUE:
-                    print("Found a node with no next move index being inserted into global nodes!")
+        if not to_insert and open_node_holder.is_empty():
+            break
 
-            if root_game_node.struct['best_value'] > root_game_node.struct['separator'] or root_game_node.struct['children_left'] == 0:
-                print("Root node should be terminated before inserting nodes into bins")
-
-        if print_partial_info:
-            given_for_insert += len(to_insert)
-            if print_all_info:
-                print("Iteration %d completed producing %d nodes to insert."%(iteration_counter, len(to_insert)))
-
-        if len(to_insert) != 0 or not open_node_holder.is_empty():
-
-            if testing:
-                if len(to_insert) != len(to_insert_scores):
-                    print("do_iteration returned %d nodes to insert, and %d scores"%(len(to_insert), len(to_insert_scores)))
-
-            next_batch = open_node_holder.insert_nodes_and_get_next_batch(to_insert, to_insert_scores)
-        else:
-            next_batch = []
-
-
-        if print_partial_info:
-            iteration_counter += 1
-
-        if testing:
-            for j in range(len(next_batch)):
-                if next_batch[j] is None:
-                    print("Found None in next_batch!")
-                elif next_batch[j].struct['terminated']:
-                    print("A terminated node was found in the newly created next_batch!")
-
-    if print_partial_info:
-        time_taken = time.time() - start_time
-        print("Search completed in %f seconds, processing %d nodes (%f nodes/sec), in %d iterations (%f iterations/sec)."%(
-            time_taken, total_nodes_computed, total_nodes_computed/time_taken, iteration_counter, (iteration_counter/time_taken)))
+        next_batch = open_node_holder.insert_nodes_and_get_next_batch(to_insert, to_insert_scores)
 
     return root_game_node.struct['best_value']
-
 
 
 def set_up_root_node_for_struct(move_eval_fn, hash_table, previous_board_map, root_struct):
@@ -824,7 +718,7 @@ def set_up_root_node_for_struct(move_eval_fn, hash_table, previous_board_map, ro
 
     root_node = GameNode(root_struct, None)
 
-    temp_game_node_holder = GameNodeNodeHolder(root_node, None)
+    temp_game_node_holder = GameNodeHolder(root_node, None)
 
     struct_array = root_node.board_struct
 
@@ -882,15 +776,16 @@ def set_up_root_node_from_fen(move_eval_fn, hash_table, previous_board_map, fen,
 
 
 def mtd_f(fen, depth, first_guess, open_node_holder, board_eval_fn, move_eval_fn, hash_table, previous_board_map,
-          guess_increment=.05, print_partial_info=False, print_all_info=False, testing=False):
+          guess_increment=.05, print_info=False):
     """
     Does an mtd(f) search modified to a binary search (this is done to address the granularity of the evaluation network).
     """
     cur_guess = first_guess
+
     upper_bound = WIN_RESULT_SCORES[0]
     lower_bound = LOSS_RESULT_SCORES[0]
 
-    if print_partial_info:
+    if print_info:
         counter = 0
 
     while lower_bound < upper_bound:
@@ -907,7 +802,7 @@ def mtd_f(fen, depth, first_guess, open_node_holder, board_eval_fn, move_eval_fn
 
         seperator_to_use = np.nextafter(beta, MIN_FLOAT32_VAL)
 
-        # This would ideally share the same tree, but updated for the new seperation value
+        # This would ideally share the same tree, but updated for the new separation value
         cur_root_node = set_up_root_node_from_fen(move_eval_fn, hash_table, previous_board_map, fen, depth, seperator_to_use)
 
         if cur_root_node.struct['terminated']:
@@ -919,17 +814,14 @@ def mtd_f(fen, depth, first_guess, open_node_holder, board_eval_fn, move_eval_fn
                 board_eval_fn,
                 move_eval_fn,
                 hash_table=hash_table,
-                previous_board_map=previous_board_map,
-                print_partial_info=print_partial_info,
-                print_all_info=print_all_info,
-                testing=testing)
+                previous_board_map=previous_board_map)
 
         if cur_guess < beta:
             upper_bound = cur_guess
         else:
             lower_bound = cur_guess
 
-        if print_partial_info:
+        if print_info:
             counter += 1
             print("Finished iteration %d with lower and upper bounds (%f,%f) after search returned %f" % (counter, lower_bound, upper_bound, cur_guess))
 
@@ -939,16 +831,18 @@ def mtd_f(fen, depth, first_guess, open_node_holder, board_eval_fn, move_eval_fn
 
 
 def iterative_deepening_mtd_f(fen, depths_to_search, open_node_holder, board_eval_fn, move_eval_fn, hash_table,
-                              previous_board_map, first_guess=0, guess_increments=None, print_partial_info=False,
-                              print_all_info=False, testing=False):
+                              previous_board_map, first_guess=0, guess_increments=None, print_info=False):
     if guess_increments is None:
         guess_increments = [.05]*len(depths_to_search)
 
+    if print_info:
+        start_time = time.time()
+
 
     for depth, increment in zip(depths_to_search, guess_increments):
-        if print_partial_info:
+        if print_info:
             print("Starting depth %d search, with first guess %f"%(depth, first_guess))
-            start_time = time.time()
+            started_search = time.time()
 
         first_guess, tt_move, hash_table = mtd_f(
             fen,
@@ -960,17 +854,16 @@ def iterative_deepening_mtd_f(fen, depths_to_search, open_node_holder, board_eva
             hash_table=hash_table,
             previous_board_map=previous_board_map,
             guess_increment=increment,
-            print_partial_info=print_partial_info,
-            print_all_info=print_all_info,
-            testing=testing)
+            print_info=print_info)
 
 
-        if print_partial_info:
-            print("Completed depth %d in time %f with value %f\n"%(depth, time.time() - start_time, first_guess))
+        if print_info:
+            print("Completed depth %d in time %f with value %f\n"%(depth, time.time() - started_search, first_guess))
 
 
-    if print_partial_info:
-        print("The number of nodes inserted into the node list (including repeats) was %d, and %d were retrieved.\n"%(open_node_holder.total_in, open_node_holder.total_out))
+    if print_info:
+        print("The nodes processed per second (including repeats) is:", open_node_holder.total_out/(time.time() - start_time))
+        print("The number of nodes inserted into the node list (including repeats) was %d, and %d were retrieved.\n" % (open_node_holder.total_in, open_node_holder.total_out))
         open_node_holder.reset_logs()
 
 
