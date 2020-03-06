@@ -59,7 +59,7 @@ minimizing the following:
 <!--- 
 LowerTriangular(D-D^T\neq0)*CrossEntropy(S(C-C^T),D-D^T>0)
 -->
-![equation](https://latex.codecogs.com/gif.latex?LowerTriangular%28D-D%5ET%5Cneq0%29*CrossEntropy%28S%28C-C%5ET%29%2CD-D%5ET%3E0%29)
+![equation](https://latex.codecogs.com/svg.latex?LowerTriangular%28D-D%5ET%5Cneq0%29*CrossEntropy%28S%28C-C%5ET%29%2CD-D%5ET%3E0%29)
 
 Where S is the sigmoid function, CrossEntropy is a function who's first and second parameters are logits and labels
 respectively, LowerTriangular is a function which replaces entries above the main diagonal with zeros, 
