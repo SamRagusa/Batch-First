@@ -239,7 +239,7 @@ def _to_chess960_tuple(board_state, move):
     return move[0], move[1], move[2]
 
 
-@njit
+@njit(parallel=True)
 def push_moves(struct_array, move_array):
     """
     Pushes the given moves for the given boards (makes the moves), while doing this it also incrementally updates
@@ -263,7 +263,7 @@ def push_moves(struct_array, move_array):
     when some refactoring is done this may happen automatically (things like storing occupied_w and occupied_b
     as an array so it can be indexed with turn).
     """
-    for j in range(len(struct_array)):
+    for j in nb.prange(len(struct_array)):
         move_from_square, move_to_square, move_promotion = _to_chess960_tuple(struct_array[j], move_array[j])
 
         # Reset ep square.
@@ -1150,9 +1150,9 @@ def is_legal_move(board_scalar, move):
     return is_pseudo_legal_move(board_scalar, move) and not is_into_check(board_scalar, move[0], move[1])
 
 
-@njit
+@njit(parallel=True)
 def perft_test_move_gen_helper(struct_array):
-    for j in range(len(struct_array)):
+    for j in nb.prange(len(struct_array)):
         king = msb(struct_array[j]['kings'] & struct_array[j]['occupied_co'][struct_array[j]['turn']])
 
         blockers = _slider_blockers(struct_array[j], king)
@@ -1169,8 +1169,8 @@ def perft_test_move_gen_helper(struct_array):
                 struct_array[j]['unexplored_moves'][legal_move_index] = struct_array[j]['unexplored_moves'][i]
                 legal_move_index += 1
 
-        struct_array[j]['unexplored_moves'][legal_move_index:struct_array[j]['children_left'], :] = 255
-        struct_array[j]['children_left'] = legal_move_index
+        struct_array[j]['unexplored_moves'][legal_move_index:struct_array[j]['children_left']] = 255
+        struct_array['children_left'][j] = legal_move_index
 
 
 def perft_test(struct_array, depth, print_info=False):
@@ -1199,4 +1199,4 @@ def perft_test(struct_array, depth, print_info=False):
 
     push_moves(repeated_struct_array, legal_moves)
 
-    return perft_test(repeated_struct_array, depth - 1)
+    return perft_test(repeated_struct_array, depth - 1, print_info)

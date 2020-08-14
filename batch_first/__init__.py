@@ -202,7 +202,7 @@ BB_SQUARES = [
     BB_A6, BB_B6, BB_C6, BB_D6, BB_E6, BB_F6, BB_G6, BB_H6,
     BB_A7, BB_B7, BB_C7, BB_D7, BB_E7, BB_F7, BB_G7, BB_H7,
     BB_A8, BB_B8, BB_C8, BB_D8, BB_E8, BB_F8, BB_G8, BB_H8
-] = np.array([1 << sq for sq in SQUARES], dtype=np.uint64)
+] = np.array([np.uint64(1) << sq for sq in SQUARES], dtype=np.uint64)
 
 BB_CORNERS = BB_A1 | BB_H1 | BB_A8 | BB_H8
 
@@ -219,7 +219,7 @@ BB_FILES = [
     BB_FILE_F,
     BB_FILE_G,
     BB_FILE_H
-] = np.array([0x0101010101010101 << i for i in range(8)], dtype=np.uint64)
+] = np.array([np.uint64(0x0101010101010101) << np.uint8(i) for i in range(8)], dtype=np.uint64)
 
 BB_RANKS = [
     BB_RANK_1,
@@ -230,7 +230,7 @@ BB_RANKS = [
     BB_RANK_6,
     BB_RANK_7,
     BB_RANK_8
-] = np.array([0xff << (8 * i) for i in range(8)], dtype=np.uint64)
+] = np.array([np.uint64(0xff) << np.uint8(8 * i) for i in range(8)], dtype=np.uint64)
 
 
 BB_BACKRANKS = BB_RANK_1 | BB_RANK_8
