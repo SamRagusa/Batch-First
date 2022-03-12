@@ -16,23 +16,81 @@ from chess import BB_BETWEEN as OLD_BB_BETWEEN
 
 import numba as nb
 from numba import int32, int64, uint8, uint16, uint64, boolean, void, deferred_type, optional
-from numba import jit, njit, jitclass, vectorize
-from numba import cffi_support
+from numba import jit, njit, vectorize
+from numba.typed import Dict, List
+from numba.experimental import jitclass
+# from numba import cffi_support
 from cffi import FFI
 import time
+# import types
+from numba import types
 
 ffi = FFI()
 
 from collections import OrderedDict
 
-import khash_numba._khash_ffi as khash_ffi
 
-cffi_support.register_module(khash_ffi)
+from chess import BB_DIAG_ATTACKS as OLD_BB_DIAG_ATTACKS
+from chess import BB_FILE_ATTACKS as OLD_BB_FILE_ATTACKS
+from chess import BB_RANK_ATTACKS as OLD_BB_RANK_ATTACKS
 
-khash_init = khash_ffi.lib.khash_int2int_init
-khash_get = khash_ffi.lib.khash_int2int_get
-khash_set = khash_ffi.lib.khash_int2int_set
-khash_destroy = khash_ffi.lib.khash_int2int_destroy
+# @jit
+def test():
+    example_dict = Dict.empty(
+        key_type=types.uint64,
+        value_type=types.uint64,
+    )
+    diag_lst = List.empty_list(nb.typeof(example_dict))#[]
+    file_lst = List.empty_list(nb.typeof(example_dict))#[]
+    rank_lst = List.empty_list(nb.typeof(example_dict))#[]
+    # print(len(OLD_BB_DIAG_ATTACKS), len(OLD_BB_FILE_ATTACKS), len(OLD_BB_RANK_ATTACKS))
+    for j in range(64):
+        diag_lst.append(Dict.empty(types.uint64, types.uint64))
+        file_lst.append(Dict.empty(types.uint64, types.uint64))
+        rank_lst.append(Dict.empty(types.uint64, types.uint64))
+
+    for j, cur_dict in enumerate(OLD_BB_DIAG_ATTACKS):
+        # OLD_BB_DIAG_ATTACKS[j] = Dict.empty(
+        #     key_type=types.uint64,
+        #     value_type=types.uint64,
+        # )
+        for k, v in cur_dict.items():
+            diag_lst[j][np.uint64(k)] = np.uint64(v)
+
+        # diag_lst.append(OLD_BB_DIAG_ATTACKS[j])
+
+    for j, cur_dict in enumerate(OLD_BB_FILE_ATTACKS):
+        # OLD_BB_FILE_ATTACKS[j] = Dict.empty(
+        #     key_type=types.uint64,
+        #     value_type=types.uint64,
+        # )
+        for k, v in cur_dict.items():
+            file_lst[j][np.uint64(k)] = np.uint64(v)
+        # file_lst.append(OLD_BB_FILE_ATTACKS[j])
+
+    for j, cur_dict in enumerate(OLD_BB_RANK_ATTACKS):
+        # OLD_BB_RANK_ATTACKS[j] = Dict.empty(
+        #     key_type=types.uint64,
+        #     value_type=types.uint64,
+        # )
+        for k, v in cur_dict.items():
+            rank_lst[j][np.uint64(k)] = np.uint64(v)
+        # rank_lst.append(OLD_BB_RANK_ATTACKS[j])
+
+    return diag_lst, file_lst, rank_lst
+    # return OLD_BB_DIAG_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_RANK_ATTACKS
+
+OLD_BB_DIAG_ATTACKS, OLD_BB_FILE_ATTACKS,OLD_BB_RANK_ATTACKS =  test()
+print(list(OLD_BB_RANK_ATTACKS[4].keys()))
+
+# import khash_numba._khash_ffi as khash_ffi
+#
+# cffi_support.register_module(khash_ffi)
+#
+# khash_init = khash_ffi.lib.khash_int2int_init
+# khash_get = khash_ffi.lib.khash_int2int_get
+# khash_set = khash_ffi.lib.khash_int2int_set
+# khash_destroy = khash_ffi.lib.khash_int2int_destroy
 
 
 numpy_move_dtype = np.dtype([("from_square", np.uint8), ("to_square", np.uint8), ("promotion", np.uint8)])
@@ -42,36 +100,37 @@ MAX_MOVES_LOOKED_AT = 100
 EMPTY_MOVE_ARRAY = np.zeros([MAX_MOVES_LOOKED_AT], numpy_move_dtype)
 
 
-@njit
-def create_index_table(ids):
-    table = khash_init()
-
-    for j in range(ids.shape[0]):
-        khash_set(table, ids[j], j)
-    return table
-
-
-
-def get_table_and_array_for_set_of_dicts(dicts):
-    for j in range(len(dicts)):
-        if not j:
-            all_keys = np.array([i for i in dicts[j].keys()], dtype=np.uint64)
-        else:
-            all_keys = np.concatenate([all_keys, np.array([i for i in dicts[j].keys()], dtype=np.uint64)])
-
-    unique_keys = sorted(set(all_keys))
-
-    # The sorted is so that the index of 0 will always be 0
-    index_lookup_table = create_index_table(np.array(sorted([np.uint64(key) for key in unique_keys]), dtype=np.uint64))
-
-    array = np.zeros(shape=[len(dicts), len(unique_keys)], dtype=np.uint64)
-
-    for square_num, dict in enumerate(dicts):
-        for key, value in dict.items():
-            array[square_num][
-                khash_get(ffi.cast("void *", index_lookup_table), np.uint64(key), np.uint64(0))] = np.uint64(value)
-
-    return index_lookup_table, array
+# @njit
+# def create_index_table(ids):
+#     table = khash_init()
+#
+#     for j in range(ids.shape[0]):
+#         khash_set(table, ids[j], j)
+#     return table
+#
+#
+#
+# def get_table_and_array_for_set_of_dicts(dicts):
+#     print(dicts)
+#     for j in range(len(dicts)):
+#         if not j:
+#             all_keys = np.array([i for i in dicts[j].keys()], dtype=np.uint64)
+#         else:
+#             all_keys = np.concatenate([all_keys, np.array([i for i in dicts[j].keys()], dtype=np.uint64)])
+#
+#     unique_keys = sorted(set(all_keys))
+#
+#     # The sorted is so that the index of 0 will always be 0
+#     index_lookup_table = create_index_table(np.array(sorted([np.uint64(key) for key in unique_keys]), dtype=np.uint64))
+#
+#     array = np.zeros(shape=[len(dicts), len(unique_keys)], dtype=np.uint64)
+#
+#     for square_num, dict in enumerate(dicts):
+#         for key, value in dict.items():
+#             array[square_num][
+#                 khash_get(ffi.cast("void *", index_lookup_table), np.uint64(key), np.uint64(0))] = np.uint64(value)
+#
+#     return index_lookup_table, array
 
 
 
@@ -84,9 +143,9 @@ BB_FILE_MASKS = np.array(OLD_BB_FILE_MASKS, dtype=np.uint64)
 BB_RANK_MASKS = np.array(OLD_BB_RANK_MASKS, dtype=np.uint64)
 
 
-DIAG_ATTACK_INDEX_LOOKUP_TABLE, DIAG_ATTACK_ARRAY = get_table_and_array_for_set_of_dicts(OLD_BB_DIAG_ATTACKS)
-FILE_ATTACK_INDEX_LOOKUP_TABLE, FILE_ATTACK_ARRAY = get_table_and_array_for_set_of_dicts(OLD_BB_FILE_ATTACKS)
-RANK_ATTACK_INDEX_LOOKUP_TABLE, RANK_ATTACK_ARRAY = get_table_and_array_for_set_of_dicts(OLD_BB_RANK_ATTACKS)
+# DIAG_ATTACK_INDEX_LOOKUP_TABLE, DIAG_ATTACK_ARRAY = get_table_and_array_for_set_of_dicts(OLD_BB_DIAG_ATTACKS)
+# FILE_ATTACK_INDEX_LOOKUP_TABLE, FILE_ATTACK_ARRAY = get_table_and_array_for_set_of_dicts(OLD_BB_FILE_ATTACKS)
+# RANK_ATTACK_INDEX_LOOKUP_TABLE, RANK_ATTACK_ARRAY = get_table_and_array_for_set_of_dicts(OLD_BB_RANK_ATTACKS)
 
 
 
@@ -150,7 +209,7 @@ class BoardState:
 
 
 
-@njit(BoardState.class_type.instance_type(BoardState.class_type.instance_type))
+@njit#(BoardState.class_type.instance_type(BoardState.class_type.instance_type))
 def copy_board_state(board_state):
     return BoardState(board_state.pawns,
                       board_state.knights,
@@ -167,6 +226,21 @@ def copy_board_state(board_state):
                       board_state.halfmove_clock,
                       board_state.cur_hash)
 
+def flipped_board_state(board_state):
+    return BoardState(flip_vertically(board_state.pawns),
+                      flip_vertically(board_state.knights),
+                      flip_vertically(board_state.bishops),
+                      flip_vertically(board_state.rooks),
+                      flip_vertically(board_state.queens),
+                      flip_vertically(board_state.kings),
+                      flip_vertically(board_state.occupied_w),
+                      flip_vertically(board_state.occupied_b),
+                      flip_vertically(board_state.occupied),
+                      not board_state.turn,
+                      flip_vertically(board_state.castling_rights),
+                      None if board_state.ep_square is None else square_mirror(board_state.ep_square),
+                      board_state.halfmove_clock,
+                      board_state.cur_hash)
 
 
 
@@ -193,7 +267,7 @@ class Move:
         self.promotion = promotion
 
 
-@njit(boolean(Move.class_type.instance_type, Move.class_type.instance_type))
+@njit#(boolean(Move.class_type.instance_type, Move.class_type.instance_type))
 def move_objects_equal(move1, move2):
     """
     Checks if the two given move objects are equal.
@@ -287,6 +361,13 @@ def vectorized_flip_vertically(bb):
     bb = ( bb >> 32) | ( bb << 32)
     return bb
 
+@njit(uint64(uint64))
+def flip_vertically(bb):
+    bb = ((bb >>  8) & flip_vert_const_1) | ((bb & flip_vert_const_1) <<  8)
+    bb = ((bb >> 16) & flip_vert_const_2) | ((bb & flip_vert_const_2) << 16)
+    bb = ( bb >> 32) | ( bb << 32)
+    return bb
+
 
 # THIS IS VERY SLOW AND A TEMPORARY IMPLEMENTATION (feel free to replace it!)
 @njit(uint8(uint64))
@@ -304,7 +385,7 @@ def msb(n):
 def scan_reversed(bb):
     for index in range(BB_SQUARES.shape[0]):
         if bb & BB_SQUARES[index]:
-            yield index
+            yield np.uint8(index)
             bb ^= BB_SQUARES[index]
     return
 
@@ -344,7 +425,10 @@ def vectorized_popcount(n):
 # def popcount_unpack_bits(n):
 #     return np.sum(np.unpackbits(np.frombuffer(n, dtype=np.uint8)))
 
-
+@nb.vectorize([nb.uint8(nb.uint8)], nopython=True)
+def square_mirror(square):
+    """Mirrors the square vertically."""
+    return square ^ 0x38
 
 @njit(uint8(uint8))
 def square_file(square):
@@ -358,20 +442,32 @@ def square_rank(square):
 def shift_down(b):
     return b >> 8
 
-@njit(uint64(uint64))
+@njit#(uint64(uint64))
 def shift_up(b):
     return b << 8
 
-@njit(uint64(uint64))
+# @njit#(uint64(uint64))
+# def shift_right(b):
+#     return b << 1
+#
+# @njit#(uint64(uint64))
+# def shift_left(b):
+#     return b >> 1
+
+
+NOT_BB_FILE_A = ~BB_FILE_A
+NOT_BB_FILE_H = ~BB_FILE_H
+
+@njit(nb.uint64(nb.uint64))
 def shift_right(b):
-    return b << 1
+    return (b << 1) & NOT_BB_FILE_A
 
-@njit(uint64(uint64))
+@njit(nb.uint64(nb.uint64))
 def shift_left(b):
-    return b >> 1
+    return (b >> 1) & NOT_BB_FILE_H
 
 
-@njit
+@njit#
 def any(iterable):
     for _ in iterable:
         return True
@@ -380,7 +476,7 @@ def any(iterable):
 
 
 
-@njit(Move.class_type.instance_type(uint8, uint8))
+@njit#(Move.class_type.instance_type(uint8, uint8))
 def create_move(from_square, to_square):
     """
     For use when not using promotions
@@ -485,7 +581,7 @@ def create_board_state_from_fen(fen):
                       np.uint64(temp_board.occupied_co[chess.WHITE]),
                       np.uint64(temp_board.occupied_co[chess.BLACK]),
                       np.uint64(temp_board.occupied),
-                      np.bool(temp_board.turn),
+                      np.bool_(temp_board.turn),
                       np.uint64(temp_board.castling_rights),
                       None if temp_board.ep_square is None else np.uint8(temp_board.ep_square),
                       np.uint8(temp_board.halfmove_clock),
@@ -493,7 +589,7 @@ def create_board_state_from_fen(fen):
 
 
 
-@njit(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
+@njit#(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
 def is_zeroing(board_state, move):
     """
     Checks if the given pseudo-legal move is a capture or pawn move.
@@ -506,7 +602,7 @@ def is_zeroing(board_state, move):
 
 
 # This should likely not be used/needed long term
-@njit(Move.class_type.instance_type(BoardState.class_type.instance_type, Move.class_type.instance_type))
+@njit#(Move.class_type.instance_type(BoardState.class_type.instance_type, Move.class_type.instance_type))
 def _to_chess960(board_state, move):
     if move.from_square == E1 and board_state.kings & BB_E1:
         if move.to_square == G1 and not board_state.rooks & BB_G1:
@@ -521,7 +617,7 @@ def _to_chess960(board_state, move):
     return move
 
 
-@njit(uint64(BoardState.class_type.instance_type, Move.class_type.instance_type))
+@njit#(uint64(BoardState.class_type.instance_type, Move.class_type.instance_type))
 def push_with_hash_update(board_state, move):
     # self.hash_stack.append(board_state.cur_hash)
     #
@@ -730,17 +826,48 @@ def push_with_hash_update(board_state, move):
     return board_state.cur_hash
 
 
-@njit(BoardState.class_type.instance_type(BoardState.class_type.instance_type, Move.class_type.instance_type))
+@njit#(BoardState.class_type.instance_type(BoardState.class_type.instance_type, Move.class_type.instance_type))
 def copy_push(board_state, move):
     to_push_move = copy_board_state(board_state)
     push_with_hash_update(to_push_move, move)
     return to_push_move
 
 
+# # WHY AM I TAKING OCCUPIED IN AS A PARAM INSTEAD OF JUST DOING IT ON board_state.occupied####################
+# # SHOULD VERY LIKELY DO THIS NOT ALL AT ONCE, INSTEAD ONE AT A TIME BECAUSE IF ONE ATTACKER EXISTS THEN IT'S CHECK (for seeing if board is in check)
+# @njit#(uint64(BoardState.class_type.instance_type, boolean, uint8, uint64))
+# def _attackers_mask(board_state, color, square, occupied):
+#     queens_and_rooks = board_state.queens | board_state.rooks
+#     queens_and_bishops = board_state.queens | board_state.bishops
+#
+#     if color == TURN_WHITE:
+#         color_index = BLACK
+#     else:
+#         color_index = WHITE
+#     attackers = (
+#         (BB_KING_ATTACKS[square] & board_state.kings) |
+#         (BB_KNIGHT_ATTACKS[square] & board_state.knights) |
+#         (RANK_ATTACK_ARRAY[square][khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[square] & occupied, 0)] & queens_and_rooks) |
+#         (FILE_ATTACK_ARRAY[square][khash_get(FILE_ATTACK_INDEX_LOOKUP_TABLE, BB_FILE_MASKS[square] & occupied, 0)] & queens_and_rooks) |
+#         (DIAG_ATTACK_ARRAY[square][khash_get(DIAG_ATTACK_INDEX_LOOKUP_TABLE, BB_DIAG_MASKS[square] & occupied, 0)] & queens_and_bishops) |
+#         (BB_PAWN_ATTACKS[color_index][square] & board_state.pawns))
+#
+#     if color == TURN_WHITE:
+#         return attackers & board_state.occupied_w
+#     return attackers & board_state.occupied_b
+
 # WHY AM I TAKING OCCUPIED IN AS A PARAM INSTEAD OF JUST DOING IT ON board_state.occupied####################
 # SHOULD VERY LIKELY DO THIS NOT ALL AT ONCE, INSTEAD ONE AT A TIME BECAUSE IF ONE ATTACKER EXISTS THEN IT'S CHECK (for seeing if board is in check)
 @njit#(uint64(BoardState.class_type.instance_type, boolean, uint8, uint64))
-def _attackers_mask(board_state, color, square, occupied):
+def _attackers_mask(board_state, color, square, occupied, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
+    # rank_pieces = OLD_BB_RANK_MASKS[square] & occupied
+    # file_pieces = OLD_BB_FILE_MASKS[square] & occupied
+    # diag_pieces = OLD_BB_DIAG_MASKS[square] & occupied
+    rank_pieces = BB_RANK_MASKS[square] & occupied
+    file_pieces = BB_FILE_MASKS[square] & occupied
+    diag_pieces = BB_DIAG_MASKS[square] & occupied
+
+
     queens_and_rooks = board_state.queens | board_state.rooks
     queens_and_bishops = board_state.queens | board_state.bishops
 
@@ -748,22 +875,24 @@ def _attackers_mask(board_state, color, square, occupied):
         color_index = BLACK
     else:
         color_index = WHITE
+    # print(type(OLD_BB_DIAG_ATTACKS[square][diag_pieces]), type(queens_and_rooks))
     attackers = (
         (BB_KING_ATTACKS[square] & board_state.kings) |
         (BB_KNIGHT_ATTACKS[square] & board_state.knights) |
-        (RANK_ATTACK_ARRAY[square][khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[square] & occupied, 0)] & queens_and_rooks) |
-        (FILE_ATTACK_ARRAY[square][khash_get(FILE_ATTACK_INDEX_LOOKUP_TABLE, BB_FILE_MASKS[square] & occupied, 0)] & queens_and_rooks) |
-        (DIAG_ATTACK_ARRAY[square][khash_get(DIAG_ATTACK_INDEX_LOOKUP_TABLE, BB_DIAG_MASKS[square] & occupied, 0)] & queens_and_bishops) |
+        (OLD_BB_RANK_ATTACKS[square][rank_pieces] & queens_and_rooks) |
+        (OLD_BB_FILE_ATTACKS[square][file_pieces] & queens_and_rooks) |
+        (OLD_BB_DIAG_ATTACKS[square][diag_pieces] & queens_and_bishops) |
+        # (RANK_ATTACK_ARRAY[square][khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[square] & occupied, 0)] & queens_and_rooks) |
+        # (FILE_ATTACK_ARRAY[square][khash_get(FILE_ATTACK_INDEX_LOOKUP_TABLE, BB_FILE_MASKS[square] & occupied, 0)] & queens_and_rooks) |
+        # (DIAG_ATTACK_ARRAY[square][khash_get(DIAG_ATTACK_INDEX_LOOKUP_TABLE, BB_DIAG_MASKS[square] & occupied, 0)] & queens_and_bishops) |
         (BB_PAWN_ATTACKS[color_index][square] & board_state.pawns))
 
     if color == TURN_WHITE:
         return attackers & board_state.occupied_w
     return attackers & board_state.occupied_b
 
-
-
 @njit#(uint64(BoardState.class_type.instance_type, uint8))
-def attacks_mask(board_state, square):
+def attacks_mask(board_state, square, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
     bb_square = BB_SQUARES[square]
 
     if bb_square & board_state.pawns:
@@ -778,18 +907,22 @@ def attacks_mask(board_state, square):
     else:
         attacks = np.uint64(0)
         if bb_square & board_state.bishops or bb_square & board_state.queens:
-            attacks = DIAG_ATTACK_ARRAY[square][
-                khash_get(DIAG_ATTACK_INDEX_LOOKUP_TABLE, BB_DIAG_MASKS[square] & board_state.occupied, 0)]
+            attacks = OLD_BB_DIAG_ATTACKS[square][BB_DIAG_MASKS[square] & board_state.occupied]
+            # attacks = DIAG_ATTACK_ARRAY[square][OLD_BB_DIAG_MASKS[square] & board_state.occupied]
+                # khash_get(DIAG_ATTACK_INDEX_LOOKUP_TABLE, BB_DIAG_MASKS[square] & board_state.occupied, 0)]
         if bb_square & board_state.rooks or bb_square & board_state.queens:
 
-            attacks |= (RANK_ATTACK_ARRAY[square][
-                            khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[square] & board_state.occupied,0)] |
-                        FILE_ATTACK_ARRAY[square][
-                            khash_get(FILE_ATTACK_INDEX_LOOKUP_TABLE, BB_FILE_MASKS[square] & board_state.occupied, 0)])
+            attacks |= (OLD_BB_RANK_ATTACKS[square][BB_RANK_MASKS[square] & board_state.occupied] |
+                        OLD_BB_FILE_ATTACKS[square][BB_FILE_MASKS[square] & board_state.occupied])
+
+            # attacks |= (RANK_ATTACK_ARRAY[square][
+            #                 khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[square] & board_state.occupied,0)] |
+            #             FILE_ATTACK_ARRAY[square][
+            #                 khash_get(FILE_ATTACK_INDEX_LOOKUP_TABLE, BB_FILE_MASKS[square] & board_state.occupied, 0)])
         return attacks
 
 
-@njit((BoardState.class_type.instance_type, uint64, uint64))
+@njit#((BoardState.class_type.instance_type, uint64, uint64))
 def generate_pseudo_legal_ep(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
     if board_state.ep_square is None:
         return
@@ -817,13 +950,23 @@ def generate_pseudo_legal_ep(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
 
 
 @njit#(uint64(BoardState.class_type.instance_type, uint8))
-def _slider_blockers(board_state, king):
+def _slider_blockers(board_state, king, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
     ###################################################### THESE CAN GO IN THE BELOW snipers INITIALIZATION
     rooks_and_queens = board_state.rooks | board_state.queens
     bishops_and_queens = board_state.bishops | board_state.queens
-    snipers = ((RANK_ATTACK_ARRAY[king][0] & rooks_and_queens) |
-               (FILE_ATTACK_ARRAY[king][0] & rooks_and_queens) |
-               (DIAG_ATTACK_ARRAY[king][0] & bishops_and_queens))
+    # print(type(king), king)
+    # a = OLD_BB_RANK_ATTACKS[king][np.uint64(0)]
+    # b = OLD_BB_FILE_ATTACKS[king][np.uint64(0)]
+    # print(type(OLD_BB_RANK_ATTACKS[king][0]),type(OLD_BB_FILE_ATTACKS[king][0]), type(OLD_BB_DIAG_ATTACKS[king][0]), type(rooks_and_queens))
+    # king = np.int16(king)
+    # print(OLD_BB_RANK_ATTACKS[king][0], type(king))
+    # c = OLD_BB_DIAG_ATTACKS[king][np.uint64(0)]
+    snipers = ((OLD_BB_RANK_ATTACKS[king][np.uint64(0)] & rooks_and_queens) |
+               (OLD_BB_FILE_ATTACKS[king][np.uint64(0)] & rooks_and_queens) |
+               (OLD_BB_DIAG_ATTACKS[king][np.uint64(0)] & bishops_and_queens))
+    # snipers = ((RANK_ATTACK_ARRAY[king][0] & rooks_and_queens) |
+    #            (FILE_ATTACK_ARRAY[king][0] & rooks_and_queens) |
+    #            (DIAG_ATTACK_ARRAY[king][0] & bishops_and_queens))
 
     blockers = 0
     if board_state.turn == TURN_WHITE:
@@ -846,7 +989,7 @@ def _slider_blockers(board_state, king):
         return blockers & board_state.occupied_b
 
 
-@njit(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
+@njit#(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
 def is_castling(board_state, move):
     """
     Checks if the given pseudo-legal move is a castling move.
@@ -869,15 +1012,15 @@ def is_castling(board_state, move):
 
 
 @njit#(boolean(BoardState.class_type.instance_type, uint64, uint64))
-def _attacked_for_king(board_state, path, occupied):
+def _attacked_for_king(board_state, path, occupied, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
     for sq in scan_reversed(path):
-        if _attackers_mask(board_state, not board_state.turn, sq, occupied):
+        if _attackers_mask(board_state, not board_state.turn, sq, occupied, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
             return True
     return False
 
 
 @njit#(uint64(BoardState.class_type.instance_type, uint64, uint8))
-def _castling_uncovers_rank_attack(board_state, rook_bb, king_to):
+def _castling_uncovers_rank_attack(board_state, rook_bb, king_to, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
     """
     Test the special case where we castle and our rook shielded us from
     an attack, so castling would be into check.
@@ -887,7 +1030,12 @@ def _castling_uncovers_rank_attack(board_state, rook_bb, king_to):
         sliders = (board_state.queens | board_state.rooks) & board_state.occupied_b
     else:
         sliders = (board_state.queens | board_state.rooks) & board_state.occupied_w
-    return RANK_ATTACK_ARRAY[king_to][khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, rank_pieces, 0)] & sliders
+    # return RANK_ATTACK_ARRAY[king_to][khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, rank_pieces, 0)] & sliders
+    # a = OLD_BB_RANK_ATTACKS[rank_pieces]
+    # b = OLD_BB_RANK_ATTACKS[king_to]
+    # c = b[a]
+    return OLD_BB_RANK_ATTACKS[king_to][rank_pieces] & sliders
+    # return c & sliders
 
 
 @njit#(Move.class_type.instance_type(BoardState.class_type.instance_type, uint8, uint8))
@@ -910,18 +1058,18 @@ def _from_chess960(board_state, from_square, to_square):  # , promotion=None):
 
 
 @njit#((BoardState.class_type.instance_type, uint64, uint64))
-def generate_castling_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
+def generate_castling_moves(board_state, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS, from_mask=BB_ALL, to_mask=BB_ALL):
     if board_state.turn:
-        backrank = BB_RANK_1 if board_state.turn == TURN_WHITE else BB_RANK_8
+        backrank = BB_RANK_1 #if board_state.turn == TURN_WHITE else BB_RANK_8
         king = board_state.occupied_w & board_state.kings & backrank & from_mask
     else:
-        backrank = BB_RANK_1 if board_state.turn == TURN_WHITE else BB_RANK_8
+        backrank = BB_RANK_8 # if board_state.turn == TURN_WHITE else BB_RANK_8
         king = board_state.occupied_b & board_state.kings & backrank & from_mask
 
     king = king & -king
 
     ###################(on second thought this comment might be wrong when doing things like checking for legality of moves) REALLY SHOULD CHANGE THIS STUFF BECAUSE IT'S CHECKING FOR THINGS LIKE IF THERE IS A KING AT ALL ON THE BOARD
-    if not king or _attacked_for_king(board_state, king, board_state.occupied):
+    if not king or _attacked_for_king(board_state, king, board_state.occupied, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
         return
 
     bb_c = BB_FILE_C & backrank
@@ -950,15 +1098,15 @@ def generate_castling_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
                 empty_for_king = BB_BETWEEN[msb(king)][king_to] | bb_g
 
         if not ((board_state.occupied ^ king ^ rook) & (empty_for_king | empty_for_rook) or
-                    _attacked_for_king(board_state, empty_for_king, board_state.occupied ^ king) or
-                    _castling_uncovers_rank_attack(board_state, rook, king_to)):
+                    _attacked_for_king(board_state, empty_for_king, board_state.occupied ^ king, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS) or
+                    _castling_uncovers_rank_attack(board_state, rook, king_to, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS)):
             yield _from_chess960(board_state, msb(king), candidate)
 
     return
 
 
-@njit((BoardState.class_type.instance_type, uint64, uint64))
-def generate_pseudo_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
+@njit#((BoardState.class_type.instance_type, uint64, uint64))
+def generate_pseudo_legal_moves(board_state, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS, from_mask=BB_ALL, to_mask=BB_ALL):
     if board_state.turn == TURN_WHITE:
         cur_turn_occupied = board_state.occupied_w
         opponent_occupied = board_state.occupied_b
@@ -973,13 +1121,13 @@ def generate_pseudo_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
 
     for from_square in scan_reversed(non_pawns):
 
-        moves = attacks_mask(board_state, from_square) & ~our_pieces & to_mask
+        moves = attacks_mask(board_state, from_square, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS) & ~our_pieces & to_mask
         for to_square in scan_reversed(moves):
             yield create_move(from_square, to_square)
 
     # Generate castling moves.
     if from_mask & board_state.kings:
-        for move in generate_castling_moves(board_state, from_mask, to_mask):
+        for move in generate_castling_moves(board_state, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS, from_mask, to_mask):
             yield move
 
     # The remaining moves are all pawn moves.
@@ -1053,8 +1201,8 @@ def generate_pseudo_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
     return
 
 
-@njit((BoardState.class_type.instance_type, uint8, uint64, uint64, uint64))
-def _generate_evasions(board_state, king, checkers, from_mask=BB_ALL, to_mask=BB_ALL):
+@njit#((BoardState.class_type.instance_type, uint8, uint64, uint64, uint64))
+def _generate_evasions(board_state, king, checkers, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS, from_mask=BB_ALL, to_mask=BB_ALL):
     sliders = checkers & (board_state.bishops | board_state.rooks | board_state.queens)
 
     attacked = np.uint64(0)
@@ -1075,7 +1223,7 @@ def _generate_evasions(board_state, king, checkers, from_mask=BB_ALL, to_mask=BB
         target = BB_BETWEEN[king][checker] | checkers
 
 
-        for move in generate_pseudo_legal_moves(board_state, ~board_state.kings & from_mask, target & to_mask):
+        for move in generate_pseudo_legal_moves(board_state, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS, ~board_state.kings & from_mask, target & to_mask):
             yield move
 
         # Capture the checking pawn en passant (but avoid yielding duplicate moves).
@@ -1093,7 +1241,7 @@ def _generate_evasions(board_state, king, checkers, from_mask=BB_ALL, to_mask=BB
     return
 
 
-@njit(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
+@njit#(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
 def is_en_passant(board_state, move):
     """
     Checks if the given pseudo-legal move is an en passant capture.
@@ -1114,15 +1262,16 @@ def is_en_passant(board_state, move):
     return False
 
 
-@njit(uint64(BoardState.class_type.instance_type, boolean, uint8))
-def pin_mask(board_state, color, square):
+@njit#(uint64(BoardState.class_type.instance_type, boolean, uint8))
+def pin_mask(board_state, color, square, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
     if color:
         king = msb(board_state.occupied_w & board_state.kings)
     else:
         king = msb(board_state.occupied_b & board_state.kings)
 
     square_mask = BB_SQUARES[square]
-    for attacks, sliders in zip((FILE_ATTACK_ARRAY, RANK_ATTACK_ARRAY, DIAG_ATTACK_ARRAY), (
+    # for attacks, sliders in zip((FILE_ATTACK_ARRAY, RANK_ATTACK_ARRAY, DIAG_ATTACK_ARRAY), (
+    for attacks, sliders in zip((OLD_BB_FILE_ATTACKS, OLD_BB_RANK_ATTACKS, OLD_BB_DIAG_ATTACKS), (
         board_state.rooks | board_state.queens, board_state.rooks | board_state.queens,
         board_state.bishops | board_state.queens)):
         rays = attacks[king][0]
@@ -1141,8 +1290,8 @@ def pin_mask(board_state, color, square):
     return BB_ALL
 
 
-@njit(boolean(BoardState.class_type.instance_type, uint8, uint8))
-def _ep_skewered(board_state, king, capturer):
+@njit#(boolean(BoardState.class_type.instance_type, uint8, uint8))
+def _ep_skewered(board_state, king, capturer, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
     """
     Handle the special case where the king would be in check, if the pawn and its capturer disappear from the rank.
 
@@ -1157,8 +1306,10 @@ def _ep_skewered(board_state, king, capturer):
 
         # Horizontal attack on the fifth or fourth rank.
         horizontal_attackers = board_state.occupied_b & (board_state.rooks | board_state.queens)
-        if RANK_ATTACK_ARRAY[king][khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[king] & occupancy, 0)] & horizontal_attackers:
+        if OLD_BB_RANK_ATTACKS[king][BB_RANK_MASKS[king] & occupancy] & horizontal_attackers:
             return True
+        # if RANK_ATTACK_ARRAY[king][khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[king] & occupancy, 0)] & horizontal_attackers:
+        #     return True
 
     else:
         last_double = temp_ep_square + 8
@@ -1166,14 +1317,16 @@ def _ep_skewered(board_state, king, capturer):
 
         # Horizontal attack on the fifth or fourth rank.
         horizontal_attackers = board_state.occupied_w & (board_state.rooks | board_state.queens)
-        if RANK_ATTACK_ARRAY[king][
-            khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[king] & occupancy, 0)] & horizontal_attackers:
+        if OLD_BB_RANK_ATTACKS[king][BB_RANK_MASKS[king] & occupancy] & horizontal_attackers:
             return True
+        # if RANK_ATTACK_ARRAY[king][
+        #     khash_get(RANK_ATTACK_INDEX_LOOKUP_TABLE, BB_RANK_MASKS[king] & occupancy, 0)] & horizontal_attackers:
+        #     return True
 
     return False
 
 
-@njit(boolean(BoardState.class_type.instance_type))
+@njit#(boolean(BoardState.class_type.instance_type))
 def is_in_check(board_state):
     if board_state.turn == TURN_WHITE:
         king = msb(board_state.occupied_w & board_state.kings)
@@ -1183,65 +1336,73 @@ def is_in_check(board_state):
         return bool(_attackers_mask(board_state, TURN_WHITE, king, board_state.occupied))
 
 
-@njit(boolean(BoardState.class_type.instance_type, uint8, uint64, Move.class_type.instance_type))
-def _is_safe(board_state, king, blockers, move):
-
+# @njit#(boolean(BoardState.class_type.instance_type, uint8, uint64, Move.class_type.instance_type))
+# @jit
+def _is_safe(board_state, king, blockers, move, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
+    print(type(move.from_square), type(king))
     if move.from_square == king:
         if is_castling(board_state, move):
+            print("DLKJSLDKFJSDLKJFDSDDDDDDDDDDDDDDDDDDDD")
             return True
         else:
-            return not bool(_attackers_mask(board_state, not board_state.turn, move.to_square, board_state.occupied))
+            return not bool(_attackers_mask(board_state, not board_state.turn, move.to_square, board_state.occupied, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS))
 
     elif is_en_passant(board_state, move):  # THIS SHOULD REALLY BE DONE WITHIN THIS FUNCTION
-        return (pin_mask(board_state, board_state.turn, move.from_square) & BB_SQUARES[move.to_square] and
-                not _ep_skewered(board_state, king, move.from_square))
+        pin = pin_mask(board_state, board_state.turn, move.from_square, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS)
+        skewered = _ep_skewered(board_state, king, move.from_square, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS)
+        return (pin & BB_SQUARES[move.to_square] and
+                not skewered)
     else:
+        print("AAAAAAAAAAAA")
+        print(type(BB_RAYS[move.from_square][move.to_square]))
+        print(type(BB_SQUARES[king]))
         return (not blockers & BB_SQUARES[move.from_square] or
                 BB_RAYS[move.from_square][move.to_square] & BB_SQUARES[king])
 
 
 
-@njit((BoardState.class_type.instance_type, uint64, uint64), nogil=True)
-def generate_legal_moves(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
+# @njit#((BoardState.class_type.instance_type, uint64, uint64), nogil=True)
+def generate_legal_moves(board_state, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS, from_mask=BB_ALL, to_mask=BB_ALL):
 
     if board_state.turn == TURN_WHITE:
         king = msb(board_state.kings & board_state.occupied_w)
     else:
         king = msb(board_state.kings & board_state.occupied_b)
-    blockers = _slider_blockers(board_state, king)
-    checkers = _attackers_mask(board_state, not board_state.turn, king, board_state.occupied)
+    blockers = _slider_blockers(board_state, king, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS)
+    checkers = _attackers_mask(board_state, not board_state.turn, king, board_state.occupied, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS)
     #If in check
     if checkers:#If no moves are found it needs to be passed along that the board is in check, so it doesn't need to be computed again directly afterwards
-        for move in _generate_evasions(board_state, king, checkers, from_mask, to_mask):
-            if _is_safe(board_state, king, blockers, move):
+        # print("OH NOIODIJFOSJFKLDSJ")
+        for move in _generate_evasions(board_state, king, checkers,OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS,  from_mask, to_mask):
+            if _is_safe(board_state, king, blockers, move, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
                 yield move
     else:#If no moves are found it needs to be passed along that the board is not in check, so it doesn't need to be computed again directly afterwards
-        for move in generate_pseudo_legal_moves(board_state, from_mask, to_mask):
-            if _is_safe(board_state, king, blockers, move):
+        for move in generate_pseudo_legal_moves(board_state, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS, from_mask, to_mask):
+            if _is_safe(board_state, king, blockers, move, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
                 yield move
 
 
 
-@njit(nogil=True)#((BoardState.class_type.instance_type, uint64, uint64), nogil=True)
-def create_legal_move_struct(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
-    """
-    Creates a NumPy structued array of the legal moves for the given BoardState object.  If no moves exist,
-    it will return None.
-    """
-
-    move_counter = 0
-    for move in generate_legal_moves(board_state, from_mask, to_mask):
-        if move_counter == 0:
-            move_array = np.zeros_like(EMPTY_MOVE_ARRAY)
-        move_array[move_counter].to_square = move.to_square
-        move_array[move_counter].from_square = move.from_square
-        move_array[move_counter].promotion = move.promotion
-        move_counter += 1
-
-    if move_counter == 0:
-        return None
-    else:
-        return move_array[:move_counter]
+# @njit(nogil=True)#((BoardState.class_type.instance_type, uint64, uint64), nogil=True)
+# def create_legal_move_struct(board_state, from_mask=BB_ALL, to_mask=BB_ALL):
+#     """
+#     Creates a NumPy structued array of the legal moves for the given BoardState object.  If no moves exist,
+#     it will return None.
+#     """
+#
+#     move_counter = 0
+#     for move in generate_legal_moves(board_state, from_mask, to_mask):
+#         if move_counter == 0:
+#             move_array = np.zeros_like(EMPTY_MOVE_ARRAY)
+#         move_array[move_counter].to_square = move.to_square
+#         move_array[move_counter].from_square = move.from_square
+#         move_array[move_counter].promotion = move.promotion
+#         move_counter += 1
+#
+#     if move_counter == 0:
+#         return None
+#     else:
+#         return move_array[:move_counter]
 
 
 
@@ -1287,17 +1448,17 @@ def create_legal_move_struct_without_move(board_state, move_not_to_make, from_ma
         return move_array[:move_counter]
 
 
-@njit(boolean(BoardState.class_type.instance_type), nogil=True)
-def has_legal_move(board_state):
-    """
-    Checks if there exists a legal move
-    """
-    return any(generate_legal_moves(board_state, BB_ALL, BB_ALL))
+# @njit#(boolean(BoardState.class_type.instance_type), nogil=True)
+# def has_legal_move(board_state):
+#     """
+#     Checks if there exists a legal move
+#     """
+#     return any(generate_legal_moves(board_state, BB_ALL, BB_ALL))
 
 
 
-@njit(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
-def is_into_check(board_state, move):
+@njit#(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
+def is_into_check(board_state, move, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
     """
     Checks if the given move would leave the king in check or put it into
     check. The move must be at least pseudo legal.  This function was adapted from the Python-Chess version of it.
@@ -1318,13 +1479,13 @@ def is_into_check(board_state, move):
             if move_objects_equal(move, temp_move):
                 return True
 
-    return not _is_safe(board_state, king, _slider_blockers(board_state, king), move)
+    return not _is_safe(board_state, king, _slider_blockers(board_state, king), move, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS)
 
 
 
 
-@njit(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
-def is_pseudo_legal(board_state, move):
+@njit#(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
+def is_pseudo_legal(board_state, move, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
     """
     Checks if a given move is pseudo legal.  This function was adapted from the Python-Chess version.
     """
@@ -1360,7 +1521,7 @@ def is_pseudo_legal(board_state, move):
         ####This should not be taking in BB_ALL and instead take in from_mask and to_mask,
         # but I haven't tested or looked into if that correct yet, and I want to get this commit out so for now
         # this slightly slower version will work wine
-        for temp_move in generate_castling_moves(board_state, BB_ALL, BB_ALL):
+        for temp_move in generate_castling_moves(board_state, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS, BB_ALL, BB_ALL):
             if move_objects_equal(move, temp_move):
                 return True
 
@@ -1386,12 +1547,12 @@ def is_pseudo_legal(board_state, move):
 
 
 
-@njit(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
-def is_legal_move(board_state, move):
+@njit#(boolean(BoardState.class_type.instance_type, Move.class_type.instance_type))
+def is_legal_move(board_state, move, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
     """
     Checks if a given move is legal for the given board.
     """
-    return is_pseudo_legal(board_state, move) and not is_into_check(board_state, move)
+    return is_pseudo_legal(board_state, move, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS) and not is_into_check(board_state, move, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS)
 
 
 
@@ -1428,14 +1589,30 @@ def generate_move_to_enumeration_dict():
     return possible_moves
 
 
-@njit(uint64(BoardState.class_type.instance_type, uint8))
-def jitted_perft_test(board_state, depth):
+# @njit#(uint64(BoardState.class_type.instance_type, uint8))
+def jitted_perft_test(board_state, depth, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS):
     if depth == 0:
         return np.uint64(1)
 
     num_nodes = np.uint64(0)
 
-    for move in generate_legal_moves(board_state, BB_ALL, BB_ALL):
-        num_nodes += jitted_perft_test(copy_push(board_state, move), depth - 1)
+    for move in generate_legal_moves(board_state, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS, BB_ALL, BB_ALL):
+        # print(chess.Move(move.from_square, move.to_square, move.promotion))
+        num_nodes += jitted_perft_test(copy_push(board_state, move), depth - 1, OLD_BB_RANK_ATTACKS, OLD_BB_FILE_ATTACKS, OLD_BB_DIAG_ATTACKS)
 
     return num_nodes
+
+
+if __name__ == "__main__":
+    starting_time = time.time()
+    perft_results = jitted_perft_test(
+        # flipped_board_state(create_board_state_from_fen('rnbqkbnr/pppppppp/8/8/8/7N/PPPPPPPP/RNBQKB1R b KQkq - 1 1')),
+        # create_board_state_from_fen('rnbqkb1r/pppppppp/7n/8/8/7N/PPPPPPPP/RNBQKB1R w KQkq - 2 2'),
+        create_board_state_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),#"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"),
+        1,
+        OLD_BB_RANK_ATTACKS,
+        OLD_BB_FILE_ATTACKS,
+        OLD_BB_DIAG_ATTACKS,
+    )
+    print("Depth 4 perft test results:", perft_results, "in time", time.time()-starting_time, "\n")
+# jitted_perft_test()
